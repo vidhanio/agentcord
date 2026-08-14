@@ -1,7 +1,7 @@
 //! Transcript mirroring: cursor-based syncs of session transcripts into
 //! their forum posts — agent turns as plain messages, tool calls as
-//! single-argument text or stateful embeds (failed calls get an error
-//! reply), user turns as webhook echoes.
+//! single-argument text or stateful embeds (errors baked into the call's
+//! own message), user turns as webhook echoes.
 
 use std::path::Path;
 
@@ -21,7 +21,7 @@ use crate::{
         to_i64,
     },
     herdr::{Agent, SessionPath},
-    session::{AgentKind, SessionMessage, SessionRole, ToolCall, ToolState, read_session},
+    session::{AgentKind, SessionMessage, SessionRole, ToolCall, read_session},
     utils::split_lines,
 };
 
@@ -37,7 +37,7 @@ impl Forum {
     /// Syncs the session's transcript into its forum post: new agent turns
     /// are posted as plain messages, tool calls as single-argument text or
     /// stateful embeds (posted once, edited in place as they complete,
-    /// failed calls answered with an error reply embed), and new user
+    /// errors baked into the call's own message), and new user
     /// turns as echoes (skipped when the user already typed them). A
     /// backlog beyond
     /// [`crate::config::CATCHUP_BACKLOG`] messages (downtime, reconnect, a
@@ -552,10 +552,10 @@ impl Forum {
     /// Posts a tool call's message, or updates the already-posted message
     /// in place when the call's state changed since it was last posted: a
     /// call is posted exactly once — single-argument calls as plain text
-    /// (gear while running), the rest as stateful embeds — and later
-    /// completions edit that same message, with a failed call's error
-    /// posted as a reply embed to it. Returns the posted message id for a
-    /// fresh post, and `None` for an in-place edit or a repeat of an
+    /// (gear while running, red X and a code-block error once failed),
+    /// the rest as stateful embeds carrying an error field — and later
+    /// completions edit that same message. Returns the posted message id
+    /// for a fresh post, and `None` for an in-place edit or a repeat of an
     /// unchanged state — the cursor treats `None` like a user-echo skip
     /// (the message was already counted).
     async fn sync_tool_embed(
@@ -595,16 +595,12 @@ impl Forum {
             .copied();
 
         let Some((message_id, posted_state)) = posted else {
-            // First sight of this call: post it and remember it before the
-            // error reply, so a reply failure can never re-post the call.
+            // First sight of this call: post it and remember it.
             let id = self.post_tool_call(ctx, post, call).await?;
             self.tool_messages
                 .lock()
                 .expect("tool_messages lock poisoned")
                 .insert(key, (id, call.state));
-            if call.state == ToolState::Failed {
-                self.post_tool_error(ctx, post, id, call).await;
-            }
             return Ok(Some(id));
         };
 
@@ -614,15 +610,13 @@ impl Forum {
         }
 
         // The call completed since it was posted: refresh the message in
-        // place, then surface a failure as a reply embed.
+        // place — the embed recolours, the text form swaps its gear for
+        // the failure X and appends the error block.
         self.update_tool_call(ctx, post, message_id, call).await?;
         self.tool_messages
             .lock()
             .expect("tool_messages lock poisoned")
             .insert(key, (message_id, call.state));
-        if call.state == ToolState::Failed {
-            self.post_tool_error(ctx, post, message_id, call).await;
-        }
         Ok(None)
     }
 
@@ -643,7 +637,8 @@ impl Forum {
     }
 
     /// Edits a posted tool call's message in place for its new state: the
-    /// running gear comes off the text form, the embed recolours.
+    /// gear comes off the text form (or the failure X and error block
+    /// appear), the embed recolours.
     async fn update_tool_call(
         &self,
         ctx: &Context,
@@ -657,32 +652,5 @@ impl Forum {
         );
         post.edit_message(ctx, message_id, edit).await?;
         Ok(())
-    }
-
-    /// Replies to a failed tool call's message with the error embed. Best
-    /// effort: the call's message itself already shows the failure state,
-    /// and losing the error text to a transient Discord error must not
-    /// stall the sync.
-    async fn post_tool_error(
-        &self,
-        ctx: &Context,
-        post: ChannelId,
-        message_id: MessageId,
-        call: &ToolCall,
-    ) {
-        let Some(error) = &call.error else {
-            return;
-        };
-        if let Err(error) = post
-            .send_message(
-                ctx,
-                CreateMessage::new()
-                    .reference_message((post, message_id))
-                    .embed(crate::utils::tool_error_embed(error)),
-            )
-            .await
-        {
-            warn!(?error, %message_id, "failed to post tool error reply");
-        }
     }
 }

@@ -110,12 +110,13 @@ agents.
   call, posted once and **edited in place** when the call completes (the
   colour carries running/done/failed; the `tool_messages` map tracks the
   posted message). Single-argument calls post as plain text —
-  `⚙️ **name** \`value\`` while running, gear off once resolved, the
-  single field's value with no field name (newlines or values longer than
-  100 chars switch to a code block) — multi-argument calls keep the
-  field-per-argument embed, and a failed call's error is posted as a
-  **reply embed** (`error` title, code-block body) to the call's message,
-  never baked into it. omp records some calls (`hub`, `task`, …) without
+  `⚙️ **name** \`value\`` while running, gear off once resolved (the
+  gear becomes ❌ and the error is appended as a code block underneath
+  when the call fails), the single field's value with no field name
+  (newlines or values longer than 100 chars switch to a code block) —
+  multi-argument calls keep the field-per-argument embed, and a failed
+  call's error is an `error` embed field on it. omp records some calls
+  (`hub`, `task`, …) without
   arguments; the parser falls back to the record's `intent` as the single
   argument. Posted-message bookkeeping lives on the
   session row (`synced_messages`, `last_discord_message_id`,
