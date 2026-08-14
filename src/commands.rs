@@ -75,18 +75,25 @@ pub fn framework(bot: &Bot) -> BotFramework {
 impl serenity::Framework for BotFramework {
     async fn init(&mut self, client: &serenity::Client) {
         self.poise.init(client).await;
-        if let Err(error) = poise::builtins::register_in_guild(
-            &client.http,
-            &self.poise.options().commands,
-            self.guild_id,
-        )
-        .await
-        {
-            warn!(?error, "failed to register slash commands");
-        }
     }
 
     async fn dispatch(&self, ctx: &serenity::Context, event: &serenity::FullEvent) {
+        // Command registration needs the application id on the HTTP
+        // client; the Ready payload is the first reliable source for it,
+        // so the (idempotent) guild registration happens here instead of
+        // `init`.
+        if let serenity::FullEvent::Ready { data_about_bot, .. } = event {
+            ctx.http.set_application_id(data_about_bot.application.id);
+            if let Err(error) = poise::builtins::register_in_guild(
+                &ctx.http,
+                &self.poise.options().commands,
+                self.guild_id,
+            )
+            .await
+            {
+                warn!(?error, "failed to register slash commands");
+            }
+        }
         self.poise.dispatch(ctx, event).await;
     }
 }
