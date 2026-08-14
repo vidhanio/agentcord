@@ -39,6 +39,7 @@ nutype = { version = "0.7.0", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
 ] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [lints]
 [lints.rust]

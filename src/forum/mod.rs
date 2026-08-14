@@ -245,7 +245,9 @@ impl Forum {
             .collect())
     }
 
-    /// Applies `kind` + `status` tags and the post title to a session post.
+    /// Applies `kind` + `status` tags and the post title to a session post
+    /// and reopens it: a live agent's post is always open, so an archived
+    /// thread (closed on session death, or auto-archived) is unarchived.
     /// Tags are applied unconditionally — herdr is the truth, Discord
     /// mirrors it, and every write is cheap enough to repeat. The title
     /// rename is skipped when it is unchanged: renaming the thread makes
@@ -275,13 +277,27 @@ impl Forum {
         }
 
         let mut builder = EditThread::new().applied_tags(applied);
-        if let Some(title) = title {
-            let changed = match self.forum_channel(ctx, post).await {
-                Ok(channel) => channel.name != title,
-                Err(_) => true,
-            };
-            if changed {
-                builder = builder.name(title);
+        match self.forum_channel(ctx, post).await {
+            Ok(channel) => {
+                if channel
+                    .thread_metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.archived)
+                {
+                    builder = builder.archived(false);
+                }
+                if let Some(title) = title
+                    && channel.name != title
+                {
+                    builder = builder.name(title);
+                }
+            }
+            Err(_) => {
+                // Unknown thread state; keep the old rename-when-untested
+                // behavior and leave the archive state alone.
+                if let Some(title) = title {
+                    builder = builder.name(title);
+                }
             }
         }
         post.edit_thread(ctx, builder).await?;
@@ -776,8 +792,8 @@ impl Forum {
     }
 
     /// Applies only the agent-kind tag to a dead session's post: the status
-    /// tag is dropped, the thread itself stays open (a message in it
-    /// resumes the session).
+    /// tag is dropped; the thread itself is closed (archived — a message
+    /// still unarchives it and resumes the session).
     async fn dead_post_tags(
         &self,
         ctx: &Context,
@@ -998,13 +1014,17 @@ fn tag_names(forum: &GuildChannel) -> HashMap<ForumTagId, &str> {
 
 /// The `agent.start` arguments that resume `session`'s conversation in its
 /// harness: omp resumes by transcript path, claude-code and codex by
-/// session id (the row key — herdr's reported session reference).
+/// session id (the row key — herdr's reported session reference), pi and
+/// opencode by session id via `--session`.
 #[must_use]
 fn resume_args(kind: AgentKind, session: &SessionRow) -> Vec<String> {
     match kind {
         AgentKind::Omp => vec![format!("--resume={}", session.transcript_path)],
         AgentKind::ClaudeCode => vec!["--resume".into(), session.session_path.clone()],
         AgentKind::Codex => vec!["resume".into(), session.session_path.clone()],
+        AgentKind::Pi | AgentKind::Opencode => {
+            vec!["--session".into(), session.session_path.clone()]
+        }
     }
 }
 
@@ -1142,6 +1162,14 @@ mod tests {
         assert_eq!(
             resume_args(AgentKind::Codex, &session),
             vec!["resume", "s1"]
+        );
+        assert_eq!(
+            resume_args(AgentKind::Pi, &session),
+            vec!["--session", "s1"]
+        );
+        assert_eq!(
+            resume_args(AgentKind::Opencode, &session),
+            vec!["--session", "s1"]
         );
     }
 

@@ -29,7 +29,8 @@ agents.
   `~/.omp/agent/sessions/…`). `SessionRow` in the state database keys posts
   by session path. Post titles follow the chain: the **transcript's own
   title record** (`title`/`title_change` for omp; `custom-title` >
-  `ai-title` > `summary` for claude-code; none for codex) — stable, unlike
+  `ai-title` > `summary` for claude-code; `session_info` `name` for pi;
+  the store's `session.title` for opencode; none for codex) — stable, unlike
   the animated terminal title — else herdr's **stripped terminal title**
   (`terminal_title_stripped`; herdr has already removed ANSI escapes and
   the leading activity glyph, so no local stripping exists). The agent
@@ -39,8 +40,8 @@ agents.
   message** is a one-line plain-text intro —
   `` `pane` · worktree `…` · cwd `…` · session `…` `` (kind/status are
   already on the tags; the worktree segment only appears when the agent
-  runs in a git worktree) — rewritten to `inactive · cwd …` when the
-  session dies.
+  runs in a git worktree) — rewritten to `inactive · cwd …` and the post
+  closed when the session dies.
 - **Transcripts can rotate under the session.** When a session is replaced
   in the same pane, omp starts a new transcript file and herdr may keep
   reporting the old path. The session row's `transcript_path` (initially the
@@ -64,21 +65,33 @@ agents.
   (posted message id + shown state per tool call). The first two are
   pruned when their session dies; the tool map is pruned when a session
   dies.
-- **Dead threads stay open and keep only their kind tag.** A dead
-  session's post is not locked: the status tag is dropped, the agent-kind
-  tag stays, and the starter message's pane part flips to `inactive`.
-  Users can keep typing in the thread — a message re-launches the agent
+- **Dead posts are closed and keep only their kind tag.** A dead
+  session's post is closed (archived, never locked): the status tag is
+  dropped, the agent-kind tag stays, and the starter message's pane part
+  flips to `inactive`. Users can keep typing in the thread — Discord
+  auto-unarchives it on the next message, which re-launches the agent
   **resuming the same conversation** (native harness resume:
-  `omp --resume=<path>`, `claude --resume <id>`, `codex resume <id>`; the
+  `omp --resume=<path>`, `claude --resume <id>`, `codex resume <id>`,
+  `pi --session <path-or-id>`, `opencode --session <id>`; the
   session row's key is herdr's reported session reference, which is
   exactly what each harness resumes) and relays the message to it. The
   post, its row, and the sync cursor are untouched by the resume — the
   transcript continues where it stopped. If the workspace is gone, the
   resume re-creates it.
+- **Post close/reopen is two-way.** The archive state mirrors herdr: a
+  live agent's sync reopens (unarchives) its post — a live agent's post
+  is always open — and the death flow closes it. Conversely, a user
+  closing a post deactivates its agent in herdr (the hosting tab is
+  closed, which runs the normal death flow), and reopening a dead
+  session's post resumes it without a message. The bot tells its own
+  archive writes apart from the user's by live-agent state: it only
+  closes dead posts and only reopens live ones, so its writes never feed
+  back into deactivate/resume.
 - **Posts launch agents; every other manual post is deleted.** The host
   user's (`ALLOWED_USER_ID`; everyone when unset) new post in a managed
   forum launches an agent in that workspace: the kind comes from the
-  post's applied tags (`omp`/`claude-code`/`codex`; no kind tag → the
+  post's applied tags (`omp`/`claude-code`/`codex`/`pi`/`opencode`; no kind
+  tag → the
   default; several kind tags or a tag the bot does not manage → DM the
   author and delete without launching), the prompt is the thread title
   plus the starter message body, and the host's post is deleted once the
@@ -103,9 +116,12 @@ agents.
   live-agent sync, so recovery happens without waiting for an event.
 - **Conversations come from session files.** The bot reads each agent's
   transcript file directly and normalizes it with per-harness parsers
-  (`src/session/`: `omp.rs`, `claude.rs`, `codex.rs` JSONL formats sharing
-  one completion pre-scan skeleton in `common.rs`), instead of scraping
-  terminal output. User/assistant turns are posted as plain messages;
+  (`src/session/`: `omp.rs`, `claude.rs`, `codex.rs`, `pi.rs` JSONL formats
+  sharing one completion pre-scan skeleton in `common.rs`), instead of
+  scraping terminal output. `opencode.rs` is the exception: opencode
+  persists sessions in a SQLite store
+  (`$XDG_DATA_HOME/opencode/opencode-<channel>.db`), so its transcript is
+  read from the store by session id (`read_session_messages`). User/assistant turns are posted as plain messages;
   **tool calls** are parsed out of each harness's tool records — one per
   call, posted once and **edited in place** when the call completes (the
   colour carries running/done/failed; the `tool_messages` map tracks the
@@ -171,6 +187,9 @@ Discord ──► EventHandler (src/lib.rs)
               │     title+body) then delete the post ──► relay the prompt
               │     other posts: deleted silently
               │
+              │  post closed/reopened (channel update) ──► close: deactivate the
+              │     agent (close its tab) · reopen: Forum::resume_session
+              │
               ├─ poll task (2s tick, src/forum/poll.rs)
               │    syncs every live session's transcript (cursor no-ops)
               │    + probes for transcript rotations (staleness + adoption)
@@ -198,7 +217,8 @@ Discord ──► EventHandler (src/lib.rs)
   and `read_session_title` (transcript-sourced titles per harness);
   `common.rs` is the shared parsing skeleton (text extraction, caps,
   completion pre-scan, tool-message builder); `omp.rs`/`claude.rs`/
-  `codex.rs` are the per-harness parsers. Malformed/empty lines are
+  `codex.rs`/`pi.rs` are the per-harness file parsers and `opencode.rs`
+  reads the opencode SQLite store. Malformed/empty lines are
   skipped; truncated final lines are tolerated. Line timestamps are not
   parsed (nothing consumes them).
 - `src/forum/` — forum↔herdr reconciliation. `mod.rs` holds the `Forum`
@@ -241,7 +261,7 @@ Discord ──► EventHandler (src/lib.rs)
 | `src/` | Bot core: `lib.rs` (Bot + EventHandler), `config.rs`, `error.rs`, `db.rs`, `relay.rs`, `utils.rs` |
 | `src/forum/` | Forum-side state: `mod.rs` (struct + lifecycle), `sync.rs` (transcript mirror), `events.rs` (event loop + reconcile), `poll.rs` (2s transcript poll + rotations), `titles.rs` (titles + starter message) |
 | `src/herdr/` | herdr Unix-socket client: `mod.rs` (client + models + errors), `event.rs` (subscription machinery), `wire.rs` (envelope + result payloads) |
-| `src/session/` | Transcript normalization: `mod.rs` (models + read_session), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs` (per-harness parsers) |
+| `src/session/` | Transcript normalization: `mod.rs` (models + read_session), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs`/`pi.rs` (per-harness file parsers), `opencode.rs` (opencode SQLite store reader) |
 | `tests/` | `herdr_live.rs` (live integration, gated) and `fixtures/api/` (captured herdr API JSON, embedded via `include_str!`) |
 | `.github/workflows/` | CI — `ci-cd.yaml` (test, test-docs, check/clippy, check-docs, check-format via the flake's treefmt check; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs, nix for formatting) and `security-audit.yaml` (daily + on manifest changes, cargo-deny) |
 

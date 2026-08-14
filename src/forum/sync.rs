@@ -21,7 +21,7 @@ use crate::{
         to_i64,
     },
     herdr::{Agent, SessionPath},
-    session::{AgentKind, SessionMessage, SessionRole, ToolCall, read_session},
+    session::{AgentKind, SessionMessage, SessionRole, ToolCall, read_session_messages},
     utils::split_lines,
 };
 
@@ -69,10 +69,11 @@ impl Forum {
         };
         let post = from_i64(post_id)?;
 
-        let messages = match read_session(kind, Path::new(&session.transcript_path)) {
+        let messages = match read_session_messages(kind, &session.transcript_path) {
             Ok(messages) => messages,
-            // The transcript may be mid-rotation (omp rewrites it via a
-            // delete+recreate dance); retry on the next trigger instead of
+            // The source may be missing: the transcript can be mid-rotation
+            // (omp rewrites it via a delete+recreate dance), or the opencode
+            // store may not exist yet. Retry on the next trigger instead of
             // aborting the sync.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => {
@@ -234,17 +235,27 @@ impl Forum {
         self.sync_agent_session(ctx, &agent).await;
     }
 
-    /// The live herdr agent hosting `session`, if any. Matches the agent's
+    /// Every live herdr agent hosting `session`: matches each agent's
     /// reported session value against the row's key and its adopted
     /// transcript.
+    pub(crate) async fn hosting_agents(&self, session: &SessionRow) -> Vec<Agent> {
+        self.herdr
+            .list_agents()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|agent| {
+                agent
+                    .agent_session
+                    .as_ref()
+                    .is_some_and(|agent_session| session.hosts(agent_session.value.as_str()))
+            })
+            .collect()
+    }
+
+    /// The live herdr agent hosting `session`, if any.
     async fn live_agent(&self, session: &SessionRow) -> Option<Agent> {
-        let agents = self.herdr.list_agents().await.ok()?;
-        agents.into_iter().find(|agent| {
-            agent
-                .agent_session
-                .as_ref()
-                .is_some_and(|agent_session| session.hosts(agent_session.value.as_str()))
-        })
+        self.hosting_agents(session).await.into_iter().next()
     }
 
     /// The agent kind of the live agent hosting `session`, if any.

@@ -783,6 +783,7 @@ dependencies = [
  "envy",
  "nutype",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "serenity",

@@ -3,7 +3,8 @@
 //! Each harness writes its own JSONL session format under a different path
 //! (`~/.omp/agent/sessions/...`, `~/.claude/projects/...`,
 //! `~/.codex/sessions/...`); [`read_session`] parses any of them into a
-//! common [`SessionMessage`] stream.
+//! common [`SessionMessage`] stream. `opencode` is the exception: its
+//! sessions live in a SQLite store and are read via [`read_session_messages`].
 
 use std::{
     fmt::{self, Display, Formatter},
@@ -18,10 +19,13 @@ mod claude;
 mod codex;
 mod common;
 mod omp;
+mod opencode;
+mod pi;
 
 pub use self::common::cap;
 use self::{
     claude::parse_claude_code, codex::parse_codex, common::TOOL_TEXT_LIMIT, omp::parse_omp,
+    pi::parse_pi,
 };
 
 /// The supported agent harnesses (strict enum — no free strings).
@@ -33,11 +37,21 @@ pub enum AgentKind {
     ClaudeCode,
     /// `Codex` CLI.
     Codex,
+    /// The `pi` agent CLI.
+    Pi,
+    /// The `opencode` agent CLI.
+    Opencode,
 }
 
 impl AgentKind {
     /// All supported agent kinds, in canonical order.
-    pub const ALL: [Self; 3] = [Self::Omp, Self::ClaudeCode, Self::Codex];
+    pub const ALL: [Self; 5] = [
+        Self::Omp,
+        Self::ClaudeCode,
+        Self::Codex,
+        Self::Pi,
+        Self::Opencode,
+    ];
 
     /// The canonical identifier used in session paths and configuration.
     #[must_use]
@@ -46,13 +60,16 @@ impl AgentKind {
             Self::Omp => "omp",
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
+            Self::Pi => "pi",
+            Self::Opencode => "opencode",
         }
     }
 
     /// Parses a kind from a string, case-insensitively.
     ///
     /// In addition to the canonical identifiers, `claude` and `claude_code`
-    /// are accepted as aliases for [`AgentKind::ClaudeCode`].
+    /// are accepted as aliases for [`AgentKind::ClaudeCode`]. `pi` and
+    /// `opencode` take no aliases.
     #[must_use]
     pub const fn parse(s: &str) -> Option<Self> {
         if s.eq_ignore_ascii_case("omp") {
@@ -67,6 +84,12 @@ impl AgentKind {
         if s.eq_ignore_ascii_case("codex") {
             return Some(Self::Codex);
         }
+        if s.eq_ignore_ascii_case("pi") {
+            return Some(Self::Pi);
+        }
+        if s.eq_ignore_ascii_case("opencode") {
+            return Some(Self::Opencode);
+        }
         None
     }
 
@@ -77,6 +100,8 @@ impl AgentKind {
             Self::Omp => "Omp",
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
+            Self::Pi => "Pi",
+            Self::Opencode => "OpenCode",
         }
     }
 }
@@ -181,13 +206,38 @@ pub struct SessionMessage {
 /// empty or whitespace-only are skipped, and a truncated final line is
 /// tolerated. Synchronous: transcript files are small, so callers may run
 /// this on a Tokio task.
+///
+/// `Opencode` sessions live in a SQLite store rather than a transcript file,
+/// so this returns [`std::io::ErrorKind::Unsupported`] for them — use
+/// [`read_session_messages`] instead.
 pub fn read_session(kind: AgentKind, path: &Path) -> IoResult<Vec<SessionMessage>> {
     let raw = std::fs::read_to_string(path)?;
     Ok(match kind {
         AgentKind::Omp => parse_omp(&raw),
         AgentKind::ClaudeCode => parse_claude_code(&raw),
         AgentKind::Codex => parse_codex(&raw),
+        AgentKind::Pi => parse_pi(&raw),
+        AgentKind::Opencode => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "opencode sessions are store-backed",
+            ));
+        }
     })
+}
+
+/// Reads a session's messages by kind.
+///
+/// `Opencode` sessions come from their SQLite store, keyed by session id
+/// (`path_or_id` is the store's session id); every other kind comes from
+/// its transcript file (`path_or_id` is the file path), with the same
+/// semantics as [`read_session`].
+pub fn read_session_messages(kind: AgentKind, path_or_id: &str) -> IoResult<Vec<SessionMessage>> {
+    if kind == AgentKind::Opencode {
+        return opencode::open_opencode_db()
+            .and_then(|conn| opencode::read_opencode_session(&conn, path_or_id));
+    }
+    read_session(kind, Path::new(path_or_id))
 }
 
 /// Reads the session's own title from its transcript, when the harness
@@ -198,13 +248,22 @@ pub fn read_session(kind: AgentKind, path: &Path) -> IoResult<Vec<SessionMessage
 ///   `{"type":"title_change","title":…}` (legacy) records; the last one wins.
 /// - `claude-code`: `custom-title` (user-set), `ai-title` (auto), or the
 ///   first-line `summary`, in that priority.
+/// - `pi`: `{"type":"session_info","name":…}` records; the last one wins.
+/// - `opencode`: the store's `session.title` column for the session id (the
+///   path's string form).
 /// - `codex`: no title record; `None`.
 ///
-/// `None` when the file is missing or no usable title exists yet.
+/// `None` when the source is missing or no usable title exists yet.
 #[must_use]
 pub fn read_session_title(kind: AgentKind, path: &Path) -> Option<String> {
     if kind == AgentKind::Codex {
         return None;
+    }
+    if kind == AgentKind::Opencode {
+        let session_id = path.to_string_lossy();
+        return opencode::open_opencode_db()
+            .ok()
+            .and_then(|conn| opencode::read_opencode_title(&conn, &session_id));
     }
     let file = std::fs::File::open(path).ok()?;
     let mut title: Option<String> = None;
@@ -220,6 +279,9 @@ pub fn read_session_title(kind: AgentKind, path: &Path) -> Option<String> {
                     .get("title")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
+            }
+            (AgentKind::Pi, Some("session_info")) => {
+                title = value.get("name").and_then(Value::as_str).map(str::to_owned);
             }
             (AgentKind::ClaudeCode, Some("custom-title")) => {
                 custom = value
@@ -266,10 +328,14 @@ mod tests {
         assert_eq!(AgentKind::Omp.as_str(), "omp");
         assert_eq!(AgentKind::ClaudeCode.as_str(), "claude-code");
         assert_eq!(AgentKind::Codex.as_str(), "codex");
+        assert_eq!(AgentKind::Pi.as_str(), "pi");
+        assert_eq!(AgentKind::Opencode.as_str(), "opencode");
         assert_eq!(AgentKind::Omp.label(), "Omp");
         assert_eq!(AgentKind::ClaudeCode.label(), "Claude Code");
         assert_eq!(AgentKind::Codex.label(), "Codex");
-        assert_eq!(AgentKind::ALL.len(), 3);
+        assert_eq!(AgentKind::Pi.label(), "Pi");
+        assert_eq!(AgentKind::Opencode.label(), "OpenCode");
+        assert_eq!(AgentKind::ALL.len(), 5);
 
         assert_eq!(AgentKind::parse("OMP"), Some(AgentKind::Omp));
         assert_eq!(AgentKind::parse("OmP"), Some(AgentKind::Omp));
@@ -278,10 +344,17 @@ mod tests {
         assert_eq!(AgentKind::parse("claude_code"), Some(AgentKind::ClaudeCode));
         assert_eq!(AgentKind::parse("Claude_Code"), Some(AgentKind::ClaudeCode));
         assert_eq!(AgentKind::parse("CODEX"), Some(AgentKind::Codex));
+        assert_eq!(AgentKind::parse("pi"), Some(AgentKind::Pi));
+        assert_eq!(AgentKind::parse("PI"), Some(AgentKind::Pi));
+        assert_eq!(AgentKind::parse("Pi"), Some(AgentKind::Pi));
+        assert_eq!(AgentKind::parse("opencode"), Some(AgentKind::Opencode));
+        assert_eq!(AgentKind::parse("OPENCODE"), Some(AgentKind::Opencode));
+        assert_eq!(AgentKind::parse("OpenCode"), Some(AgentKind::Opencode));
 
         assert_eq!(AgentKind::parse(""), None);
         assert_eq!(AgentKind::parse("gpt"), None);
         assert_eq!(AgentKind::parse(" claude-code "), None);
+        assert_eq!(AgentKind::parse("open_code"), None);
     }
 
     #[test]

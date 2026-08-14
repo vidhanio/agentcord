@@ -3,7 +3,7 @@
 
 use std::{collections::HashSet, path::Path};
 
-use serenity::all::Context;
+use serenity::all::{Context, EditThread};
 use tracing::{info, warn};
 
 use crate::{
@@ -17,14 +17,10 @@ use crate::{
 
 impl Forum {
     /// Marks a session's post inactive: the status tag is dropped (the
-    /// agent-kind tag stays) and the starter message's pane part flips to
-    /// the inactive marker. The thread itself stays open — a message in it
-    /// resumes the session.
-    ///
-    /// Marks a session's post inactive: the status tag is dropped (the
-    /// agent-kind tag stays) and the starter message's pane part flips to
-    /// the inactive marker. The thread itself stays open — a message in it
-    /// resumes the session.
+    /// agent-kind tag stays), the starter message's pane part flips to the
+    /// inactive marker, and the thread is closed — archived, never locked,
+    /// so a message still auto-unarchives it and resumes the session. A
+    /// live agent's sync reopens it.
     async fn inactivate_post(&self, ctx: &Context, session: &crate::db::SessionRow) {
         let Some(post_id) = session.post_channel_id else {
             return;
@@ -54,12 +50,26 @@ impl Forum {
                 "failed to mark session starter inactive"
             );
         }
+        // The post is closed while the session is dead. Archived, never
+        // locked: a message still auto-unarchives the thread and resumes
+        // the session. The active path reopens it.
+        if let Err(error) = post
+            .edit_thread(ctx, EditThread::new().archived(true))
+            .await
+        {
+            warn!(
+                ?error,
+                session = %session.session_path,
+                "failed to close inactive session post"
+            );
+        }
     }
 
     /// Reconciles the forums with herdr: ensures (and renames) a forum per
     /// workspace, ensures and syncs a post per agent session, drops the
-    /// status tags of posts whose session has no live agent (the kind tag
-    /// stays, and the thread stays open for a resume), prunes stale
+    /// status tags and closes the posts of sessions with no live agent
+    /// (the kind tag stays; a message still unarchives the thread and
+    /// resumes the session), prunes stale
     /// workspace/session rows whose Discord channels are gone, and prunes
     /// the pane→session map of panes herdr no longer reports. herdr is the
     /// source of truth for live state; the database holds the bindings and
@@ -110,11 +120,11 @@ impl Forum {
             .retain(|pane, _| live_panes.contains(pane));
 
         // Sessions whose agent is gone get their post inactivated (status
-        // tag dropped, starter marked inactive), and their tool-embed
-        // bookkeeping is dropped. A session is live when any agent's
-        // session value matches its key or adopted transcript. A dead
-        // session whose post was deleted too is stale: the row is pruned
-        // instead of inactivated, so it stops producing 404 noise.
+        // tag dropped, starter marked inactive, post closed), and their
+        // tool-embed bookkeeping is dropped. A session is live when any
+        // agent's session value matches its key or adopted transcript. A
+        // dead session whose post was deleted too is stale: the row is
+        // pruned instead of inactivated, so it stops producing 404 noise.
         self.prune_stale_sessions(ctx, &live_paths).await;
 
         Ok(())
@@ -173,7 +183,7 @@ impl Forum {
     /// Deletes session rows whose post was deleted and whose agent is gone:
     /// the thread is unrecoverable, so the row is stale state. Dead
     /// sessions with a live post are inactivated instead (status tag
-    /// dropped, starter marked inactive).
+    /// dropped, starter marked inactive, post closed).
     async fn prune_stale_sessions(&self, ctx: &Context, live_paths: &HashSet<SessionPath>) {
         for session in self
             .db
