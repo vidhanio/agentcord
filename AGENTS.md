@@ -27,20 +27,20 @@ agents.
 - **Each forum post is one agent session.** Every agent launch is a session
   identified by its transcript path (`agent_session.value`, e.g.
   `~/.omp/agent/sessions/…`). `SessionRow` in the state database keys posts
-  by session path. Post titles follow the chain: the **agent name** when
-  it has one, else the **transcript's own title record** (`title`/
-  `title_change` for omp; `custom-title` > `ai-title` > `summary` for
-  claude-code; none for codex) — stable, unlike the animated terminal
-  title — else herdr's **stripped terminal title**
+  by session path. Post titles follow the chain: the **transcript's own
+  title record** (`title`/`title_change` for omp; `custom-title` >
+  `ai-title` > `summary` for claude-code; none for codex) — stable, unlike
+  the animated terminal title — else herdr's **stripped terminal title**
   (`terminal_title_stripped`; herdr has already removed ANSI escapes and
-  the leading activity glyph, so no local stripping exists). Thread
-  renames are skipped when the title is unchanged: renaming posts a
-  channel-name-change system message into the thread, so identical
-  renames would spam it. The post's **starter message** is a one-line
-  plain-text intro — `` `pane` · worktree `…` · cwd `…` · session `…` ``
-  (kind/status are already on the tags; the worktree segment only appears
-  when the agent runs in a git worktree) — rewritten to `inactive · cwd …`
-  when the session dies.
+  the leading activity glyph, so no local stripping exists). The agent
+  name is never used for titles. Thread renames are skipped when the title
+  is unchanged: renaming posts a channel-name-change system message into
+  the thread, so identical renames would spam it. The post's **starter
+  message** is a one-line plain-text intro —
+  `` `pane` · worktree `…` · cwd `…` · session `…` `` (kind/status are
+  already on the tags; the worktree segment only appears when the agent
+  runs in a git worktree) — rewritten to `inactive · cwd …` when the
+  session dies.
 - **Transcripts can rotate under the session.** When a session is replaced
   in the same pane, omp starts a new transcript file and herdr may keep
   reporting the old path. The session row's `transcript_path` (initially the

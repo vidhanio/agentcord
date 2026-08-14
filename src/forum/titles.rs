@@ -7,21 +7,17 @@ use crate::{
     session::AgentKind,
 };
 
-/// The post title for a session: the agent's name when it has one (stable,
-/// user-chosen), else the transcript's own title when the harness records
-/// one (stable — no terminal animation), else herdr's stripped terminal
-/// title. Truncated to Discord's 100-character thread-name limit.
+/// The post title for a session: the transcript's own title when the
+/// harness records one (stable — no terminal animation), else herdr's
+/// stripped terminal title. Truncated to Discord's 100-character
+/// thread-name limit. The agent name is deliberately not used — the
+/// transcript/terminal titles describe the work.
 #[must_use]
 pub fn session_title(agent: &Agent, kind: AgentKind, path: &Path) -> String {
-    agent
-        .name
-        .as_deref()
-        .map(str::to_owned)
-        .or_else(|| crate::session::read_session_title(kind, path))
-        .map_or_else(
-            || post_title(agent, kind),
-            |title| title.chars().take(100).collect(),
-        )
+    crate::session::read_session_title(kind, path).map_or_else(
+        || post_title(agent, kind),
+        |title| title.chars().take(100).collect(),
+    )
 }
 
 /// The title for a session's forum post: herdr's stripped terminal title
