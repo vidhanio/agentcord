@@ -250,25 +250,34 @@ Discord ──► EventHandler (src/lib.rs)
 There is **no rustup/rustc on PATH** — everything goes through nix. The
 toolchain is nightly (required for `rustfmt.toml` unstable options).
 
+**`nix develop` is the source of truth** — direnv (`.envrc` uses
+`use flake`) loads the same devshell. It provides the nightly toolchain,
+the treefmt wrapper, nil, cargo-deny, and prek, and builds the flake
+checks (clippy/doc/fmt/deny/nextest) so the environment is verified. The
+first load builds the checks; later loads are cached.
+
 ```sh
-# fmt (nightly rustfmt), lint, unit tests
-nix shell --inputs-from . 'rust-overlay#rust-nightly' 'nixpkgs#gcc' -c cargo fmt
-nix shell --inputs-from . 'rust-overlay#rust-nightly' 'nixpkgs#gcc' -c cargo clippy --all-targets -- -D warnings
-nix shell --inputs-from . 'rust-overlay#rust-nightly' 'nixpkgs#gcc' -c cargo test
+# inside the devshell (nix develop, or direnv on `cd`):
+cargo fmt                          # nightly rustfmt
+cargo clippy --all-targets -- -D warnings
+cargo test
 
 # live integration test (spawns real herdr agents; cleans up after itself)
-HERDR_LIVE_TESTS=1 nix shell --inputs-from . 'rust-overlay#rust-nightly' 'nixpkgs#gcc' -c cargo test --test herdr_live
+HERDR_LIVE_TESTS=1 cargo test --test herdr_live
 
 # build/run the binary
 nix build .#default && ./result/bin/herdcord
 nix run .#default
 
 # license/advisory check
-nix shell --inputs-from . 'nixpkgs#cargo-deny' 'nixpkgs#cargo' -c cargo deny check
+cargo deny check
 ```
 
-- `nix develop` works but **builds every flake check first** (slow) — prefer
-  the `nix shell` one-liners for iteration.
+Outside the devshell the same commands run via `nix shell` one-liners
+(e.g. `nix shell --inputs-from . 'rust-overlay#rust-nightly' 'nixpkgs#gcc' -c cargo test`).
+Every commit is guarded by a prek hook that runs `treefmt --ci` on the
+whole tree (`.pre-commit-config.yaml`); run it manually with `prek run`,
+wire it into git with `prek install`.
 - **CRITICAL:** the flake source is `src = ./.` which only includes
   **git-tracked** files. Any new file must be `git add`-ed before
   `nix build .#default`/`nix flake check`, or the sandbox build silently won't
@@ -426,7 +435,8 @@ nix shell --inputs-from . 'nixpkgs#cargo-deny' 'nixpkgs#cargo' -c cargo deny che
   (clippy, doc, fmt, deny, nextest). CI runs the same gates directly —
   `cargo test --all-targets` on stable, clippy/fmt/doc on nightly, and
   `cargo-deny` (see `.github/workflows/`); `nix flake check` remains the
-  local hermetic equivalent.
+  local hermetic equivalent. Every commit is additionally gated by a prek
+  hook running `treefmt --ci` on the whole tree (`.pre-commit-config.yaml`).
 - **Coverage expectations**: no coverage tooling; correctness is enforced by
   the fixture tests, the session parser + db tests, the live tests, and
   clippy's pedantic set. New herdr wire shapes should get a fixture +

@@ -1,0 +1,12 @@
+# pre-commit-compatible hook config, read natively by prek (and by
+# upstream pre-commit). Wire into git with `prek install`; run manually
+# with `prek run`.
+
+repos:
+  - repo: local
+    hooks:
+      - id: treefmt
+        name: treefmt
+        language: system
+        entry: treefmt --ci
+        pass_filenames: false

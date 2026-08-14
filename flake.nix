@@ -41,14 +41,12 @@
             # whole `tests` directory (fixtures with captured herdr API JSON
             # are embedded via `include_str!`). Anything else (docs, CI,
             # dotfiles) is noise that would churn rebuilds.
-            src =
-              pkgs.lib.cleanSourceWith {
-                src = ./.;
-                filter =
-                  path: type:
-                  craneLib.filterCargoSources path type
-                  || pkgs.lib.hasPrefix (toString ./tests) (toString path);
-              };
+            src = pkgs.lib.cleanSourceWith {
+              src = ./.;
+              filter =
+                path: type:
+                craneLib.filterCargoSources path type || pkgs.lib.hasPrefix (toString ./tests) (toString path);
+            };
             commonArgs = {
               inherit src;
               strictDeps = true;
@@ -109,7 +107,9 @@
               inherit (self') checks;
 
               packages = [
+                pkgs.cargo-deny
                 pkgs.nil
+                pkgs.prek
                 config.treefmt.build.wrapper
               ];
             };
