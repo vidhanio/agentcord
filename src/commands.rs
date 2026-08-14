@@ -209,7 +209,7 @@ async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), 
         let message = match outcome {
             Ok(link) => format!(
                 "launched a **{}** agent in workspace `{workspace_label}` — {link}",
-                kind.label()
+                kind.as_str()
             ),
             Err(error) => format!("couldn't launch the agent: {error}"),
         };
@@ -236,13 +236,12 @@ fn build_agent_modal<'a>(custom_id: &'a str, workspace_labels: &'a [String]) -> 
             options: AgentKind::ALL
                 .iter()
                 .map(|kind| {
-                    CreateSelectMenuOption::new(kind.label(), kind.as_str())
+                    CreateSelectMenuOption::new(kind.as_str(), kind.as_str())
                         .default_selection(*kind == DEFAULT_AGENT_KIND)
                 })
                 .collect(),
         },
-    )
-    .placeholder("agent harness");
+    );
     let workspace_menu = CreateSelectMenu::new(
         WORKSPACE_SELECT_ID,
         CreateSelectMenuKind::String {
@@ -251,13 +250,9 @@ fn build_agent_modal<'a>(custom_id: &'a str, workspace_labels: &'a [String]) -> 
                 .map(|label| CreateSelectMenuOption::new(label, label))
                 .collect(),
         },
-    )
-    .placeholder("workspace");
+    );
     let prompt = CreateInputText::new(InputTextStyle::Paragraph, PROMPT_INPUT_ID)
-        .placeholder("what should the agent do?")
-        .min_length(1)
-        .max_length(4000)
-        .required(true);
+        .placeholder("what should the agent do?");
 
     CreateModal::new(custom_id, "launch an agent").components(vec![
         CreateModalComponent::Label(CreateLabel::select_menu("agent harness", kind_menu)),
