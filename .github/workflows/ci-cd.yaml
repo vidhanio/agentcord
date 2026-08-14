@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  - push
+  - pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  flake-check:
+    name: Check Flake
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Cache Nix
+        uses: DeterminateSystems/magic-nix-cache-action@v9
+
+      # Single hermetic gate: the flake checks run clippy (-D warnings),
+      # doc, fmt, deny, and nextest on the pinned nightly toolchain, so the
+      # separate test/clippy/format jobs would only duplicate them.
+      - name: Check flake
+        run: nix flake check

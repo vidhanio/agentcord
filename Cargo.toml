@@ -1,0 +1,56 @@
+[package]
+name = "herdcord"
+version = "0.1.0"
+edition = "2024"
+
+authors = ["Vidhan Bhatt <me@vidhan.io>"]
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+color-eyre = "0.6"
+dirs = "5"
+dotenvy = "0.15"
+envy = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toasty = { version = "0.10.0", features = ["sqlite"] }
+serenity = { version = "0.12", default-features = false, features = [
+  "builder",
+  "cache",
+  "client",
+  "gateway",
+  "http",
+  "model",
+  "rustls_backend",
+  "utils",
+] }
+thiserror = "2"
+tokio = { version = "1", features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+nutype = { version = "0.7.0", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[lints]
+[lints.rust]
+missing_copy_implementations = "warn"
+missing_debug_implementations = "warn"
+# missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

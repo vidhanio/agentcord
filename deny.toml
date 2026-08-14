@@ -1,0 +1,23 @@
+[licenses]
+allow = [
+  "AGPL-3.0-or-later",
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Zlib",
+]
+
+# All four affect rustls-webpki 0.102 (CRL distribution-point matching, URI and
+# wildcard name constraint validation, CRL parsing panic), pulled in by serenity
+# 0.12's rustls backend. No patched 0.102.x release exists yet; the fix will
+# arrive with a rustls bump.
+[advisories]
+ignore = [
+  "RUSTSEC-2026-0049",
+  "RUSTSEC-2026-0098",
+  "RUSTSEC-2026-0099",
+  "RUSTSEC-2026-0104",
+]
