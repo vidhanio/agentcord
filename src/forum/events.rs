@@ -3,7 +3,7 @@
 
 use std::{collections::HashSet, path::Path};
 
-use serenity::all::{ChannelId, Context, EditThread};
+use serenity::all::{ChannelId, Context, EditThread, ThreadId};
 use tracing::{info, warn};
 
 use crate::{
@@ -59,8 +59,8 @@ impl Forum {
         // The post is closed while the session is dead. Archived, never
         // locked: a message still auto-unarchives the thread and resumes
         // the session. The active path reopens it.
-        if let Err(error) = post
-            .edit_thread(ctx, EditThread::new().archived(true))
+        if let Err(error) = ThreadId::new(post.get())
+            .edit(&ctx.http, EditThread::new().archived(true))
             .await
         {
             warn!(
@@ -75,12 +75,9 @@ impl Forum {
     /// unwrapped channel) counts as not archived, so the caller attempts
     /// its writes and surfaces the real error.
     async fn post_archived(&self, ctx: &Context, post: ChannelId) -> bool {
-        self.forum_channel(ctx, post).await.is_ok_and(|channel| {
-            channel
-                .thread_metadata
-                .as_ref()
-                .is_some_and(|metadata| metadata.archived)
-        })
+        self.forum_thread(ctx, post)
+            .await
+            .is_ok_and(|thread| thread.thread_metadata.archived())
     }
 
     /// Reconciles the forums with herdr: ensures (and renames) a forum per

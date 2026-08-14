@@ -3,7 +3,8 @@
 //! Each public method maps one herdr API method to a typed result, sends a
 //! single newline-delimited JSON request over the herdr Unix socket, and
 //! surfaces failures as [`Error`](enum@Error). The event-subscription
-//! machinery lives in [`event`]; the wire payload types in [`wire`].
+//! machinery lives in the `event` submodule; the wire payload types in the
+//! `wire` submodule.
 
 use std::{path::PathBuf, str::FromStr, time::Duration};
 
@@ -626,6 +627,21 @@ impl Herdr {
     pub async fn session_snapshot(&self) -> Result<Vec<Agent>, Error> {
         let snapshot: SnapshotResult = self.call_typed("session.snapshot", json!({})).await?;
         Ok(snapshot.snapshot.agents)
+    }
+
+    /// Stops the herdr server (`server.stop`), terminating its panes.
+    ///
+    /// The server answers the request and then quits; a connection that
+    /// dies mid-response surfaces as an [`Error::Io`], which callers
+    /// tearing a session down should tolerate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Herdr`], [`Error::Timeout`], [`Error::Io`], or
+    /// [`Error::Json`] when the request fails.
+    pub async fn stop_server(&self) -> Result<(), Error> {
+        let result = self.call("server.stop", json!({})).await?;
+        expect_ok(&result, "server.stop")
     }
 
     /// Opens a long-lived `events.subscribe` connection for `kinds` and

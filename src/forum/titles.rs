@@ -61,21 +61,6 @@ pub fn forum_channel_name(label: &str) -> String {
     fragment.chars().take(100).collect()
 }
 
-/// The agent prompt assembled from a forum post: the thread title, then
-/// the starter message body, separated by a blank line. Empty parts are
-/// omitted.
-#[must_use]
-pub fn post_prompt(title: &str, body: &str) -> String {
-    let title = title.trim();
-    let body = body.trim();
-    match (title.is_empty(), body.is_empty()) {
-        (true, true) => String::new(),
-        (true, false) => body.to_owned(),
-        (false, true) => title.to_owned(),
-        (false, false) => format!("{title}\n\n{body}"),
-    }
-}
-
 /// The session post's starter message: the pane, cwd, and session file as
 /// plain text, plus the checked-out branch when the agent runs in a git
 /// worktree. The kind and status are already on the post's tags, so the

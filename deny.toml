@@ -6,18 +6,8 @@ allow = [
   "CDLA-Permissive-2.0",
   "ISC",
   "MIT",
+  "MIT-0",
+  "MPL-2.0",
   "Unicode-3.0",
   "Zlib",
-]
-
-# All four affect rustls-webpki 0.102 (CRL distribution-point matching, URI and
-# wildcard name constraint validation, CRL parsing panic), pulled in by serenity
-# 0.12's rustls backend. No patched 0.102.x release exists yet; the fix will
-# arrive with a rustls bump.
-[advisories]
-ignore = [
-  "RUSTSEC-2026-0049",
-  "RUSTSEC-2026-0098",
-  "RUSTSEC-2026-0099",
-  "RUSTSEC-2026-0104",
 ]

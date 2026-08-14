@@ -17,6 +17,11 @@ use crate::session::AgentKind;
 /// tag.
 pub const DEFAULT_AGENT_KIND: AgentKind = AgentKind::Omp;
 
+/// The throwaway herdr session the `/herdr` control-plane agent runs in:
+/// its own named session, so the agent never shows up in the main session's
+/// workspaces, forums, or Discord mirroring.
+pub const CONTROL_SESSION_NAME: &str = "herdcord";
+
 /// How long one settle-wait call waits in a single request before the
 /// relay continues waiting silently.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -81,14 +86,29 @@ pub fn socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os("HERDR_SOCKET_PATH") {
         return PathBuf::from(path);
     }
-
-    let config_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("herdr");
     std::env::var_os("HERDR_SESSION").map_or_else(
-        || config_dir.join("herdr.sock"),
-        |session| config_dir.join("sessions").join(session).join("herdr.sock"),
+        || herdr_config_dir().join("herdr.sock"),
+        |session| session_socket_path(&session.to_string_lossy()),
     )
+}
+
+/// The API socket of the named herdr session `name`, regardless of any
+/// `HERDR_SOCKET_PATH` override — used for throwaway control sessions.
+#[must_use]
+pub fn session_socket_path(name: &str) -> PathBuf {
+    herdr_config_dir()
+        .join("sessions")
+        .join(name)
+        .join("herdr.sock")
+}
+
+/// herdr's config directory (`$XDG_CONFIG_HOME/herdr`, else
+/// `~/.config/herdr`): the parent of the main socket and the
+/// `sessions/<name>/` trees.
+fn herdr_config_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("herdr")
 }
 
 impl Debug for Config {

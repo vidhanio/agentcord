@@ -9,9 +9,9 @@ use std::{
 };
 
 use serenity::all::{
-    Channel, ChannelId, ChannelType, Context, CreateChannel, CreateForumTag, CreateMessage,
-    EditChannel, EditThread, ForumEmoji, ForumTag, ForumTagId, GetMessages, GuildChannel,
-    MessageId, ReactionType, Typing as TypingHandle, UserId,
+    Channel, ChannelId, ChannelType, Context, CreateChannel, CreateForumTag, EditChannel,
+    EditThread, ForumEmoji, ForumTag, ForumTagId, GetMessages, GuildChannel, GuildThread,
+    MessageId, ReactionType, ThreadId, Typing as TypingHandle, small_fixed_array::TruncatingInto,
 };
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
@@ -21,7 +21,7 @@ use crate::{
     config::Config,
     db::{Db, SessionRow, WorkspaceRow},
     error::BotError,
-    forum::titles::{forum_channel_name, post_prompt},
+    forum::titles::forum_channel_name,
     herdr::{Agent, AgentStatus, Herdr, PaneId, SessionPath, Workspace, WorkspaceId},
     session::{AgentKind, ToolCallId, ToolState},
 };
@@ -105,7 +105,7 @@ impl Typing {
         }
         self.tasks.insert(
             pane_id.clone(),
-            TypingHandle::start(Arc::clone(&ctx.http), post),
+            TypingHandle::start(Arc::clone(&ctx.http), post.widen()),
         );
     }
 }
@@ -113,38 +113,6 @@ impl Typing {
 /// Posted tool-embed bookkeeping: session path + tool call id → the posted
 /// message id and the state it currently shows.
 type ToolMessages = Arc<Mutex<HashMap<(SessionPath, ToolCallId), (MessageId, ToolState)>>>;
-
-/// A host-created forum post that should launch an agent: the spawn target,
-/// the agent identity, and the prompt assembled from the post.
-#[derive(Debug)]
-pub struct LaunchSpec {
-    /// The forum's herdr workspace, when it still exists; `None` spawns a
-    /// fresh workspace.
-    pub workspace: Option<Workspace>,
-    /// The sanitized agent name, unique among live agents.
-    pub name: String,
-    /// The agent kind selected by the post's tags.
-    pub kind: AgentKind,
-    /// The working directory for the new agent.
-    pub cwd: String,
-    /// The prompt: the post title, then its starter message body.
-    pub prompt: String,
-    /// The host's post; deleted once the launch settles.
-    pub post: ChannelId,
-    /// The post's author, notified when the launch fails.
-    pub author: UserId,
-}
-
-/// The agent kind a fresh forum post selects via its applied tags.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PostKind {
-    /// No kind tag applied: use the default kind.
-    Default,
-    /// Exactly one kind tag applied.
-    Kind(AgentKind),
-    /// Several kind tags, or a tag the bot does not manage: the reason.
-    Invalid(String),
-}
 
 /// Forum-side state: workspace forums, session-bound posts, and transcript
 /// syncing.
@@ -226,12 +194,13 @@ impl Forum {
                 .iter()
                 .copied()
                 .map(|(name, emoji)| {
-                    CreateForumTag::new(name).emoji(ReactionType::Unicode(emoji.to_owned()))
+                    CreateForumTag::new(name)
+                        .emoji(ReactionType::Unicode(emoji.to_owned().trunc_into()))
                 })
                 .collect();
             channel
                 .id
-                .edit(ctx, EditChannel::new().available_tags(tags))
+                .edit(&ctx.http, EditChannel::new().available_tags(tags))
                 .await?;
             // Re-fetch so the id map below sees the applied tag list.
             channel = self.forum_channel(ctx, channel_id).await?;
@@ -241,7 +210,7 @@ impl Forum {
             .available_tags
             .iter()
             .filter(|tag| managed.contains(&(tag.name.as_str(), tag_emoji(tag))))
-            .map(|tag| (tag.name.clone(), tag.id))
+            .map(|tag| (tag.name.as_str().to_owned(), tag.id))
             .collect())
     }
 
@@ -277,17 +246,13 @@ impl Forum {
         }
 
         let mut builder = EditThread::new().applied_tags(applied);
-        match self.forum_channel(ctx, post).await {
-            Ok(channel) => {
-                if channel
-                    .thread_metadata
-                    .as_ref()
-                    .is_some_and(|metadata| metadata.archived)
-                {
+        match self.forum_thread(ctx, post).await {
+            Ok(thread) => {
+                if thread.thread_metadata.archived() {
                     builder = builder.archived(false);
                 }
                 if let Some(title) = title
-                    && channel.name != title
+                    && thread.base.name.as_str() != title
                 {
                     builder = builder.name(title);
                 }
@@ -300,7 +265,7 @@ impl Forum {
                 }
             }
         }
-        post.edit_thread(ctx, builder).await?;
+        ThreadId::new(post.get()).edit(&ctx.http, builder).await?;
 
         Ok(())
     }
@@ -308,10 +273,10 @@ impl Forum {
     /// Whether `channel_id` still exists on Discord; `false` when it was
     /// deleted. Other failures propagate.
     async fn channel_exists(&self, ctx: &Context, channel_id: ChannelId) -> BotResult<bool> {
-        match ctx.http.get_channel(channel_id).await {
+        match ctx.http.get_channel(channel_id.widen()).await {
             Ok(_) => Ok(true),
             Err(serenity::Error::Http(serenity::all::HttpError::UnsuccessfulRequest(response)))
-                if response.status_code == reqwest::StatusCode::NOT_FOUND =>
+                if response.status_code == serenity::all::StatusCode::NOT_FOUND =>
             {
                 Ok(false)
             }
@@ -344,7 +309,7 @@ impl Forum {
         let created = self
             .config
             .guild_id
-            .create_channel(ctx, CreateChannel::new(name).kind(ChannelType::Forum))
+            .create_channel(&ctx.http, CreateChannel::new(name).kind(ChannelType::Forum))
             .await?;
         self.upsert_forum(&workspace, created.id).await?;
         info!(workspace = %workspace.label, forum = %created.id, "created workspace forum");
@@ -370,9 +335,9 @@ impl Forum {
         let forum_id = self.ensure_workspace_forum(ctx, workspace).await?;
         let forum = self.forum_channel(ctx, forum_id).await?;
         let expected = forum_channel_name(&workspace.label);
-        if forum.name != expected {
+        if forum.base.name.as_str() != expected {
             forum_id
-                .edit(ctx, EditChannel::new().name(expected.clone()))
+                .edit(&ctx.http, EditChannel::new().name(expected.clone()))
                 .await?;
             info!(workspace = %workspace.label, %expected, "renamed workspace forum");
         }
@@ -490,26 +455,21 @@ impl Forum {
     }
 
     /// Handles a new forum post. The bot's own posts are left alone (bound
-    /// sessions get their transcript caught up); a post created by the host
-    /// user becomes an agent launch — the kind comes from the post's tags
-    /// (the default when no kind tag is applied), the prompt from the
-    /// title plus the starter message — and any other manual post is
-    /// deleted silently. Returns the launch spec for host posts; the post
-    /// itself is deleted by the caller once the launch settles.
-    pub async fn handle_thread_create(
-        &self,
-        ctx: &Context,
-        thread: &GuildChannel,
-    ) -> BotResult<Option<LaunchSpec>> {
+    /// sessions get their transcript caught up); every manual post is
+    /// deleted silently — agents launch only through the `/agent` modal.
+    pub async fn handle_thread_create(&self, ctx: &Context, thread: &GuildThread) -> BotResult<()> {
         // Managed forums are found through the thread's parent: the forum
         // channel itself, which the workspace row binds.
-        let Some(forum_id) = thread.parent_id else {
-            return Ok(None);
-        };
-        let Some(workspace_row) = self.db.workspace_by_forum(to_i64(forum_id)?).await? else {
+        let forum_id = thread.parent_id;
+        if self
+            .db
+            .workspace_by_forum(to_i64(forum_id)?)
+            .await?
+            .is_none()
+        {
             // Not a forum channel this bot manages.
-            return Ok(None);
-        };
+            return Ok(());
+        }
 
         let post_id = to_i64(thread.id)?;
         if let Some(session) = self.db.session_by_post(post_id).await? {
@@ -519,127 +479,38 @@ impl Forum {
                 .live_agent_kind(&session)
                 .await
                 .unwrap_or(AgentKind::Omp);
-            let forum = self.forum_for_post(ctx, thread.id).await?;
+            let forum = self
+                .forum_for_post(ctx, ChannelId::new(thread.id.get()))
+                .await?;
             self.sync_session(ctx, &session, kind, forum).await?;
-            return Ok(None);
+            return Ok(());
         }
 
         // The bot's own fresh posts are not bound yet when the thread-create
         // event arrives; only inspect posts whose starter message isn't ours.
         let messages = thread
             .id
+            .widen()
             .messages(
                 &ctx.http,
                 GetMessages::new().limit(1).after(MessageId::new(1)),
             )
             .await?;
         let Some(starter) = messages.first() else {
-            return Ok(None);
+            return Ok(());
         };
         if starter.author.id == ctx.cache.current_user().id {
-            return Ok(None);
+            return Ok(());
         }
 
-        // Manual posts never survive; only the host's post launches an
-        // agent first.
-        let is_host = self
-            .config
-            .allowed_user_id
-            .is_none_or(|allowed| allowed == starter.author.id);
-        if !is_host {
-            info!(
-                thread = %thread.name,
-                author = ?starter.author.id,
-                "deleting manually created forum post"
-            );
-            thread.id.delete(&ctx.http).await?;
-            return Ok(None);
-        }
-
-        let kind = match self.post_kind(ctx, thread, forum_id).await? {
-            PostKind::Kind(kind) => kind,
-            PostKind::Default => crate::config::DEFAULT_AGENT_KIND,
-            PostKind::Invalid(reason) => {
-                info!(
-                    thread = %thread.name,
-                    %reason,
-                    "deleting host post with invalid kind tags"
-                );
-                if let Err(error) = starter
-                    .author
-                    .dm(
-                        ctx,
-                        CreateMessage::new().content(format!(
-                            "I couldn't launch an agent from your post: {reason}"
-                        )),
-                    )
-                    .await
-                {
-                    warn!(?error, "failed to DM post author about invalid tags");
-                }
-                thread.id.delete(&ctx.http).await?;
-                return Ok(None);
-            }
-        };
-
-        let workspace = self.workspace_by_label(&workspace_row.label).await?;
-        let base = sanitize_agent_name(&thread.name).unwrap_or_else(|| "agent".to_owned());
-        let name = self.unique_agent_name(&base).await?;
-        let cwd = self.launch_cwd(&workspace_row.label).await;
-
+        // Manual posts never survive; agents launch only through `/agent`.
         info!(
-            thread = %thread.name,
-            %name,
-            kind = kind.as_str(),
-            "host post launches agent"
+            thread = %thread.base.name,
+            author = ?starter.author.id,
+            "deleting manually created forum post"
         );
-
-        Ok(Some(LaunchSpec {
-            workspace,
-            name,
-            kind,
-            cwd,
-            prompt: post_prompt(&thread.name, &starter.content),
-            post: thread.id,
-            author: starter.author.id,
-        }))
-    }
-
-    /// The agent kind a fresh post selects via its applied tags: exactly one
-    /// kind tag (`omp`/`claude-code`/`codex`) → that kind; none → the
-    /// default; several kind tags or a tag the bot does not manage →
-    /// [`PostKind::Invalid`]. Status tags are ignored.
-    async fn post_kind(
-        &self,
-        ctx: &Context,
-        thread: &GuildChannel,
-        forum_id: ChannelId,
-    ) -> BotResult<PostKind> {
-        let forum = self.forum_channel(ctx, forum_id).await?;
-        let names = tag_names(&forum);
-        let mut kinds = Vec::new();
-        for tag_id in &thread.applied_tags {
-            let Some(name) = names.get(tag_id).copied() else {
-                return Ok(PostKind::Invalid(format!(
-                    "it carries tag id {tag_id}, which this bot does not manage"
-                )));
-            };
-            if let Some(kind) = AgentKind::parse(name) {
-                kinds.push(kind);
-            }
-        }
-        match kinds.len() {
-            0 => Ok(PostKind::Default),
-            1 => Ok(PostKind::Kind(kinds[0])),
-            _ => Ok(PostKind::Invalid(format!(
-                "it carries several agent-kind tags ({}); apply exactly one",
-                kinds
-                    .iter()
-                    .map(|kind| kind.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))),
-        }
+        thread.id.widen().delete(&ctx.http, None).await?;
+        Ok(())
     }
 
     /// The agent kind of the first agent-kind tag applied to `post`, if
@@ -648,7 +519,7 @@ impl Forum {
         let forum = self.forum_for_post(ctx, post).await?;
         let forum = self.forum_channel(ctx, forum).await?;
         let names = tag_names(&forum);
-        let post = self.forum_channel(ctx, post).await?;
+        let post = self.forum_thread(ctx, post).await?;
         Ok(post
             .applied_tags
             .iter()
@@ -658,7 +529,7 @@ impl Forum {
 
     /// A herdr agent name based on `base` that no live agent uses: `base`
     /// itself, or `base-2`, `base-3`, … when taken.
-    async fn unique_agent_name(&self, base: &str) -> BotResult<String> {
+    pub(crate) async fn unique_agent_name(&self, base: &str) -> BotResult<String> {
         let taken = self
             .herdr
             .list_agents()
@@ -682,7 +553,7 @@ impl Forum {
     /// The working directory for a new agent in `workspace_label`: the cwd
     /// of a live agent in the workspace when there is one, else the cwd of
     /// a previous session, else the user's home directory.
-    async fn launch_cwd(&self, workspace_label: &str) -> String {
+    pub(crate) async fn launch_cwd(&self, workspace_label: &str) -> String {
         // Agents report their workspace by herdr's positional id; match
         // through the workspace list so the identity is the label, the
         // same one the rows use.
@@ -746,7 +617,7 @@ impl Forum {
             .unwrap_or(crate::config::DEFAULT_AGENT_KIND);
         let args = resume_args(kind, session);
         let workspace = self.workspace_by_label(&session.workspace_label).await?;
-        let title = self.forum_channel(ctx, post).await?.name;
+        let title = self.forum_thread(ctx, post).await?.base.name;
         let base = sanitize_agent_name(&title).unwrap_or_else(|| "resumed".to_owned());
         let name = self.unique_agent_name(&base).await?;
 
@@ -806,7 +677,8 @@ impl Forum {
             .await?
             .and_then(|kind| ids.get(kind.as_str()).copied());
         let applied = kind_id.into_iter().collect::<Vec<_>>();
-        post.edit_thread(ctx, EditThread::new().applied_tags(applied))
+        ThreadId::new(post.get())
+            .edit(&ctx.http, EditThread::new().applied_tags(applied))
             .await?;
         Ok(())
     }
@@ -898,10 +770,11 @@ impl Forum {
 
     /// The forum channel containing `post` (its parent channel).
     async fn forum_for_post(&self, ctx: &Context, post: ChannelId) -> BotResult<ChannelId> {
-        match ctx.http.get_channel(post).await? {
+        match ctx.http.get_channel(post.widen()).await? {
             Channel::Guild(channel) => channel
                 .parent_id
                 .ok_or_else(|| BotError::Other(format!("post {post} is not in a forum"))),
+            Channel::GuildThread(thread) => Ok(thread.parent_id),
             _ => Err(BotError::Other(format!(
                 "post {post} is not a guild channel"
             ))),
@@ -917,7 +790,7 @@ impl Forum {
     }
 
     /// The herdr workspace with `label`, if any.
-    async fn workspace_by_label(&self, label: &str) -> BotResult<Option<Workspace>> {
+    pub(crate) async fn workspace_by_label(&self, label: &str) -> BotResult<Option<Workspace>> {
         let workspaces = self.herdr.list_workspaces().await?;
         Ok(workspaces
             .into_iter()
@@ -987,8 +860,17 @@ impl Forum {
     }
 
     async fn forum_channel(&self, ctx: &Context, channel_id: ChannelId) -> BotResult<GuildChannel> {
-        match ctx.http.get_channel(channel_id).await? {
+        match ctx.http.get_channel(channel_id.widen()).await? {
             Channel::Guild(channel) => Ok(channel),
+            _ => Err(BotError::ForumChannelNotFound),
+        }
+    }
+
+    /// The thread channel `thread_id` (a forum post) as a
+    /// [`GuildThread`], whose parent is the forum channel.
+    async fn forum_thread(&self, ctx: &Context, thread_id: ChannelId) -> BotResult<GuildThread> {
+        match ctx.http.get_channel(thread_id.widen()).await? {
+            Channel::GuildThread(thread) => Ok(thread),
             _ => Err(BotError::ForumChannelNotFound),
         }
     }
@@ -1035,7 +917,7 @@ fn to_i64(id: impl Into<u64>) -> BotResult<i64> {
 }
 
 /// Converts a database i64 back into a Discord channel id.
-fn from_i64(id: i64) -> BotResult<ChannelId> {
+pub fn from_i64(id: i64) -> BotResult<ChannelId> {
     u64::try_from(id)
         .map(ChannelId::new)
         .map_err(|_| BotError::Other(format!("{id} is not a valid channel id")))
@@ -1047,7 +929,7 @@ mod tests {
 
     use super::{
         resume_args, sanitize_agent_name,
-        titles::{forum_channel_name, post_prompt, post_title, session_intro},
+        titles::{forum_channel_name, post_title, session_intro},
     };
     use crate::{
         db::SessionRow,
@@ -1122,21 +1004,6 @@ mod tests {
         let mut agent = agent_fixture();
         agent.terminal_title_stripped = Some("a".repeat(500));
         assert_eq!(post_title(&agent, AgentKind::Omp).chars().count(), 100);
-    }
-
-    #[test]
-    fn post_prompt_combines_title_and_body() {
-        assert_eq!(
-            post_prompt("Fix the bug", "It crashes on startup."),
-            "Fix the bug\n\nIt crashes on startup."
-        );
-    }
-
-    #[test]
-    fn post_prompt_omits_empty_parts() {
-        assert_eq!(post_prompt("", "Just a body"), "Just a body");
-        assert_eq!(post_prompt("  Just a title  ", "   "), "Just a title");
-        assert_eq!(post_prompt("", ""), "");
     }
 
     #[test]

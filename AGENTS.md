@@ -65,6 +65,16 @@ agents.
   (posted message id + shown state per tool call). The first two are
   pruned when their session dies; the tool map is pruned when a session
   dies.
+- **`/herdr` runs a one-shot control plane.** It spawns a throwaway named
+  herdr session (`herdcord` under `$XDG_CONFIG_HOME/herdr/sessions/`, its
+  own headless server started via `setsid -f env HERDR_SESSION=herdcord
+  herdr server`) that never appears in the main session's workspaces,
+  forums, or Discord mirroring. The agent gets an injected control-plane
+  prompt (load the herdr skill, perform the user's action, reply with a
+  one-line acknowledgment), and the bot relays that acknowledgment as an
+  ephemeral in-channel reply. The session is stopped and deleted after
+  every run — also when the run fails, so a crashed run never leaves a
+  stray server.
 - **Dead posts are closed and keep only their kind tag.** A dead
   session's post is closed (archived, never locked): the status tag is
   dropped, the agent-kind tag stays, and the starter message's pane part
@@ -84,26 +94,24 @@ agents.
   touch herdr: closing or reopening a post never deactivates or resumes
   its agent. Resuming a dead session happens only through a message in
   the thread.
-- **Posts launch agents; every other manual post is deleted.** The host
-  user's (`ALLOWED_USER_ID`; everyone when unset) new post in a managed
-  forum launches an agent in that workspace: the kind comes from the
-  post's applied tags (`omp`/`claude-code`/`codex`/`pi`/`opencode`; no kind
-  tag → the
-  default; several kind tags or a tag the bot does not manage → DM the
-  author and delete without launching), the prompt is the thread title
-  plus the starter message body, and the host's post is deleted once the
-  launch settles (with a DM when the launch fails). Any other manual post
-  is deleted silently. The bot's own posts are recognized by the starter
-  message's author (fresh posts aren't session-bound yet when the
-  `thread_create` event arrives) and by the session binding.
+- **Agents launch through slash commands; manual forum posts are deleted.**
+  `/agent` (global guild command) opens a Discord native modal — an
+  agent-harness dropdown (preselected to the configured default kind), a
+  workspace dropdown (live herdr workspaces), and a multiline prompt
+  input — and launches the agent with the same spawn/bind/relay flow the
+  forum launch used: spawn in the workspace, bind the session to a forum
+  post, relay the prompt, reply ephemerally with the thread link. `/herdr`
+  runs a one-shot control-plane agent in a throwaway herdr session (see
+  below). Any manual post in a managed forum is deleted silently, and the
+  bot's own posts get their transcript caught up; the host-user launch
+  path is gone.
 - **Forum tags describe the session**: the agent kind (`omp`, `claude-code`,
   `codex`, … 🤖) and the lifecycle status (`idle`/`working`/`blocked`/`done`/
   `unknown`). The bot owns a forum's tags outright: every tag write replaces
   the list with the managed set (the 5 statuses + one tag per agent kind),
   so tags this bot does not manage are dropped. Stateless — the forum's tag
-  list is fetched fresh on each write. A post's kind tag doubles as the
-  launch selector for new posts and as the resume kind for dead threads;
-  on death the applied tags are pruned to just the kind tag.
+  list is fetched fresh on each write. A dead thread's kind tag is the
+  resume kind; on death the applied tags are pruned to just the kind tag.
 - **Deleted forums and posts are re-created.** A workspace always gets its
   forum channel (`ensure_workspace_forum` re-creates a deleted one and
   re-binds the mapping) and a live agent always gets its post
@@ -160,7 +168,7 @@ agents.
 ## Architecture & Data Flow
 
 ```
-Discord ──► EventHandler (src/lib.rs)
+Discord ──► Bot event handler (src/lib.rs, serenity EventHandler::dispatch)
               │  message in a live session's forum post ──► Relay.submit (src/relay.rs)
               │                              │ per-agent FIFO worker (mpsc, 1 at a time;
               │                              │ job carries session_path + post channel)
@@ -180,9 +188,19 @@ Discord ──► EventHandler (src/lib.rs)
               │                              workspace → relay the message)
               │
               │  new post in a managed forum ──► Forum::handle_thread_create
-              │     host post: launch agent (kind from tags, prompt from
-              │     title+body) then delete the post ──► relay the prompt
-              │     other posts: deleted silently
+              │     bot's own posts: transcript caught up
+              │     manual posts: deleted silently (agents launch via /agent)
+              │
+Discord ──► poise framework (src/commands.rs, serenity Framework)
+              │  /agent ──► native modal (harness dropdown w/ default kind,
+              │             workspace dropdown, prompt input)
+              │     submit ──► launch_from_modal: spawn → bind session post →
+              │                relay the prompt → ephemeral thread link
+              │  /herdr ──► control::run_control_agent (src/control.rs):
+              │     throwaway `herdcord` herdr session (own headless server,
+              │     no forum/mirroring) → one-shot agent with the injected
+              │     control-plane prompt → ephemeral acknowledgment
+              │     (session stopped + deleted after every run)
               │
               ├─ poll task (2s tick, src/forum/poll.rs)
               │    syncs every live session's transcript (cursor no-ops)
@@ -217,19 +235,34 @@ Discord ──► EventHandler (src/lib.rs)
   parsed (nothing consumes them).
 - `src/forum/` — forum↔herdr reconciliation. `mod.rs` holds the `Forum`
   struct and the workspace-forum/session-post lifecycle (ensure/rename
-  forums, ensure posts, tag application, manual-post handling — host
-  posts become `LaunchSpec`s, everything else is deleted, dead-thread
+  forums, ensure posts, tag application, manual-post deletion, dead-thread
   tag pruning, session resume, spawn helpers); `sync.rs` the transcript
   mirror (cursor sync, tool embeds, user echoes, starter-message
   refresh); `events.rs` the `events.subscribe` loop, `reconcile`, and
   pane lifecycle handling (`workspace.closed` inactivates the workspace's
   sessions instantly — herdr emits no per-pane events for it); `poll.rs`
   the 2s transcript poll + rotation adoption; `titles.rs` the post-title
-  selection, the `post_prompt` assembly, and the one-line starter message
-  (`` `pane` · cwd `…` · session `…` ``, the pane part reading `inactive`
-  once the agent is gone). Agents are spawned with an explicitly declared
-  workspace + cwd: launch-from-post resolves the cwd from a live agent in
-  the workspace, else a previous session row, else the home directory.
+  selection and the one-line starter message (`` `pane` · cwd `…` ·
+  session `…` ``, the pane part reading `inactive` once the agent is
+  gone). Agents are spawned with an explicitly declared workspace + cwd:
+  `/agent` resolves the cwd from a live agent in the workspace, else a
+  previous session row, else the home directory.
+- `src/commands.rs` — the poise framework (registered as serenity's
+  `Framework`, guild-only commands): `/agent` builds a native modal (kind
+  dropdown defaulted to `DEFAULT_AGENT_KIND`, workspace dropdown, prompt
+  input) by hand — poise's derive only knows text inputs — sends it as the
+  command's initial response, awaits the submit through serenity's modal
+  collector, defers the submit, and launches via the forum's spawn/bind/
+  relay helpers, editing the deferred response with the thread link;
+  `/herdr` defers ephemerally and runs `control::run_control_agent`,
+  relaying the acknowledgment. The `allowed` check gates both commands on
+  `ALLOWED_USER_ID`.
+- `src/control.rs` — the `/herdr` one-shot runner: starts the throwaway
+  session's headless server (`setsid -f env HERDR_SESSION=<name> herdr
+  server`), drives a fresh `Herdr` client on its socket (workspace →
+  agent → prompt → settle), reads the agent's final reply from its
+  transcript, then stops the server and deletes the session directory —
+  before and after every run.
 - `src/relay.rs` — per-agent conversation workers (keyed by pane id —
   agents are unnamed; the `RelayJob` carries the session path): one `mpsc`
   channel per agent (shared `Arc<Mutex<HashMap>>` of senders with
@@ -243,17 +276,19 @@ Discord ──► EventHandler (src/lib.rs)
   the session file (post the new messages since the last sync) and post the
   blocked notice (deduped per pane within 30s, since several outstanding
   prompts can settle into one blocked state).
-- `src/lib.rs` (Bot + EventHandler) — the launch-from-post orchestration
-  (`launch_from_post`: spawn → bind session → relay the prompt → delete
-  the host's post, DM on failure) and the dead-thread resume path
-  (`resume_session_and_relay`).
+- `src/lib.rs` (Bot + event handler) — the serenity `EventHandler` in its
+  `dispatch` form (Ready spawns the poll + event loop; ThreadCreate is
+  delegated to `handle_thread_create`; Message relays to sessions and
+  resumes dead ones), plus the `run()` wiring: `Http` with the default
+  ratelimiter (no custom client — the next-branch ratelimiter no longer
+  wedges), `ClientBuilder` with the bot handler and the poise framework.
 
 ## Key Directories
 
 | Path | Purpose |
 |---|---|
-| `src/` | Bot core: `lib.rs` (Bot + EventHandler), `config.rs`, `error.rs`, `db.rs`, `relay.rs`, `utils.rs` |
-| `src/forum/` | Forum-side state: `mod.rs` (struct + lifecycle), `sync.rs` (transcript mirror), `events.rs` (event loop + reconcile), `poll.rs` (2s transcript poll + rotations), `titles.rs` (titles + starter message) |
+|`src/`|Bot core: `lib.rs` (Bot + event-handler dispatch), `config.rs`, `error.rs`, `db.rs`, `relay.rs`, `commands.rs` (poise slash commands: the `/agent` modal, `/herdr`), `control.rs` (the `/herdr` one-shot control-plane runner), `utils.rs`|
+|`src/forum/`|Forum-side state: `mod.rs` (struct + lifecycle), `sync.rs` (transcript mirror), `events.rs` (event loop + reconcile), `poll.rs` (2s transcript poll + rotations), `titles.rs` (titles + starter message)|
 | `src/herdr/` | herdr Unix-socket client: `mod.rs` (client + models + errors), `event.rs` (subscription machinery), `wire.rs` (envelope + result payloads) |
 | `src/session/` | Transcript normalization: `mod.rs` (models + read_session), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs`/`pi.rs` (per-harness file parsers), `opencode.rs` (opencode SQLite store reader) |
 | `tests/` | `herdr_live.rs` (live integration, gated) and `fixtures/api/` (captured herdr API JSON, embedded via `include_str!`) |
@@ -370,11 +405,12 @@ wire it into git with `prek install`.
 - `src/main.rs` — entry: color_eyre, dotenvy, `Config::from_env` (envy),
   tracing init, `herdcord::run(config)`.
 - `src/lib.rs` — `Bot` struct (config, herdr client, forum, relay, state
-  `Db`), `run()` (ratelimiter-disabled `Http` backed by a 30s-timeout
-  reqwest client — serenity's ratelimiter has wedged in production and has
-  no per-request timeout), `EventHandler` (message relay + dead-thread
-  resume, new-post handling + launch-from-post), the poll task + event
-  loop spawn.
+  `Db`, the `/herdr` serialization lock), `run()` (serenity `Http` with the
+  default ratelimiter — no custom client, the reworked next-branch
+  ratelimiter no longer wedges — `ClientBuilder` with the bot's
+  `EventHandler` and the poise framework), the `dispatch`-based
+  `EventHandler` (message relay + dead-thread resume, thread handling,
+  lifecycle spawn), the poll task + event loop spawn.
 - `src/herdr/mod.rs` — the herdr Unix-socket client (NDJSON, one request
   per connection); nutype newtypes `WorkspaceId`/`PaneId`/`TabId`/
   `SessionPath`; the JSON envelope protocol; the public methods (new,
@@ -389,23 +425,26 @@ wire it into git with `prek install`.
   exist, workspace/session rows re-keyed from positional ids to labels on
   the first reconcile).
 - `src/forum/mod.rs` — per-workspace forum channels, session posts, tags,
-  manual-post handling (host posts → `LaunchSpec`, everything else
-  deleted), dead-thread tag pruning, session resume, spawn helpers;
-  submodules for sync, events, poll, and titles (see Key Directories).
+  manual-post deletion, dead-thread tag pruning, session resume, spawn
+  helpers; submodules for sync, events, poll, and titles (see Key
+  Directories).
 - `src/relay.rs` — conversation workers and the session-file sync delta.
 - `src/config.rs` — minimal env config: `DISCORD_BOT_TOKEN`, `GUILD_ID`,
   `ALLOWED_USER_ID`. Sane defaults as consts: `DEFAULT_AGENT_KIND`
-  (`AgentKind::Omp`), `PROMPT_TIMEOUT` (300s), `OPERATION_TIMEOUT` (30s),
+  (`AgentKind::Omp`, the modal's preselected harness), `CONTROL_SESSION_NAME`
+  (`herdcord`, the `/herdr` throwaway session), `PROMPT_TIMEOUT` (300s),
+  `OPERATION_TIMEOUT` (30s),
   `SYNC_INTERVAL` (600s), `MESSAGE_POLL_INTERVAL` (2s),
   `MAX_SYNC_MESSAGES` (5), `CATCHUP_BACKLOG` (50). `socket_path()` honors
-  `HERDR_SOCKET_PATH`/`HERDR_SESSION`; the state db lives under
-  `$XDG_STATE_HOME/herdcord`.
+  `HERDR_SOCKET_PATH`/`HERDR_SESSION`; `session_socket_path(name)` resolves
+  a named session's socket regardless of env overrides (the control
+  session); the state db lives under `$XDG_STATE_HOME/herdcord`.
 - `flake.nix` — crane + rust-overlay nightly; `packages.default`; checks
   clippy/doc/fmt/deny/nextest; treefmt (nixfmt, statix, deadnix, rustfmt,
-  taplo).
-- `deny.toml` — license allowlist + 4 ignored rustls-webpki 0.102 advisories
-  (no patched 0.102.x exists; fix arrives with a serenity/rustls bump — see
-  the comment in the file).
+  taplo). The serenity and poise dependencies are git branches, so `nix
+  flake check` needs network access to fetch them.
+- `deny.toml` — license allowlist (incl. MIT-0/MPL-2.0 for toasty's
+  transitive deps).
 
 ## Runtime/Tooling Preferences
 
@@ -413,16 +452,17 @@ wire it into git with `prek install`.
   `-D warnings`). Edition 2024.
 - **Nix**: flake-based (`flake-parts` + `crane` + `rust-overlay` + `treefmt-nix`).
   No rustup. `gcc` is needed in the shell (ring build script).
-- **Discord**: serenity 0.12 (rustls backend). Required intents: GUILDS,
-  GUILD_MESSAGES, MESSAGE_CONTENT.
+- **Discord**: serenity on the `next` branch (Component V2; git dependency)
+  + poise on `serenity-next` (git dependency) for slash commands. Required
+  intents: GUILDS, GUILD_MESSAGES, MESSAGE_CONTENT.
 - **herdr**: control over the Unix socket in the herdr config dir
   (`$XDG_CONFIG_HOME/herdr/herdr.sock`; `HERDR_SOCKET_PATH`/`HERDR_SESSION`
   to override).
 - **Dependencies**: prefer popular libraries over vendored logic (serenity's
-  built-in `Typing`, `ExecuteWebhook`, the `time` crate, etc.). Current
-  deps: serenity, toasty, nutype, thiserror, envy, dotenvy, dirs, tokio,
-  tracing, reqwest, serde/serde_json, color-eyre (main only). No anyhow in
-  the lib.
+  built-in `Typing`, `ExecuteWebhook`, poise, the `time` crate, etc.).
+  Current deps: serenity, poise, toasty, nutype, thiserror, envy, dotenvy,
+  dirs, tokio, tracing, serde/serde_json, color-eyre (main only). No anyhow
+  in the lib.
 
 ## Testing & QA
 

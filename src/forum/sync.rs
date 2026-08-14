@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serenity::all::{
     ChannelId, Context, CreateForumPost, CreateMessage, CreateWebhook, EditMessage, ExecuteWebhook,
-    GetMessages, MessageId, Webhook,
+    GetMessages, MessageId, ThreadId, Webhook,
 };
 use tracing::{info, warn};
 
@@ -100,8 +100,9 @@ impl Forum {
         };
         if skip > 0
             && let Err(error) = post
+                .widen()
                 .send_message(
-                    ctx,
+                    &ctx.http,
                     CreateMessage::new().content(format!(
                         "-# *{skip} older messages omitted during catch-up*"
                     )),
@@ -301,14 +302,14 @@ impl Forum {
         let title = session_title(agent, kind, Path::new(&transcript));
         let created = forum
             .create_forum_post(
-                ctx,
+                &ctx.http,
                 CreateForumPost::new(title, CreateMessage::new().content(intro)),
             )
             .await?;
         let post = created.id;
         // A fresh thread's last message is its starter (the intro); keep its
         // id so the intro can be refreshed as post metadata.
-        let starter_message_id = created.last_message_id.map(to_i64).transpose()?;
+        let starter_message_id = created.base.last_message_id.map(to_i64).transpose()?;
 
         // Re-bind the existing row (keyed `session_path`, possibly an
         // adopted transcript) or create it; the cursor restarts on the
@@ -402,7 +403,7 @@ impl Forum {
         let mut starter = ctx
             .http
             .get_message(
-                post,
+                post.widen(),
                 MessageId::new(
                     u64::try_from(starter_id)
                         .map_err(|_| BotError::Other("invalid starter message id".into()))?,
@@ -454,7 +455,8 @@ impl Forum {
         let mut last: Option<MessageId> = None;
         for chunk in split_lines(text, serenity::constants::MESSAGE_CODE_LIMIT) {
             last = Some(
-                post.send_message(ctx, CreateMessage::new().content(chunk))
+                post.widen()
+                    .send_message(&ctx.http, CreateMessage::new().content(chunk))
                     .await?
                     .id,
             );
@@ -483,7 +485,7 @@ impl Forum {
                 .map_err(|_| BotError::Other(format!("{after} is not a valid message id")))?;
             builder = builder.after(after);
         }
-        let recent = post.messages(ctx, builder).await?;
+        let recent = post.widen().messages(&ctx.http, builder).await?;
         if recent.iter().any(|message| message.content == text) {
             return Ok(None);
         }
@@ -493,12 +495,12 @@ impl Forum {
         {
             let mut builder = ExecuteWebhook::new()
                 .content(text)
-                .in_thread(post)
+                .in_thread(ThreadId::new(post.get()))
                 .username(&profile.username);
             if let Some(avatar_url) = &profile.avatar_url {
                 builder = builder.avatar_url(avatar_url.clone());
             }
-            match webhook.execute(ctx, true, builder).await {
+            match webhook.execute(&ctx.http, true, builder).await {
                 Ok(Some(message)) => return Ok(Some(message.id)),
                 Ok(None) => warn!("user webhook returned no message, falling back to bot echo"),
                 Err(error) => {
@@ -508,7 +510,8 @@ impl Forum {
         }
 
         let id = post
-            .send_message(ctx, CreateMessage::new().content(text))
+            .widen()
+            .send_message(&ctx.http, CreateMessage::new().content(text))
             .await?
             .id;
         Ok(Some(id))
@@ -540,7 +543,7 @@ impl Forum {
         let profile = self.user_profile(ctx).await?;
 
         let existing = forum
-            .webhooks(ctx)
+            .webhooks(&ctx.http)
             .await
             .ok()?
             .into_iter()
@@ -548,7 +551,7 @@ impl Forum {
         match existing {
             Some(webhook) => Some(webhook),
             None => match forum
-                .create_webhook(ctx, CreateWebhook::new(&profile.username))
+                .create_webhook(&ctx.http, CreateWebhook::new(&profile.username))
                 .await
             {
                 Ok(webhook) => Some(webhook),
@@ -580,8 +583,9 @@ impl Forum {
             // Tool messages without structured call data keep the old
             // code-block fallback.
             let id = post
+                .widen()
                 .send_message(
-                    ctx,
+                    &ctx.http,
                     CreateMessage::new().content(format!(
                         "```\n{}\n```",
                         message.text.replace("```", "`\u{200b}``")
@@ -644,7 +648,7 @@ impl Forum {
             || CreateMessage::new().embed(crate::utils::tool_embed(call)),
             |text| CreateMessage::new().content(text),
         );
-        Ok(post.send_message(ctx, message).await?.id)
+        Ok(post.widen().send_message(&ctx.http, message).await?.id)
     }
 
     /// Edits a posted tool call's message in place for its new state: the
@@ -661,7 +665,9 @@ impl Forum {
             || EditMessage::new().embed(crate::utils::tool_embed(call)),
             |text| EditMessage::new().content(text),
         );
-        post.edit_message(ctx, message_id, edit).await?;
+        post.widen()
+            .edit_message(&ctx.http, message_id, edit)
+            .await?;
         Ok(())
     }
 }

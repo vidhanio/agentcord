@@ -1,4 +1,6 @@
+mod commands;
 pub mod config;
+pub mod control;
 pub mod db;
 mod error;
 mod forum;
@@ -15,12 +17,12 @@ use std::{
 
 pub use db::Db;
 use error::BotError;
-use forum::{Forum, LaunchSpec};
+use forum::Forum;
 use herdr::{Herdr, SessionPath};
 use relay::{Relay, RelayJob};
 use serenity::all::{
-    Channel, ClientBuilder, Context, CreateMessage, EventHandler, GatewayIntents, GuildChannel,
-    Message, Ready, UserId, async_trait,
+    ChannelId, ClientBuilder, Context, EventHandler, FullEvent, GatewayIntents, HttpBuilder,
+    Message, Token, UserId, async_trait,
 };
 pub use session::{
     AgentKind, SessionRole, read_session, read_session_messages, read_session_title,
@@ -39,6 +41,9 @@ pub struct Bot {
     pub(crate) db: Db,
     pub(crate) forum: Arc<Forum>,
     pub(crate) relay: Arc<Relay>,
+    /// Serializes `/herdr` runs: the throwaway control session is shared
+    /// between invocations.
+    pub(crate) control_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Debug for Bot {
@@ -82,6 +87,7 @@ impl Bot {
             db,
             forum,
             relay,
+            control_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -101,7 +107,7 @@ impl Bot {
     /// Whether `user_id` may run commands and talk to agents: everyone when
     /// no allowed user is configured, otherwise only that user.
     #[must_use]
-    fn is_allowed(&self, user_id: UserId) -> bool {
+    pub(crate) fn is_allowed(&self, user_id: UserId) -> bool {
         self.config
             .allowed_user_id
             .is_none_or(|allowed| allowed == user_id)
@@ -127,9 +133,9 @@ impl Bot {
                         ctx.clone(),
                         &started.pane_id,
                         RelayJob {
-                            channel_id: message.channel_id,
+                            channel_id: ChannelId::new(message.channel_id.get()),
                             session_path,
-                            text: message.content.clone(),
+                            text: message.content.clone().into(),
                         },
                     )
                     .await
@@ -140,7 +146,7 @@ impl Bot {
             Ok(None) => {
                 if let Err(error) = message
                     .reply(
-                        ctx,
+                        &ctx.http,
                         "This session is starting up — send your message again in a moment.",
                     )
                     .await
@@ -151,80 +157,13 @@ impl Bot {
             Err(error) => {
                 warn!(?error, session = %session.session_path, "failed to resume session");
                 if let Err(reply_error) = message
-                    .reply(ctx, format!("Failed to resume this session: {error}"))
+                    .reply(&ctx.http, format!("Failed to resume this session: {error}"))
                     .await
                 {
                     warn!(?reply_error, "failed to reply about session resume failure");
                 }
             }
         }
-    }
-
-    /// Spawns the agent for a host-created forum post, binds its session to
-    /// a post, relays the post's prompt to it, and DMs the host the new
-    /// session thread.
-    async fn launch_from_post(&self, ctx: &Context, spec: &LaunchSpec) -> BotResult<()> {
-        let started = match &spec.workspace {
-            Some(workspace) => {
-                self.forum
-                    .spawn_in_workspace(workspace, &spec.name, spec.kind, &spec.cwd, &[])
-                    .await?
-            }
-            None => {
-                self.forum
-                    .spawn_in_new_workspace(&spec.name, &spec.name, spec.kind, &spec.cwd, &[])
-                    .await?
-            }
-        };
-
-        if let Err(error) = self.forum.ensure_session_post(ctx, &started).await {
-            warn!(?error, name = %spec.name, "failed to bind launched session to a post");
-        }
-
-        // The host's post was deleted; DM them the new session thread so
-        // the conversation has a home. The link is the whole message.
-        if let Some(session_path) = started
-            .agent_session
-            .as_ref()
-            .map(|session| session.value.clone())
-            && let Ok(Some(session)) = self.db.get_session(&session_path).await
-            && let Some(post_id) = session.post_channel_id
-        {
-            let link = format!(
-                "https://discord.com/channels/{}/{}",
-                self.config.guild_id, post_id
-            );
-            if let Err(error) = spec
-                .author
-                .dm(ctx, CreateMessage::new().content(link))
-                .await
-            {
-                warn!(?error, name = %spec.name, "failed to DM post author about the session thread");
-            }
-        }
-
-        if spec.prompt.is_empty() {
-            return Ok(());
-        }
-        // The agent's session reference may lag the launch; the empty path
-        // makes the post-prompt sync a no-op until the poll picks the
-        // session up.
-        let session_path = started.agent_session.as_ref().map_or_else(
-            || SessionPath::from(String::new()),
-            |session| session.value.clone(),
-        );
-        self.relay
-            .submit(
-                ctx.clone(),
-                &started.pane_id,
-                RelayJob {
-                    channel_id: spec.post,
-                    session_path,
-                    text: spec.prompt.clone(),
-                },
-            )
-            .await?;
-        Ok(())
     }
 }
 
@@ -233,28 +172,24 @@ pub async fn run(config: Config) -> BotResult {
 
     info!("building client...");
 
-    // Serenity's ratelimiter has wedged twice in production — a request
-    // freezing inside its queue holds every Discord write hostage, with no
-    // timeout anywhere. Run without it (the bot's volume is far below
-    // Discord's limits) and bound each request with a timeout so nothing
-    // can hang the bot indefinitely.
-    let http = serenity::all::HttpBuilder::new(&bot.config.discord_bot_token)
-        .client(
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .map_err(|error| {
-                    BotError::Other(format!("failed to build the Discord HTTP client: {error}"))
-                })?,
-        )
-        .ratelimiter_disabled(true)
-        .build();
+    // The default ratelimiter and request pipeline: no custom client, no
+    // disabled ratelimiting — the next-branch ratelimiter no longer holds
+    // locks across requests, so the wedging the old one caused is gone.
+    let token: Token = bot
+        .config
+        .discord_bot_token
+        .parse()
+        .map_err(|error| BotError::Other(format!("invalid Discord bot token: {error}")))?;
+    let http = HttpBuilder::new(token.clone()).build();
 
+    let bot = Arc::new(bot);
     let mut client = ClientBuilder::new_with_http(
-        http,
+        token,
+        Arc::new(http),
         GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT,
     )
-    .event_handler(bot)
+    .event_handler(bot.clone())
+    .framework(Box::new(commands::framework(&bot)))
     .await?;
 
     info!("starting client...");
@@ -266,48 +201,27 @@ pub async fn run(config: Config) -> BotResult {
 
 #[async_trait]
 impl EventHandler for Bot {
-    async fn ready(&self, ctx: Context, _: Ready) {
-        info!("bot ready");
-        tokio::spawn(Self::event_loop(Arc::new(self.clone()), ctx));
-    }
-
-    async fn thread_create(&self, ctx: Context, thread: GuildChannel) {
-        let launch = match self.forum.handle_thread_create(&ctx, &thread).await {
-            Ok(launch) => launch,
-            Err(error) => {
-                warn!(?error, thread = %thread.name, "failed to handle new forum post");
-                return;
+    async fn dispatch(&self, ctx: &Context, event: &FullEvent) {
+        match event {
+            FullEvent::Ready { .. } => {
+                info!("bot ready");
+                tokio::spawn(Self::event_loop(Arc::new(self.clone()), ctx.clone()));
             }
-        };
-        let Some(spec) = launch else {
-            return;
-        };
-
-        let outcome = self.launch_from_post(&ctx, &spec).await;
-
-        // The host's post never survives, launch or not.
-        if let Err(error) = spec.post.delete(&ctx.http).await {
-            warn!(?error, thread = %thread.name, "failed to delete host post after launch");
-        }
-
-        if let Err(error) = outcome
-            && let Err(dm_error) = spec
-                .author
-                .dm(
-                    &ctx,
-                    CreateMessage::new().content(format!(
-                        "I couldn't launch an agent from your post: {error}"
-                    )),
-                )
-                .await
-        {
-            warn!(?dm_error, "failed to DM post author about launch failure");
+            FullEvent::ThreadCreate { thread, .. } => {
+                if let Err(error) = self.forum.handle_thread_create(ctx, thread).await {
+                    warn!(?error, thread = %thread.base.name, "failed to handle new forum post");
+                }
+            }
+            FullEvent::Message { new_message, .. } => self.handle_message(ctx, new_message).await,
+            // Interactions (the `/agent` and `/herdr` commands, the agent
+            // modal) are handled by the poise framework.
+            _ => {}
         }
     }
+}
 
-    async fn message(&self, ctx: Context, new_message: Message) {
-        let message = &new_message;
-
+impl Bot {
+    async fn handle_message(&self, ctx: &Context, message: &Message) {
         if !self.is_allowed(message.author.id) {
             return;
         }
@@ -320,20 +234,8 @@ impl EventHandler for Bot {
             return;
         }
 
-        let channel = match ctx
-            .cache
-            .guild(self.config.guild_id)
-            .and_then(|guild| guild.channels.get(&message.channel_id).cloned())
-        {
-            Some(channel) => channel,
-            None => match message.channel_id.to_channel(&ctx).await {
-                Ok(Channel::Guild(channel)) => channel,
-                _ => return,
-            },
-        };
-
         // Only messages in managed forum posts are relayed.
-        let Ok(post_id) = i64::try_from(channel.id.get()) else {
+        let Ok(post_id) = i64::try_from(message.channel_id.get()) else {
             return;
         };
         let session = match self.db.session_by_post(post_id).await {
@@ -363,7 +265,7 @@ impl EventHandler for Bot {
             // No live agent hosts this session: re-launch it in place,
             // resuming the same conversation, and relay the message to the
             // new agent.
-            self.resume_session_and_relay(&ctx, message, &session).await;
+            self.resume_session_and_relay(ctx, message, &session).await;
             return;
         };
 
@@ -374,12 +276,12 @@ impl EventHandler for Bot {
         if let Err(error) = self
             .relay
             .submit(
-                ctx,
+                ctx.clone(),
                 target,
                 RelayJob {
-                    channel_id: message.channel_id,
+                    channel_id: ChannelId::new(message.channel_id.get()),
                     session_path: SessionPath::from(session.session_path.clone()),
-                    text: message.content.clone(),
+                    text: message.content.clone().into(),
                 },
             )
             .await

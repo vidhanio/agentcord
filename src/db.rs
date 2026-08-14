@@ -2,7 +2,7 @@
 //! inside them.
 //!
 //! Backed by [toasty] 0.10 with the `sqlite` driver. The [`Db`] wrapper is
-//! the module's public API; [`WorkspaceRow`] and [`SessionRow`] are the flat
+//! the module's public API; `WorkspaceRow` and `SessionRow` are the flat
 //! row types it persists. The row fields mirror the herdr wire format, so
 //! they stay plain strings rather than enums.
 //!

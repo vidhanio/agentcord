@@ -195,7 +195,7 @@ impl Relay {
     ) {
         // A typing indicator while the turn runs; dropped (stopping it)
         // when the turn settles.
-        let _typing = serenity::all::Typing::start(Arc::clone(&ctx.http), channel_id);
+        let _typing = serenity::all::Typing::start(Arc::clone(&ctx.http), channel_id.widen());
 
         let agent = match self
             .wait_until_settled(&ctx, &target, channel_id, crate::config::PROMPT_TIMEOUT)
@@ -237,8 +237,9 @@ impl Relay {
             notices.insert(target.to_owned(), now);
         }
         channel_id
+            .widen()
             .send_message(
-                ctx,
+                &ctx.http,
                 CreateMessage::new().content("The agent is **blocked** — it's waiting for input."),
             )
             .await?;
@@ -255,8 +256,9 @@ impl Relay {
         error: &crate::herdr::Error,
     ) -> Result<(), BotError> {
         channel_id
+            .widen()
             .send_message(
-                ctx,
+                &ctx.http,
                 CreateMessage::new().content(format!("Error {action} `{target}`: {error}")),
             )
             .await?;

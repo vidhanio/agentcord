@@ -20,7 +20,7 @@ const TOOL_TEXT_INLINE_LIMIT: usize = 100;
 /// code, the value as a code block) — the colour carries the state (green
 /// when done, red when failed, accent while running) — and failed calls
 /// get an error field.
-pub fn tool_embed(call: &ToolCall) -> CreateEmbed {
+pub fn tool_embed(call: &ToolCall) -> CreateEmbed<'_> {
     let colour = match call.state {
         ToolState::Running => Colour::LIGHT_GREY,
         ToolState::Done => branding::GREEN,
