@@ -1,11 +1,9 @@
-//! Slash commands (via poise): `/agent` and `/herdr`.
+//! Slash commands (via poise): `/agent`.
 //!
 //! `/agent` opens a native modal — an agent-harness dropdown (defaulted to
 //! the configured default kind), a workspace dropdown, and a prompt input —
 //! and launches the agent with the same spawn/bind/relay flow the forum
-//! launch used. `/herdr` runs a one-shot control-plane agent in a
-//! throwaway herdr session (see [`crate::control`]) and relays its
-//! acknowledgment as an ephemeral reply.
+//! launch used.
 //!
 //! Poise's derive-based modal support only knows text inputs; the `/agent`
 //! modal carries select menus, so it is built by hand: the modal is sent
@@ -13,7 +11,7 @@
 //! serenity's modal collector, and the launch result edits the submit's
 //! deferred response (see the note in [`agent`]).
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use poise::{CreateReply, FrameworkError, serenity_prelude as serenity};
 use serenity::{
@@ -25,14 +23,8 @@ use serenity::{
 use tracing::{info, warn};
 
 use crate::{
-    Bot, BotResult,
-    config::{CONTROL_SESSION_NAME, DEFAULT_AGENT_KIND},
-    control,
-    error::BotError,
-    forum,
-    herdr::SessionPath,
-    relay::RelayJob,
-    session::AgentKind,
+    Bot, BotResult, config::DEFAULT_AGENT_KIND, error::BotError, forum, herdr::SessionPath,
+    relay::RelayJob, session::AgentKind,
 };
 
 /// How long the `/agent` modal waits for the user to submit it.
@@ -60,7 +52,7 @@ pub struct BotFramework {
 pub fn framework(bot: &Bot) -> BotFramework {
     let poise_framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![agent(), herdr()],
+            commands: vec![agent()],
             on_error,
             ..Default::default()
         })
@@ -352,40 +344,6 @@ async fn launch_from_modal(
     }
 
     Ok(link)
-}
-
-/// run a one-shot herdr control action in a throwaway session.
-#[poise::command(slash_command, check = "allowed")]
-async fn herdr(
-    ctx: poise::ApplicationContext<'_, Bot, BotError>,
-    #[description = "the herdr action to perform"] action: String,
-) -> Result<(), BotError> {
-    let bot = ctx.data().clone();
-    ctx.defer_ephemeral().await?;
-
-    let command = ctx.interaction.clone();
-    let http = Arc::clone(&ctx.serenity_context().http);
-    tokio::spawn(async move {
-        // One `/herdr` at a time: the throwaway session is shared.
-        let _guard = bot.control_lock.lock().await;
-        let reply = match control::run_control_agent(CONTROL_SESSION_NAME, &action).await {
-            Ok(acknowledgment) => acknowledgment,
-            Err(error) => format!("the herdr control agent failed: {error}"),
-        };
-        if let Err(error) = command
-            .create_followup(
-                &http,
-                serenity::CreateInteractionResponseFollowup::new()
-                    .content(reply)
-                    .ephemeral(true),
-            )
-            .await
-        {
-            warn!(?error, "failed to relay the /herdr acknowledgment");
-        }
-    });
-
-    Ok(())
 }
 
 /// Replies to a modal submit with an ephemeral error message.

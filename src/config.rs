@@ -17,11 +17,6 @@ use crate::session::AgentKind;
 /// tag.
 pub const DEFAULT_AGENT_KIND: AgentKind = AgentKind::Omp;
 
-/// The throwaway herdr session the `/herdr` control-plane agent runs in:
-/// its own named session, so the agent never shows up in the main session's
-/// workspaces, forums, or Discord mirroring.
-pub const CONTROL_SESSION_NAME: &str = "herdcord";
-
 /// How long one settle-wait call waits in a single request before the
 /// relay continues waiting silently.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -93,7 +88,7 @@ pub fn socket_path() -> PathBuf {
 }
 
 /// The API socket of the named herdr session `name`, regardless of any
-/// `HERDR_SOCKET_PATH` override — used for throwaway control sessions.
+/// `HERDR_SOCKET_PATH` override.
 #[must_use]
 pub fn session_socket_path(name: &str) -> PathBuf {
     herdr_config_dir()

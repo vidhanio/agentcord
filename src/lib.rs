@@ -1,6 +1,5 @@
 mod commands;
 pub mod config;
-pub mod control;
 pub mod db;
 mod error;
 mod forum;
@@ -41,9 +40,6 @@ pub struct Bot {
     pub(crate) db: Db,
     pub(crate) forum: Arc<Forum>,
     pub(crate) relay: Arc<Relay>,
-    /// Serializes `/herdr` runs: the throwaway control session is shared
-    /// between invocations.
-    pub(crate) control_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Debug for Bot {
@@ -87,7 +83,6 @@ impl Bot {
             db,
             forum,
             relay,
-            control_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 

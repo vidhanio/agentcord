@@ -629,21 +629,6 @@ impl Herdr {
         Ok(snapshot.snapshot.agents)
     }
 
-    /// Stops the herdr server (`server.stop`), terminating its panes.
-    ///
-    /// The server answers the request and then quits; a connection that
-    /// dies mid-response surfaces as an [`Error::Io`], which callers
-    /// tearing a session down should tolerate.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Herdr`], [`Error::Timeout`], [`Error::Io`], or
-    /// [`Error::Json`] when the request fails.
-    pub async fn stop_server(&self) -> Result<(), Error> {
-        let result = self.call("server.stop", json!({})).await?;
-        expect_ok(&result, "server.stop")
-    }
-
     /// Opens a long-lived `events.subscribe` connection for `kinds` and
     /// returns a stream of matching events.
     ///

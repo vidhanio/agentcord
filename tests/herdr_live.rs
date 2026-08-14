@@ -92,37 +92,6 @@ async fn spawn_prompt_read_close_roundtrip() {
     drop(guard);
 }
 
-/// The one-shot control-plane runner spawns its own throwaway herdr
-/// session, runs the agent on the user's action, and returns its
-/// acknowledgment — and the session is stopped and deleted afterwards.
-#[tokio::test]
-async fn control_agent_runs_in_throwaway_session() {
-    if std::env::var("HERDR_LIVE_TESTS").as_deref() != Ok("1") {
-        return;
-    }
-
-    let session_name = format!("herdcord-control-{}", std::process::id());
-    let socket = herdcord::config::session_socket_path(&session_name);
-
-    let acknowledgment = herdcord::control::run_control_agent(
-        &session_name,
-        "list the herdr workspaces and reply with how many there are",
-    )
-    .await
-    .expect("control agent runs");
-    assert!(
-        !acknowledgment.trim().is_empty(),
-        "control agent produced no acknowledgment"
-    );
-
-    // The one-shot session was torn down: its socket and session dir are
-    // gone, so a second run starts from a clean slate.
-    assert!(
-        !socket.exists(),
-        "control session socket still exists after the run"
-    );
-}
-
 /// Subscribing to `pane.updated` delivers an event for a freshly started
 /// agent's pane.
 #[tokio::test]

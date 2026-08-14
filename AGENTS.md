@@ -65,16 +65,6 @@ agents.
   (posted message id + shown state per tool call). The first two are
   pruned when their session dies; the tool map is pruned when a session
   dies.
-- **`/herdr` runs a one-shot control plane.** It spawns a throwaway named
-  herdr session (`herdcord` under `$XDG_CONFIG_HOME/herdr/sessions/`, its
-  own headless server started via `setsid -f env HERDR_SESSION=herdcord
-  herdr server`) that never appears in the main session's workspaces,
-  forums, or Discord mirroring. The agent gets an injected control-plane
-  prompt (load the herdr skill, perform the user's action, reply with a
-  one-line acknowledgment), and the bot relays that acknowledgment as an
-  ephemeral in-channel reply. The session is stopped and deleted after
-  every run — also when the run fails, so a crashed run never leaves a
-  stray server.
 - **Dead posts are closed and keep only their kind tag.** A dead
   session's post is closed (archived, never locked): the status tag is
   dropped, the agent-kind tag stays, and the starter message's pane part
@@ -97,14 +87,13 @@ agents.
 - **Agents launch through slash commands; manual forum posts are deleted.**
   `/agent` (global guild command) opens a Discord native modal — an
   agent-harness dropdown (preselected to the configured default kind), a
-  workspace dropdown (live herdr workspaces), and a multiline prompt
-  input — and launches the agent with the same spawn/bind/relay flow the
-  forum launch used: spawn in the workspace, bind the session to a forum
-  post, relay the prompt, reply ephemerally with the thread link. `/herdr`
-  runs a one-shot control-plane agent in a throwaway herdr session (see
-  below). Any manual post in a managed forum is deleted silently, and the
-  bot's own posts get their transcript caught up; the host-user launch
-  path is gone.
+  workspace dropdown (live herdr workspaces; the workspace of the forum
+  the command ran in is preselected), and a multiline prompt input — and
+  launches the agent with the same spawn/bind/relay flow the forum
+  launch used: spawn in the workspace, bind the session to a forum post,
+  relay the prompt, reply ephemerally with the thread link. Any manual
+  post in a managed forum is deleted silently, and the bot's own posts
+  get their transcript caught up; the host-user launch path is gone.
 - **Forum tags describe the session**: the agent kind (`omp`, `claude-code`,
   `codex`, … 🤖) and the lifecycle status (`idle`/`working`/`blocked`/`done`/
   `unknown`). The bot owns a forum's tags outright: every tag write replaces
@@ -196,11 +185,6 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
               │             workspace dropdown, prompt input)
               │     submit ──► launch_from_modal: spawn → bind session post →
               │                relay the prompt → ephemeral thread link
-              │  /herdr ──► control::run_control_agent (src/control.rs):
-              │     throwaway `herdcord` herdr session (own headless server,
-              │     no forum/mirroring) → one-shot agent with the injected
-              │     control-plane prompt → ephemeral acknowledgment
-              │     (session stopped + deleted after every run)
               │
               ├─ poll task (2s tick, src/forum/poll.rs)
               │    syncs every live session's transcript (cursor no-ops)
@@ -249,20 +233,13 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
   previous session row, else the home directory.
 - `src/commands.rs` — the poise framework (registered as serenity's
   `Framework`, guild-only commands): `/agent` builds a native modal (kind
-  dropdown defaulted to `DEFAULT_AGENT_KIND`, workspace dropdown, prompt
-  input) by hand — poise's derive only knows text inputs — sends it as the
-  command's initial response, awaits the submit through serenity's modal
-  collector, defers the submit, and launches via the forum's spawn/bind/
-  relay helpers, editing the deferred response with the thread link;
-  `/herdr` defers ephemerally and runs `control::run_control_agent`,
-  relaying the acknowledgment. The `allowed` check gates both commands on
-  `ALLOWED_USER_ID`.
-- `src/control.rs` — the `/herdr` one-shot runner: starts the throwaway
-  session's headless server (`setsid -f env HERDR_SESSION=<name> herdr
-  server`), drives a fresh `Herdr` client on its socket (workspace →
-  agent → prompt → settle), reads the agent's final reply from its
-  transcript, then stops the server and deletes the session directory —
-  before and after every run.
+  dropdown defaulted to `DEFAULT_AGENT_KIND`, workspace dropdown with the
+  invocation forum's workspace preselected, prompt input) by hand — poise's
+  derive only knows text inputs — sends it as the command's initial
+  response, awaits the submit through serenity's modal collector, defers
+  the submit, and launches via the forum's spawn/bind/relay helpers,
+  editing the deferred response with the thread link. The `allowed` check
+  gates the command on `ALLOWED_USER_ID`.
 - `src/relay.rs` — per-agent conversation workers (keyed by pane id —
   agents are unnamed; the `RelayJob` carries the session path): one `mpsc`
   channel per agent (shared `Arc<Mutex<HashMap>>` of senders with
@@ -287,7 +264,7 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
 
 | Path | Purpose |
 |---|---|
-|`src/`|Bot core: `lib.rs` (Bot + event-handler dispatch), `config.rs`, `error.rs`, `db.rs`, `relay.rs`, `commands.rs` (poise slash commands: the `/agent` modal, `/herdr`), `control.rs` (the `/herdr` one-shot control-plane runner), `utils.rs`|
+|`src/`|Bot core: `lib.rs` (Bot + event-handler dispatch), `config.rs`, `error.rs`, `db.rs`, `relay.rs`, `commands.rs` (poise slash command: the `/agent` modal), `utils.rs`|
 |`src/forum/`|Forum-side state: `mod.rs` (struct + lifecycle), `sync.rs` (transcript mirror), `events.rs` (event loop + reconcile), `poll.rs` (2s transcript poll + rotations), `titles.rs` (titles + starter message)|
 | `src/herdr/` | herdr Unix-socket client: `mod.rs` (client + models + errors), `event.rs` (subscription machinery), `wire.rs` (envelope + result payloads) |
 | `src/session/` | Transcript normalization: `mod.rs` (models + read_session), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs`/`pi.rs` (per-harness file parsers), `opencode.rs` (opencode SQLite store reader) |
@@ -407,7 +384,7 @@ wire it into git with `prek install`.
 - `src/main.rs` — entry: color_eyre, dotenvy, `Config::from_env` (envy),
   tracing init, `herdcord::run(config)`.
 - `src/lib.rs` — `Bot` struct (config, herdr client, forum, relay, state
-  `Db`, the `/herdr` serialization lock), `run()` (serenity `Http` with the
+  `Db`), `run()` (serenity `Http` with the
   default ratelimiter — no custom client, the reworked next-branch
   ratelimiter no longer wedges — `ClientBuilder` with the bot's
   `EventHandler` and the poise framework), the `dispatch`-based
@@ -433,14 +410,14 @@ wire it into git with `prek install`.
 - `src/relay.rs` — conversation workers and the session-file sync delta.
 - `src/config.rs` — minimal env config: `DISCORD_BOT_TOKEN`, `GUILD_ID`,
   `ALLOWED_USER_ID`. Sane defaults as consts: `DEFAULT_AGENT_KIND`
-  (`AgentKind::Omp`, the modal's preselected harness), `CONTROL_SESSION_NAME`
-  (`herdcord`, the `/herdr` throwaway session), `PROMPT_TIMEOUT` (300s),
+  (`AgentKind::Omp`, the modal's preselected harness), `PROMPT_TIMEOUT`
+  (300s),
   `OPERATION_TIMEOUT` (30s),
   `SYNC_INTERVAL` (600s), `MESSAGE_POLL_INTERVAL` (2s),
   `MAX_SYNC_MESSAGES` (5), `CATCHUP_BACKLOG` (50). `socket_path()` honors
   `HERDR_SOCKET_PATH`/`HERDR_SESSION`; `session_socket_path(name)` resolves
-  a named session's socket regardless of env overrides (the control
-  session); the state db lives under `$XDG_STATE_HOME/herdcord`.
+  a named session's socket regardless of env overrides; the state db lives
+  under `$XDG_STATE_HOME/herdcord`.
 - `flake.nix` — crane + rust-overlay nightly; `packages.default`; checks
   clippy/doc/fmt/deny/nextest; treefmt (nixfmt, statix, deadnix, rustfmt,
   taplo). The serenity and poise dependencies are git branches, so `nix
