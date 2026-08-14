@@ -305,65 +305,6 @@ impl EventHandler for Bot {
         }
     }
 
-    async fn channel_update(&self, ctx: Context, old: Option<GuildChannel>, new: GuildChannel) {
-        let Some(old) = old else {
-            return;
-        };
-        let archived = |channel: &GuildChannel| {
-            channel
-                .thread_metadata
-                .as_ref()
-                .is_some_and(|metadata| metadata.archived)
-        };
-        let was_archived = archived(&old);
-        let is_archived = archived(&new);
-        if was_archived == is_archived {
-            return;
-        }
-
-        let Ok(post_id) = i64::try_from(new.id.get()) else {
-            return;
-        };
-        let session = match self.db.session_by_post(post_id).await {
-            Ok(Some(session)) => session,
-            Ok(None) => return, // Unmanaged channel.
-            Err(error) => {
-                warn!(?error, "failed to look up session for closed post");
-                return;
-            }
-        };
-        let hosting = self.forum.hosting_agents(&session).await;
-
-        if is_archived {
-            // The post was closed: deactivate its agent in herdr. When no
-            // agent hosts the session, this is the bot's own close of an
-            // already-dead post — nothing to deactivate.
-            if hosting.is_empty() {
-                return;
-            }
-            for agent in hosting {
-                if let Err(error) = self.herdr.close_tab(&agent.tab_id).await {
-                    warn!(
-                        ?error,
-                        session = %session.session_path,
-                        pane = %agent.pane_id,
-                        "failed to close tab of deactivated agent"
-                    );
-                }
-            }
-        } else if hosting.is_empty() {
-            // The post was reopened: resume the dead session's agent. A
-            // live agent means the bot's own reopen — nothing to resume.
-            if let Err(error) = self.forum.resume_session(&ctx, &session).await {
-                warn!(
-                    ?error,
-                    session = %session.session_path,
-                    "failed to resume session from reopened post"
-                );
-            }
-        }
-    }
-
     async fn message(&self, ctx: Context, new_message: Message) {
         let message = &new_message;
 

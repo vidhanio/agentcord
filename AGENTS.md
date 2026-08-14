@@ -78,15 +78,12 @@ agents.
   post, its row, and the sync cursor are untouched by the resume — the
   transcript continues where it stopped. If the workspace is gone, the
   resume re-creates it.
-- **Post close/reopen is two-way.** The archive state mirrors herdr: a
-  live agent's sync reopens (unarchives) its post — a live agent's post
-  is always open — and the death flow closes it. Conversely, a user
-  closing a post deactivates its agent in herdr (the hosting tab is
-  closed, which runs the normal death flow), and reopening a dead
-  session's post resumes it without a message. The bot tells its own
-  archive writes apart from the user's by live-agent state: it only
-  closes dead posts and only reopens live ones, so its writes never feed
-  back into deactivate/resume.
+- **Post archive state mirrors herdr, one-way.** A live agent's sync
+  reopens (unarchives) its post — a live agent's post is always open —
+  and the death flow closes it. Discord-side archive changes do not
+  touch herdr: closing or reopening a post never deactivates or resumes
+  its agent. Resuming a dead session happens only through a message in
+  the thread.
 - **Posts launch agents; every other manual post is deleted.** The host
   user's (`ALLOWED_USER_ID`; everyone when unset) new post in a managed
   forum launches an agent in that workspace: the kind comes from the
@@ -186,9 +183,6 @@ Discord ──► EventHandler (src/lib.rs)
               │     host post: launch agent (kind from tags, prompt from
               │     title+body) then delete the post ──► relay the prompt
               │     other posts: deleted silently
-              │
-              │  post closed/reopened (channel update) ──► close: deactivate the
-              │     agent (close its tab) · reopen: Forum::resume_session
               │
               ├─ poll task (2s tick, src/forum/poll.rs)
               │    syncs every live session's transcript (cursor no-ops)
