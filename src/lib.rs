@@ -147,7 +147,7 @@ impl Bot {
                 if let Err(error) = message
                     .reply(
                         &ctx.http,
-                        "This session is starting up — send your message again in a moment.",
+                        "this session is starting up — send your message again in a moment.",
                     )
                     .await
                 {
@@ -157,7 +157,7 @@ impl Bot {
             Err(error) => {
                 warn!(?error, session = %session.session_path, "failed to resume session");
                 if let Err(reply_error) = message
-                    .reply(&ctx.http, format!("Failed to resume this session: {error}"))
+                    .reply(&ctx.http, format!("failed to resume this session: {error}"))
                     .await
                 {
                     warn!(?reply_error, "failed to reply about session resume failure");
@@ -190,6 +190,7 @@ pub async fn run(config: Config) -> BotResult {
     )
     .event_handler(bot.clone())
     .framework(Box::new(commands::framework(&bot)))
+    .data(bot.clone())
     .await?;
 
     info!("starting client...");

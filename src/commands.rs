@@ -114,7 +114,7 @@ fn on_error(error: FrameworkError<'_, Bot, BotError>) -> poise::BoxFuture<'_, ()
                 let _ = ctx
                     .send(
                         CreateReply::new()
-                            .content(format!("Command failed: {error}"))
+                            .content(format!("command failed: {error}"))
                             .ephemeral(true),
                     )
                     .await;
@@ -123,7 +123,7 @@ fn on_error(error: FrameworkError<'_, Bot, BotError>) -> poise::BoxFuture<'_, ()
                 let _ = ctx
                     .send(
                         CreateReply::new()
-                            .content("You're not allowed to use this bot.")
+                            .content("you're not allowed to use this bot.")
                             .ephemeral(true),
                     )
                     .await;
@@ -137,7 +137,7 @@ fn on_error(error: FrameworkError<'_, Bot, BotError>) -> poise::BoxFuture<'_, ()
     })
 }
 
-/// Launch an agent in a herdr workspace via a modal.
+/// launch an agent in a herdr workspace via a modal.
 #[poise::command(slash_command, check = "allowed")]
 async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), BotError> {
     let bot = ctx.data().clone();
@@ -146,11 +146,11 @@ async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), 
         .herdr
         .list_workspaces()
         .await
-        .map_err(|error| BotError::Other(format!("Couldn't reach herdr: {error}")))?;
+        .map_err(|error| BotError::Other(format!("couldn't reach herdr: {error}")))?;
     if workspaces.is_empty() {
         ctx.send(
             CreateReply::new()
-                .content("There are no herdr workspaces to launch into.")
+                .content("there are no herdr workspaces to launch into.")
                 .ephemeral(true),
         )
         .await?;
@@ -189,12 +189,12 @@ async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), 
     let selection = parse_agent_modal(&submit.data);
     let kind = selection.kind.unwrap_or(DEFAULT_AGENT_KIND);
     let Some(workspace_label) = selection.workspace else {
-        reply_to_submit(&submit, ctx.http(), "No workspace selected.").await?;
+        reply_to_submit(&submit, ctx.http(), "no workspace selected.").await?;
         return Ok(());
     };
     let prompt = selection.prompt.unwrap_or_default();
     if prompt.trim().is_empty() {
-        reply_to_submit(&submit, ctx.http(), "The prompt is empty.").await?;
+        reply_to_submit(&submit, ctx.http(), "the prompt is empty.").await?;
         return Ok(());
     }
 
@@ -208,10 +208,10 @@ async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), 
         let outcome = launch_from_modal(&bot, &context, kind, &workspace_label, &prompt).await;
         let message = match outcome {
             Ok(link) => format!(
-                "Launched a **{}** agent in workspace `{workspace_label}` — {link}",
+                "launched a **{}** agent in workspace `{workspace_label}` — {link}",
                 kind.label()
             ),
-            Err(error) => format!("Couldn't launch the agent: {error}"),
+            Err(error) => format!("couldn't launch the agent: {error}"),
         };
         if let Err(error) = submit
             .edit_response(
@@ -242,7 +242,7 @@ fn build_agent_modal<'a>(custom_id: &'a str, workspace_labels: &'a [String]) -> 
                 .collect(),
         },
     )
-    .placeholder("Agent harness");
+    .placeholder("agent harness");
     let workspace_menu = CreateSelectMenu::new(
         WORKSPACE_SELECT_ID,
         CreateSelectMenuKind::String {
@@ -252,17 +252,17 @@ fn build_agent_modal<'a>(custom_id: &'a str, workspace_labels: &'a [String]) -> 
                 .collect(),
         },
     )
-    .placeholder("Workspace");
+    .placeholder("workspace");
     let prompt = CreateInputText::new(InputTextStyle::Paragraph, PROMPT_INPUT_ID)
-        .placeholder("What should the agent do?")
+        .placeholder("what should the agent do?")
         .min_length(1)
         .max_length(4000)
         .required(true);
 
-    CreateModal::new(custom_id, "Launch an agent").components(vec![
-        CreateModalComponent::Label(CreateLabel::select_menu("Agent harness", kind_menu)),
-        CreateModalComponent::Label(CreateLabel::select_menu("Workspace", workspace_menu)),
-        CreateModalComponent::Label(CreateLabel::input_text("Prompt", prompt)),
+    CreateModal::new(custom_id, "launch an agent").components(vec![
+        CreateModalComponent::Label(CreateLabel::select_menu("agent harness", kind_menu)),
+        CreateModalComponent::Label(CreateLabel::select_menu("workspace", workspace_menu)),
+        CreateModalComponent::Label(CreateLabel::input_text("prompt", prompt)),
     ])
 }
 
@@ -331,7 +331,7 @@ async fn launch_from_modal(
     Ok(link)
 }
 
-/// Run a one-shot herdr control action in a throwaway session.
+/// run a one-shot herdr control action in a throwaway session.
 #[poise::command(slash_command, check = "allowed")]
 async fn herdr(
     ctx: poise::ApplicationContext<'_, Bot, BotError>,
@@ -347,7 +347,7 @@ async fn herdr(
         let _guard = bot.control_lock.lock().await;
         let reply = match control::run_control_agent(CONTROL_SESSION_NAME, &action).await {
             Ok(acknowledgment) => acknowledgment,
-            Err(error) => format!("The herdr control agent failed: {error}"),
+            Err(error) => format!("the herdr control agent failed: {error}"),
         };
         if let Err(error) = command
             .create_followup(

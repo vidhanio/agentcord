@@ -240,7 +240,7 @@ impl Relay {
             .widen()
             .send_message(
                 &ctx.http,
-                CreateMessage::new().content("The agent is **blocked** — it's waiting for input."),
+                CreateMessage::new().content("the agent is **blocked** — it's waiting for input."),
             )
             .await?;
         Ok(())
@@ -259,7 +259,7 @@ impl Relay {
             .widen()
             .send_message(
                 &ctx.http,
-                CreateMessage::new().content(format!("Error {action} `{target}`: {error}")),
+                CreateMessage::new().content(format!("error {action} `{target}`: {error}")),
             )
             .await?;
         Ok(())

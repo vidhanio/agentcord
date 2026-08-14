@@ -118,7 +118,7 @@ async fn wait_until_settled(herdr: &Herdr, target: &PaneId) -> BotResult<Agent> 
 #[must_use]
 fn acknowledgment(agent: &Agent) -> String {
     let Some(session) = agent.agent_session.as_ref() else {
-        return "The control agent finished without a recorded reply.".to_owned();
+        return "the control agent finished without a recorded reply.".to_owned();
     };
     let reply = read_session_messages(DEFAULT_AGENT_KIND, session.value.as_str())
         .ok()
@@ -129,7 +129,7 @@ fn acknowledgment(agent: &Agent) -> String {
                 .find(|message| message.role == SessionRole::Agent)
                 .map(|message| message.text.clone())
         })
-        .unwrap_or_else(|| "The control agent finished without a recorded reply.".to_owned());
+        .unwrap_or_else(|| "the control agent finished without a recorded reply.".to_owned());
     reply.chars().take(1900).collect()
 }
 
