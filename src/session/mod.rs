@@ -324,13 +324,42 @@ mod tests {
         assert_eq!(call.state, ToolState::Running);
         assert_eq!(call.error, None);
         assert_eq!(messages[1].role, SessionRole::Tool);
-        assert_eq!(messages[1].text, "ask");
+        assert_eq!(messages[1].text, r#"ask "ask the user""#);
         let call = messages[1].tool.as_ref().unwrap();
         assert_eq!(call.call_id, ToolCallId::from("call_00_2"));
         assert_eq!(call.name, "ask");
-        // The call took no arguments.
-        assert_eq!(call.args, None);
+        // No arguments recorded: the intent stands in as the argument.
+        assert_eq!(call.args.as_deref(), Some(r#""ask the user""#));
         assert_eq!(call.state, ToolState::Running);
+    }
+
+    #[test]
+    fn omp_tools_without_args_fall_back_to_intent() {
+        let raw = r#"{"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"call_0","toolName":"hub","startedAt":"2026-08-12T22:39:06.280Z","intent":"Checking subagent status"},"id":"i1","parentId":"m2","timestamp":"2026-08-12T22:39:06.280Z"}
+{"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"call_1","toolName":"task","startedAt":"2026-08-12T22:31:44.175Z","intent":"Delegating nix/CI scaffolding"},"id":"i2","timestamp":"2026-08-12T22:31:44.175Z"}
+{"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"call_2","toolName":"ask","startedAt":"2026-08-12T22:23:04.000Z"},"id":"i3","timestamp":"2026-08-12T22:23:04.000Z"}
+{"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"call_3","toolName":"read","args":{"path":"src"},"intent":"read a file"},"id":"i4","timestamp":"2026-08-12T22:23:05.000Z"}
+"#;
+        let messages = parse_omp(raw);
+        assert_eq!(messages.len(), 4);
+        // No arguments recorded: the intent stands in as the argument.
+        let call = messages[0].tool.as_ref().unwrap();
+        assert_eq!(call.name, "hub");
+        assert_eq!(call.args.as_deref(), Some(r#""Checking subagent status""#));
+        let call = messages[1].tool.as_ref().unwrap();
+        assert_eq!(call.name, "task");
+        assert_eq!(
+            call.args.as_deref(),
+            Some(r#""Delegating nix/CI scaffolding""#)
+        );
+        // No intent either: no arguments, as before.
+        let call = messages[2].tool.as_ref().unwrap();
+        assert_eq!(call.name, "ask");
+        assert_eq!(call.args, None);
+        // Real arguments win over the intent.
+        let call = messages[3].tool.as_ref().unwrap();
+        assert_eq!(call.name, "read");
+        assert_eq!(call.args.as_deref(), Some(r#"{"path":"src"}"#));
     }
 
     #[test]

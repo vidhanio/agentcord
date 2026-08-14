@@ -59,7 +59,14 @@ pub fn parse_omp(raw: &str) -> Vec<SessionMessage> {
                 .and_then(Value::as_str)
                 .map(ToolCallId::from)
                 .unwrap_or_default();
-            let args = data.get("args").map(compact_args);
+            // Some tools (`hub`, `task`, …) are recorded without arguments;
+            // the record's intent summary is their only input, so it stands
+            // in as the single argument.
+            let args = data.get("args").map(compact_args).or_else(|| {
+                data.get("intent")
+                    .and_then(Value::as_str)
+                    .map(|intent| compact_args(&Value::String(intent.to_owned())))
+            });
             messages.push(tool_message(name.to_owned(), call_id, args, &results));
             continue;
         }

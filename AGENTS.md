@@ -106,10 +106,18 @@ agents.
   (`src/session/`: `omp.rs`, `claude.rs`, `codex.rs` JSONL formats sharing
   one completion pre-scan skeleton in `common.rs`), instead of scraping
   terminal output. User/assistant turns are posted as plain messages;
-  **tool calls** are parsed out of each harness's tool records and posted
-  as embeds — one per call, posted once and **edited in place** when the
-  call completes (the colour carries running/done/failed; the `tool_messages`
-  map tracks posted embeds). Posted-message bookkeeping lives on the
+  **tool calls** are parsed out of each harness's tool records — one per
+  call, posted once and **edited in place** when the call completes (the
+  colour carries running/done/failed; the `tool_messages` map tracks the
+  posted message). Single-argument calls post as plain text —
+  `⚙️ **name** \`value\`` while running, gear off once resolved, the
+  single field's value with no field name (newlines or values longer than
+  100 chars switch to a code block) — multi-argument calls keep the
+  field-per-argument embed, and a failed call's error is posted as a
+  **reply embed** (`error` title, code-block body) to the call's message,
+  never baked into it. omp records some calls (`hub`, `task`, …) without
+  arguments; the parser falls back to the record's `intent` as the single
+  argument. Posted-message bookkeeping lives on the
   session row (`synced_messages`, `last_discord_message_id`,
   `transcript_path`) — the only Discord-dependent state, because rebuilding
   the mirror is expensive. A backlog beyond `CATCHUP_BACKLOG` (50) messages
@@ -143,8 +151,10 @@ Discord ──► EventHandler (src/lib.rs)
               │                              │ per-agent FIFO worker (mpsc, 1 at a time;
               │                              │ job carries session_path + post channel)
               │                              ▼
-              │                    herdr agent prompt (wait until idle/done/blocked)
-              │                              │ still working (timeout/stall error) ──► silent wait loop
+              │                    herdr agent prompt, delivered immediately (no wait)
+              │                              │ turn settlement tracked in a detached
+              │                              │ task: typing + wait until idle/done/blocked
+              │                              │ ──► sync session file + blocked notice
               │                              ▼
               │                    read_session(session file) ──► messages since last sync
               │                              │ (delta tracked on the SessionRow)
@@ -208,10 +218,16 @@ Discord ──► EventHandler (src/lib.rs)
 - `src/relay.rs` — per-agent conversation workers (keyed by pane id —
   agents are unnamed; the `RelayJob` carries the session path): one `mpsc`
   channel per agent (shared `Arc<Mutex<HashMap>>` of senders with
-  same-channel-guarded removal, 600s idle timeout). `process_job` = prompt
-  (waits until idle/done/blocked; a `timeout`/`stalled` error → still-
-  working wait loop) → sync the session file → post the new messages since
-  the last sync.
+  same-channel-guarded removal, 600s idle timeout). `process_job` delivers
+  the prompt **immediately** (`agent.prompt` without `wait` — herdr writes
+  it to the agent's input and answers at once), so a long turn never holds
+  the queue: later messages reach the agent as they arrive instead of
+  sitting invisible behind the previous job's settle. Turn settlement runs
+  in a **detached task per message** (`settle_job`): typing indicator up
+  while the turn runs, `agent.wait` loop until idle/done/blocked, then sync
+  the session file (post the new messages since the last sync) and post the
+  blocked notice (deduped per pane within 30s, since several outstanding
+  prompts can settle into one blocked state).
 - `src/lib.rs` (Bot + EventHandler) — the launch-from-post orchestration
   (`launch_from_post`: spawn → bind session → relay the prompt → delete
   the host's post, DM on failure) and the dead-thread resume path
@@ -262,6 +278,14 @@ nix shell --inputs-from . 'nixpkgs#cargo-deny' 'nixpkgs#cargo' -c cargo deny che
   `RUST_LOG` default `warn,herdcord=trace`. Everything else (timeouts,
   agent kind, sync interval, state dir, socket path) is a sane default
   const in `src/config.rs`.
+
+## Commits
+
+- Conventional Commits (`type(scope): subject`, see
+  https://www.conventionalcommits.org/en/v1.0.0/), with a scope when it
+  makes sense (a module or area of the bot, e.g. `fix(relay): …`).
+- Subjects are always lowercase.
+- No body unless the change is large enough to need one.
 
 ## Code Conventions & Common Patterns
 
@@ -327,8 +351,8 @@ nix shell --inputs-from . 'nixpkgs#cargo-deny' 'nixpkgs#cargo' -c cargo deny che
   per connection); nutype newtypes `WorkspaceId`/`PaneId`/`TabId`/
   `SessionPath`; the JSON envelope protocol; the public methods (new,
   list_workspaces, create_workspace_with_pane, close_workspace, create_tab,
-  close_tab, list_agents, get_agent, start_agent, prompt_agent, wait_agent,
-  session_snapshot → `Vec<Agent>`, subscribe) plus `AgentStatus` and
+  close_tab, list_agents, get_agent, start_agent, send_prompt, prompt_agent,
+  wait_agent, session_snapshot → `Vec<Agent>`, subscribe) plus `AgentStatus` and
   `Error` with `is_timeout`/`is_stalled`. Fixture tests pin the wire
   format.
 - `src/db.rs` — toasty SQLite state: `WorkspaceRow`/`SessionRow` models and
