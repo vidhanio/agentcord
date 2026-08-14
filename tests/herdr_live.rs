@@ -72,16 +72,17 @@ async fn spawn_prompt_read_close_roundtrip() {
     assert_eq!(agent.cwd, std::path::PathBuf::from("/tmp"));
     assert!(!matches!(agent.status(), AgentStatus::Unknown));
 
-    // Prompting waits for the turn to settle (idle/done/blocked), so the
-    // returned agent is never still working.
-    let agent = herdr
-        .prompt_agent(
-            &agent.pane_id,
-            "Reply with exactly: OK",
-            Duration::from_secs(90),
-        )
+    // Delivery and settlement are separate calls — the same two-step flow
+    // the relay uses, so a long turn never holds its queue: the prompt
+    // goes to the agent immediately, and the settle is waited for after.
+    let _ = herdr
+        .send_prompt(&agent.pane_id, "Reply with exactly: OK")
         .await
-        .expect("prompt agent");
+        .expect("send prompt");
+    let agent = herdr
+        .wait_agent(&agent.pane_id, Duration::from_secs(90))
+        .await
+        .expect("wait for settle");
     assert!(!matches!(agent.status(), AgentStatus::Working));
 
     let status = herdr.get_agent(&agent.pane_id).await.expect("get agent");

@@ -17,8 +17,8 @@ use crate::session::AgentKind;
 /// tag.
 pub const DEFAULT_AGENT_KIND: AgentKind = AgentKind::Omp;
 
-/// How long one prompt waits in a single request before the relay continues
-/// waiting silently.
+/// How long one settle-wait call waits in a single request before the
+/// relay continues waiting silently.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Timeout for individual herdr API calls.

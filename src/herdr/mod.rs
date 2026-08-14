@@ -556,6 +556,29 @@ impl Herdr {
         Ok(info.agent)
     }
 
+    /// Delivers a prompt to the agent at `target` without waiting for the
+    /// turn to settle (`agent.prompt` without `wait`): herdr writes the
+    /// text to the agent's input immediately and answers with the agent
+    /// record. Settlement is tracked separately with [`Herdr::wait_agent`],
+    /// so a long turn never holds the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Herdr`], [`Error::Timeout`], [`Error::Io`], or
+    /// [`Error::Json`] when the request fails.
+    pub async fn send_prompt(&self, target: &PaneId, text: &str) -> Result<Agent, Error> {
+        let info: AgentInfo = self
+            .call_typed(
+                "agent.prompt",
+                json!({
+                    "target": target,
+                    "text": text,
+                }),
+            )
+            .await?;
+        Ok(info.agent)
+    }
+
     /// Waits for the agent at `target` to settle, bounded by `timeout`.
     ///
     /// # Errors

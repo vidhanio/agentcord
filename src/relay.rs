@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fmt::{self, Display, Formatter},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serenity::all::{ChannelId, Context, CreateMessage};
@@ -28,6 +28,13 @@ pub struct RelayJob {
 
 /// How long a worker with no incoming messages stays alive.
 const WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How recently a blocked notice must have been posted for a pane to
+/// suppress another: several outstanding prompts can settle into the same
+/// blocked state at once, and each of their detached watchers would
+/// otherwise post one. Entries older than the window are pruned on the
+/// next notice, so the map stays bounded by panes blocked recently.
+const BLOCKED_NOTICE_DEDUPE: Duration = Duration::from_secs(30);
 
 /// What a failed herdr call was doing, for error messages.
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +66,9 @@ pub struct Relay {
     /// Live workers by pane id — agents are unnamed, so the pane is the
     /// stable relay target.
     workers: Arc<Mutex<HashMap<PaneId, mpsc::Sender<RelayJob>>>>,
+    /// When each pane's blocked notice was last posted, deduplicating the
+    /// notice across the concurrent settle watchers of one blocked state.
+    blocked_notices: Arc<Mutex<HashMap<PaneId, Instant>>>,
 }
 
 impl Relay {
@@ -68,6 +78,7 @@ impl Relay {
             herdr,
             forum,
             workers: Arc::new(Mutex::new(HashMap::new())),
+            blocked_notices: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -144,57 +155,93 @@ impl Relay {
         target: &PaneId,
         job: RelayJob,
     ) -> Result<(), BotError> {
-        // A typing indicator while the job runs; dropped (stopping it) when
-        // the job settles.
-        let _typing = serenity::all::Typing::start(Arc::clone(&ctx.http), job.channel_id);
+        // Deliver the prompt immediately — herdr writes it to the agent's
+        // input without waiting for the turn — so a long turn never holds
+        // the relay queue: later messages reach the agent as they arrive
+        // instead of sitting invisible behind the previous job's settle.
+        // Settlement is tracked in a detached task (typing indicator,
+        // response sync, blocked notice), so the worker moves straight on.
+        if let Err(error) = self.herdr.send_prompt(target, &job.text).await {
+            self.post_error(ctx, job.channel_id, target, HerdrAction::Talk, &error)
+                .await?;
+            return Err(error.into());
+        }
 
-        let prompt_timeout = crate::config::PROMPT_TIMEOUT;
+        let relay = self.clone();
+        let ctx = ctx.clone();
+        let target = target.clone();
+        let channel_id = job.channel_id;
+        let session_path = job.session_path;
+        tokio::spawn(async move {
+            relay
+                .settle_job(ctx, target, channel_id, session_path)
+                .await;
+        });
 
-        // `prompt_agent` waits for the turn to settle; a timeout error means
-        // the agent is still working. Keep waiting silently — the typing
-        // indicator stays on — and sync the transcript once the turn settles.
+        Ok(())
+    }
+
+    /// Detached settlement for one delivered prompt: keeps the typing
+    /// indicator up while the turn runs, waits for the agent to settle
+    /// (idle/done/blocked), syncs the transcript, and posts the blocked
+    /// notice. Runs outside the relay queue so a long turn never delays
+    /// later messages; failures are surfaced to the thread and logged.
+    async fn settle_job(
+        &self,
+        ctx: Context,
+        target: PaneId,
+        channel_id: ChannelId,
+        session_path: SessionPath,
+    ) {
+        // A typing indicator while the turn runs; dropped (stopping it)
+        // when the turn settles.
+        let _typing = serenity::all::Typing::start(Arc::clone(&ctx.http), channel_id);
+
         let agent = match self
-            .herdr
-            .prompt_agent(target, &job.text, prompt_timeout)
+            .wait_until_settled(&ctx, &target, channel_id, crate::config::PROMPT_TIMEOUT)
             .await
         {
             Ok(agent) => agent,
-            // The agent is still working (timeout) or accepted the prompt
-            // without herdr observing a state change within its short
-            // window (stall). Keep waiting silently — the typing indicator
-            // stays on — and sync the transcript once the turn settles.
-            Err(error) if error.is_timeout() || error.is_stalled() => {
-                match self
-                    .wait_until_settled(ctx, target, job.channel_id, prompt_timeout)
-                    .await
-                {
-                    Ok(next) => next,
-                    Err(error) => return Err(error),
-                }
-            }
             Err(error) => {
-                self.post_error(ctx, job.channel_id, target, HerdrAction::Talk, &error)
-                    .await?;
-                return Err(error.into());
+                warn!(?error, %target, "failed to wait for agent to settle");
+                return;
             }
         };
 
         // The agent's output is synced from its session file; a sync failure
         // is best-effort (the periodic reconcile retries).
-        self.forum
-            .sync_session_by_path(ctx, &job.session_path)
-            .await;
+        self.forum.sync_session_by_path(&ctx, &session_path).await;
 
-        if agent.status() == AgentStatus::Blocked {
-            job.channel_id
-                .send_message(
-                    ctx,
-                    CreateMessage::new()
-                        .content("The agent is **blocked** — it's waiting for input."),
-                )
-                .await?;
+        if agent.status() == AgentStatus::Blocked
+            && let Err(error) = self.post_blocked_notice(&ctx, &target, channel_id).await
+        {
+            warn!(?error, %target, "failed to post blocked notice");
         }
+    }
 
+    /// Posts "the agent is **blocked**" unless one was posted for this
+    /// pane within the dedupe window.
+    async fn post_blocked_notice(
+        &self,
+        ctx: &Context,
+        target: &PaneId,
+        channel_id: ChannelId,
+    ) -> Result<(), BotError> {
+        {
+            let mut notices = self.blocked_notices.lock().await;
+            let now = Instant::now();
+            notices.retain(|_, posted| now.duration_since(*posted) < BLOCKED_NOTICE_DEDUPE);
+            if notices.contains_key(target) {
+                return Ok(());
+            }
+            notices.insert(target.to_owned(), now);
+        }
+        channel_id
+            .send_message(
+                ctx,
+                CreateMessage::new().content("The agent is **blocked** — it's waiting for input."),
+            )
+            .await?;
         Ok(())
     }
 
