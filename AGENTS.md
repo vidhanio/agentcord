@@ -475,8 +475,8 @@ wire it into git with `prek install`.
   parsers (`parse_omp`/`parse_claude_code`/`parse_codex`,
   malformed/truncated lines, titles) and `read_session`, `src/db.rs` tests
   workspace/session upserts and lookups on an in-memory database,
-  `src/forum/` tests `sanitize_agent_name`, the title selection, the
-  post-prompt assembly, and the per-kind resume args, `src/config.rs`
+  `src/forum/` tests the agent-name timestamp, the title selection, the
+  modal construction, and the per-kind resume args, `src/config.rs`
   tests state-dir resolution.
 - **Live tests** (`tests/herdr_live.rs`): gated behind `HERDR_LIVE_TESTS=1`
   (no-ops otherwise, so plain `cargo test`/nextest needs no herdr). Spawns

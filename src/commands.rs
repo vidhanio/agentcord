@@ -306,8 +306,7 @@ async fn launch_from_modal(
         )));
     };
 
-    let base = forum::sanitize_agent_name(workspace_label).unwrap_or_else(|| "agent".to_owned());
-    let name = bot.forum.unique_agent_name(&base).await?;
+    let name = bot.forum.fresh_agent_name().await?;
     let cwd = bot.forum.launch_cwd(workspace_label).await;
 
     info!(%name, kind = kind.as_str(), %workspace_label, "/agent launches agent");

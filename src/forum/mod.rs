@@ -51,41 +51,16 @@ const RESUBSCRIBE_DELAY: Duration = Duration::from_secs(5);
 /// suspects the session rotated to a new file.
 const SESSION_STALE_GRACE: Duration = Duration::from_secs(300);
 
-/// Converts a forum post title into a valid herdr agent name
-/// (`[a-z][a-z0-9_-]{0,31}`): lowercases, turns other characters into `-`,
-/// prefixes with `agent-` when it doesn't start with a letter, and truncates
-/// to 32 characters. Returns `None` when nothing usable remains.
+/// The agent-name stamp for every fresh launch: `herdcord-<UTC
+/// timestamp>` (`herdcord-20260814-231527`). Numeric, zero-padded, and in
+/// UTC so names sort chronologically; two launches in the same second get
+/// a numeric suffix from [`Forum::unique_agent_name`].
 #[must_use]
-pub fn sanitize_agent_name(title: &str) -> Option<String> {
-    let mut name = String::with_capacity(title.len());
-
-    for ch in title.to_lowercase().chars() {
-        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
-            name.push(ch);
-        } else if !name.is_empty() && !name.ends_with('-') {
-            name.push('-');
-        }
-    }
-
-    while name.ends_with('-') {
-        name.pop();
-    }
-
-    if name.is_empty() {
-        return None;
-    }
-
-    if !name.starts_with(|ch: char| ch.is_ascii_lowercase()) {
-        name.insert_str(0, "agent-");
-    }
-
-    name.truncate(32);
-
-    while name.ends_with('-') {
-        name.pop();
-    }
-
-    Some(name)
+pub fn agent_name_stamp() -> String {
+    format!(
+        "herdcord-{}",
+        jiff::Timestamp::now().strftime("%Y%m%d-%H%M%S")
+    )
 }
 
 /// A typing indicator on session posts, owned by the event loop: started
@@ -527,6 +502,12 @@ impl Forum {
             .find_map(AgentKind::parse))
     }
 
+    /// A unique name for a fresh agent: the [`agent_name_stamp`] with a
+    /// numeric suffix when the same second already produced a live agent.
+    pub(crate) async fn fresh_agent_name(&self) -> BotResult<String> {
+        self.unique_agent_name(&agent_name_stamp()).await
+    }
+
     /// A herdr agent name based on `base` that no live agent uses: `base`
     /// itself, or `base-2`, `base-3`, … when taken.
     pub(crate) async fn unique_agent_name(&self, base: &str) -> BotResult<String> {
@@ -617,9 +598,7 @@ impl Forum {
             .unwrap_or(crate::config::DEFAULT_AGENT_KIND);
         let args = resume_args(kind, session);
         let workspace = self.workspace_by_label(&session.workspace_label).await?;
-        let title = self.forum_thread(ctx, post).await?.base.name;
-        let base = sanitize_agent_name(&title).unwrap_or_else(|| "resumed".to_owned());
-        let name = self.unique_agent_name(&base).await?;
+        let name = self.fresh_agent_name().await?;
 
         info!(
             session = %session.session_path,
@@ -928,7 +907,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        resume_args, sanitize_agent_name,
+        agent_name_stamp, resume_args,
         titles::{forum_channel_name, post_title, session_intro},
     };
     use crate::{
@@ -938,39 +917,23 @@ mod tests {
     };
 
     #[test]
-    fn sanitize_basic() {
-        assert_eq!(
-            sanitize_agent_name("My Cool Agent").as_deref(),
-            Some("my-cool-agent")
+    fn agent_name_stamp_is_lowercase_numeric_and_dated() {
+        let name = agent_name_stamp();
+        assert_eq!(name.len(), "herdcord-".len() + 15);
+        assert!(
+            name.starts_with("herdcord-"),
+            "name should start with the prefix: {name}"
         );
-    }
-
-    #[test]
-    fn sanitize_collapses_separators() {
-        assert_eq!(sanitize_agent_name("a--b___c").as_deref(), Some("a-b-c"));
-    }
-
-    #[test]
-    fn sanitize_truncates() {
-        assert_eq!(
-            sanitize_agent_name(&"a".repeat(64)).as_deref(),
-            Some("a".repeat(32).as_str())
+        let stamp = &name["herdcord-".len()..];
+        assert!(
+            stamp.chars().all(|ch| ch.is_ascii_digit() || ch == '-'),
+            "stamp should be purely numeric: {stamp}"
         );
-    }
-
-    #[test]
-    fn sanitize_prefixes_non_letter_start() {
-        assert_eq!(
-            sanitize_agent_name("123abc").as_deref(),
-            Some("agent-123abc")
-        );
-        assert_eq!(sanitize_agent_name("🤖 bot").as_deref(), Some("bot"));
-    }
-
-    #[test]
-    fn sanitize_rejects_unusable() {
-        assert_eq!(sanitize_agent_name("💥💥"), None);
-        assert_eq!(sanitize_agent_name("---"), None);
+        // `herdcord-YYYYMMDD-HHMMSS` — two dash-separated numeric groups.
+        let mut parts = stamp.split('-');
+        assert_eq!(parts.next().map(str::len), Some(8));
+        assert_eq!(parts.next().map(str::len), Some(6));
+        assert_eq!(parts.next(), None);
     }
 
     #[test]

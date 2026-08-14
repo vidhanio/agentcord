@@ -3,7 +3,6 @@ name = "herdcord"
 version = "0.1.0"
 edition = "2024"
 
-authors = ["Vidhan Bhatt <me@vidhan.io>"]
 license = "AGPL-3.0-or-later"
 publish = false
 
@@ -33,6 +32,7 @@ poise = { git = "https://github.com/serenity-rs/poise", branch = "serenity-next"
   "handle_panics",
 ] }
 thiserror = "2"
+jiff = "0.2"
 tokio = { version = "1", features = [
   "macros",
   "net",
