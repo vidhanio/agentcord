@@ -167,12 +167,33 @@ async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), 
         labels.truncate(MAX_WORKSPACE_OPTIONS);
     }
 
+    // When the command runs in a workspace's forum (or in a post inside
+    // one), preselect that workspace in the dropdown.
+    let default_workspace = match ctx.channel().await {
+        Some(serenity::Channel::Guild(channel)) => Some(channel.id),
+        Some(serenity::Channel::GuildThread(thread)) => Some(thread.parent_id),
+        _ => None,
+    };
+    let default_workspace = match default_workspace {
+        Some(id) => {
+            let id = i64::try_from(id.get())
+                .map_err(|_| BotError::Other("channel id overflows i64".into()))?;
+            bot.db
+                .workspace_by_forum(id)
+                .await
+                .ok()
+                .flatten()
+                .map(|row| row.label)
+        }
+        None => None,
+    };
+
     // The modal is built by hand (poise's derive only knows text inputs):
     // sent as the command's initial response, then the submit is awaited
     // through the modal collector. The custom id is the interaction id, so
     // concurrent invocations never cross.
     let custom_id = ctx.interaction.id.to_string();
-    let modal = build_agent_modal(&custom_id, &labels);
+    let modal = build_agent_modal(&custom_id, &labels, default_workspace.as_deref());
     ctx.interaction
         .create_response(ctx.http(), CreateInteractionResponse::Modal(modal))
         .await?;
@@ -228,8 +249,13 @@ async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), 
 }
 
 /// The agent modal: the harness dropdown (the configured default kind
-/// preselected), the workspace dropdown, and the prompt input.
-fn build_agent_modal<'a>(custom_id: &'a str, workspace_labels: &'a [String]) -> CreateModal<'a> {
+/// preselected), the workspace dropdown (preselected when the command ran
+/// in a managed forum), and the prompt input.
+fn build_agent_modal<'a>(
+    custom_id: &'a str,
+    workspace_labels: &'a [String],
+    default_workspace: Option<&str>,
+) -> CreateModal<'a> {
     let kind_menu = CreateSelectMenu::new(
         KIND_SELECT_ID,
         CreateSelectMenuKind::String {
@@ -247,7 +273,10 @@ fn build_agent_modal<'a>(custom_id: &'a str, workspace_labels: &'a [String]) -> 
         CreateSelectMenuKind::String {
             options: workspace_labels
                 .iter()
-                .map(|label| CreateSelectMenuOption::new(label, label))
+                .map(|label| {
+                    CreateSelectMenuOption::new(label, label)
+                        .default_selection(default_workspace == Some(label.as_str()))
+                })
                 .collect(),
         },
     );
@@ -481,5 +510,52 @@ mod tests {
                 prompt: None,
             }
         );
+    }
+
+    #[test]
+    fn agent_modal_preselects_the_default_workspace() {
+        use super::{WORKSPACE_SELECT_ID, build_agent_modal};
+
+        let labels = ["alpha".to_owned(), "beta".to_owned()];
+        let modal = build_agent_modal("custom", &labels, Some("beta"));
+        let value = serde_json::to_value(&modal).expect("modal serializes");
+        let workspace = value["components"]
+            .as_array()
+            .expect("components")
+            .iter()
+            .map(|component| &component["component"])
+            .find(|component| component["custom_id"].as_str() == Some(WORKSPACE_SELECT_ID))
+            .expect("workspace select");
+        let defaults = workspace["options"]
+            .as_array()
+            .expect("options")
+            .iter()
+            .filter(|option| option["default"].as_bool() == Some(true))
+            .map(|option| option["value"].as_str().expect("option value"))
+            .collect::<Vec<_>>();
+        assert_eq!(defaults, vec!["beta"]);
+    }
+
+    #[test]
+    fn agent_modal_defaults_only_the_kind_without_a_channel_workspace() {
+        use super::build_agent_modal;
+
+        let labels = ["alpha".to_owned()];
+        let modal = build_agent_modal("custom", &labels, None);
+        let value = serde_json::to_value(&modal).expect("modal serializes");
+        let defaults = value["components"]
+            .as_array()
+            .expect("components")
+            .iter()
+            .flat_map(|component| {
+                component["component"]["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+            })
+            .filter(|option| option["default"].as_bool() == Some(true))
+            .map(|option| option["value"].as_str().expect("option value"))
+            .collect::<Vec<_>>();
+        assert_eq!(defaults, vec!["omp"]);
     }
 }
