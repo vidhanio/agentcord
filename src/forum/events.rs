@@ -3,7 +3,7 @@
 
 use std::{collections::HashSet, path::Path};
 
-use serenity::all::{Context, EditThread};
+use serenity::all::{ChannelId, Context, EditThread};
 use tracing::{info, warn};
 
 use crate::{
@@ -20,7 +20,10 @@ impl Forum {
     /// agent-kind tag stays), the starter message's pane part flips to the
     /// inactive marker, and the thread is closed — archived, never locked,
     /// so a message still auto-unarchives it and resumes the session. A
-    /// live agent's sync reopens it.
+    /// live agent's sync reopens it. Idempotent: an already-archived post
+    /// (a previous inactivation, or a manual/Discord archive) is only
+    /// re-tagged — Discord rejects message edits in archived threads, so
+    /// the starter refresh and the close are skipped for it.
     async fn inactivate_post(&self, ctx: &Context, session: &crate::db::SessionRow) {
         let Some(post_id) = session.post_channel_id else {
             return;
@@ -36,6 +39,9 @@ impl Forum {
                 session = %session.session_path,
                 "failed to drop status tags of dead session"
             );
+        }
+        if self.post_archived(ctx, post).await {
+            return;
         }
         let intro = session_intro(
             None,
@@ -63,6 +69,18 @@ impl Forum {
                 "failed to close inactive session post"
             );
         }
+    }
+
+    /// Whether `post` is an archived thread. Unknown state (deleted or
+    /// unwrapped channel) counts as not archived, so the caller attempts
+    /// its writes and surfaces the real error.
+    async fn post_archived(&self, ctx: &Context, post: ChannelId) -> bool {
+        self.forum_channel(ctx, post).await.is_ok_and(|channel| {
+            channel
+                .thread_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.archived)
+        })
     }
 
     /// Reconciles the forums with herdr: ensures (and renames) a forum per
