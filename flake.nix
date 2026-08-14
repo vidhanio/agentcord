@@ -107,7 +107,6 @@
               inherit (self') checks;
 
               packages = [
-                pkgs.cargo-deny
                 pkgs.nil
                 pkgs.prek
                 config.treefmt.build.wrapper

@@ -243,7 +243,7 @@ Discord ──► EventHandler (src/lib.rs)
 | `src/herdr/` | herdr Unix-socket client: `mod.rs` (client + models + errors), `event.rs` (subscription machinery), `wire.rs` (envelope + result payloads) |
 | `src/session/` | Transcript normalization: `mod.rs` (models + read_session), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs` (per-harness parsers) |
 | `tests/` | `herdr_live.rs` (live integration, gated) and `fixtures/api/` (captured herdr API JSON, embedded via `include_str!`) |
-| `.github/workflows/` | CI — `ci-cd.yaml` (test, test-docs, check/clippy, check-docs, check-format; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/fmt/docs) and `security-audit.yaml` (daily + on manifest changes, cargo-deny) |
+| `.github/workflows/` | CI — `ci-cd.yaml` (test, test-docs, check/clippy, check-docs, check-format via the flake's treefmt check; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs, nix for formatting) and `security-audit.yaml` (daily + on manifest changes, cargo-deny) |
 
 ## Development Commands
 
@@ -252,9 +252,11 @@ toolchain is nightly (required for `rustfmt.toml` unstable options).
 
 **`nix develop` is the source of truth** — direnv (`.envrc` uses
 `use flake`) loads the same devshell. It provides the nightly toolchain,
-the treefmt wrapper, nil, cargo-deny, and prek, and builds the flake
-checks (clippy/doc/fmt/deny/nextest) so the environment is verified. The
-first load builds the checks; later loads are cached.
+the treefmt wrapper, nil, and prek, plus the check tools (cargo-deny,
+cargo-nextest, …) propagated from the checks' native build inputs, and
+builds the flake checks (clippy/doc/fmt/treefmt/deny/nextest) so the
+environment is verified. The first load builds the checks; later loads
+are cached.
 
 ```sh
 # inside the devshell (nix develop, or direnv on `cd`):
@@ -432,11 +434,13 @@ wire it into git with `prek install`.
   leaked workspaces. Never run in CI.
 - **QA gates**: clippy `--all-targets -- -D warnings` (pedantic+nursery),
   nightly `cargo fmt --check`, `cargo deny check`, `nix flake check`
-  (clippy, doc, fmt, deny, nextest). CI runs the same gates directly —
-  `cargo test --all-targets` on stable, clippy/fmt/doc on nightly, and
-  `cargo-deny` (see `.github/workflows/`); `nix flake check` remains the
-  local hermetic equivalent. Every commit is additionally gated by a prek
-  hook running `treefmt --ci` on the whole tree (`.pre-commit-config.yaml`).
+  (clippy, doc, fmt, treefmt, deny, nextest). CI runs the same gates
+  directly — `cargo test --all-targets` on stable, clippy/doc on nightly,
+  formatting via the flake's treefmt check
+  (`nix build .#checks.x86_64-linux.treefmt`), and `cargo-deny` (see
+  `.github/workflows/`); `nix flake check` remains the local hermetic
+  equivalent. Every commit is additionally gated by a prek hook running
+  `treefmt --ci` on the whole tree (`.pre-commit-config.yaml`).
 - **Coverage expectations**: no coverage tooling; correctness is enforced by
   the fixture tests, the session parser + db tests, the live tests, and
   clippy's pedantic set. New herdr wire shapes should get a fixture +

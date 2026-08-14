@@ -94,13 +94,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
 
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Nix
+        uses: DeterminateSystems/magic-nix-cache-action@v9
 
+      # treefmt config lives in the flake (treefmt-nix: nixfmt, statix,
+      # deadnix, nightly rustfmt, taplo), so the fmt gate is the flake's
+      # own treefmt check: it formats the tree and fails on any diff.
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: nix build .#checks.x86_64-linux.treefmt
