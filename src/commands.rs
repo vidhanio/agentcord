@@ -137,7 +137,7 @@ fn on_error(error: FrameworkError<'_, Bot, BotError>) -> poise::BoxFuture<'_, ()
     })
 }
 
-/// `/agent`: launch an agent in a herdr workspace via a modal.
+/// Launch an agent in a herdr workspace via a modal.
 #[poise::command(slash_command, check = "allowed")]
 async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), BotError> {
     let bot = ctx.data().clone();
@@ -331,8 +331,7 @@ async fn launch_from_modal(
     Ok(link)
 }
 
-/// `/herdr`: run the one-shot control-plane agent and relay its
-/// acknowledgment.
+/// Run a one-shot herdr control action in a throwaway session.
 #[poise::command(slash_command, check = "allowed")]
 async fn herdr(
     ctx: poise::ApplicationContext<'_, Bot, BotError>,
