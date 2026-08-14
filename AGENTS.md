@@ -242,7 +242,7 @@ Discord ──► EventHandler (src/lib.rs)
 | `src/herdr/` | herdr Unix-socket client: `mod.rs` (client + models + errors), `event.rs` (subscription machinery), `wire.rs` (envelope + result payloads) |
 | `src/session/` | Transcript normalization: `mod.rs` (models + read_session), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs` (per-harness parsers) |
 | `tests/` | `herdr_live.rs` (live integration, gated) and `fixtures/api/` (captured herdr API JSON, embedded via `include_str!`) |
-| `.github/workflows/` | CI — a single `nix flake check` job (clippy/doc/fmt/deny/nextest) |
+| `.github/workflows/` | CI — `ci-cd.yaml` (test, test-docs, check/clippy, check-docs, check-format; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/fmt/docs) and `security-audit.yaml` (daily + on manifest changes, cargo-deny) |
 
 ## Development Commands
 
@@ -289,6 +289,8 @@ nix shell --inputs-from . 'nixpkgs#cargo-deny' 'nixpkgs#cargo' -c cargo deny che
 
 ## Code Conventions & Common Patterns
 
+- **Commits**: commit as soon as a feature or fix has been developed — never
+  leave finished work uncommitted, so state is never lost.
 - **Formatting**: `rustfmt.toml` uses nightly-only options (`unstable_features`,
   `group_imports = "StdExternalCrate"`, `imports_granularity = "Crate"`,
   `wrap_comments`, `reorder_impl_items`). Imports: std → external → `crate::`,
@@ -420,7 +422,10 @@ nix shell --inputs-from . 'nixpkgs#cargo-deny' 'nixpkgs#cargo' -c cargo deny che
   leaked workspaces. Never run in CI.
 - **QA gates**: clippy `--all-targets -- -D warnings` (pedantic+nursery),
   nightly `cargo fmt --check`, `cargo deny check`, `nix flake check`
-  (clippy, doc, fmt, deny, nextest). CI runs `nix flake check` only.
+  (clippy, doc, fmt, deny, nextest). CI runs the same gates directly —
+  `cargo test --all-targets` on stable, clippy/fmt/doc on nightly, and
+  `cargo-deny` (see `.github/workflows/`); `nix flake check` remains the
+  local hermetic equivalent.
 - **Coverage expectations**: no coverage tooling; correctness is enforced by
   the fixture tests, the session parser + db tests, the live tests, and
   clippy's pedantic set. New herdr wire shapes should get a fixture +
