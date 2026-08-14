@@ -128,7 +128,10 @@ agents.
   call's error is an `error` embed field on it. omp records some calls
   (`hub`, `task`, …) without
   arguments; the parser falls back to the record's `intent` as the single
-  argument. Posted-message bookkeeping lives on the
+  argument — and omp truncates the args it records in
+  `tool_execution_start` (≈230 chars), so a truncated record falls back
+  to the full arguments from the assistant's `toolCall` message record,
+  matched by tool name in order. Posted-message bookkeeping lives on the
   session row (`synced_messages`, `last_discord_message_id`,
   `transcript_path`) — the only Discord-dependent state, because rebuilding
   the mirror is expensive. A backlog beyond `CATCHUP_BACKLOG` (50) messages

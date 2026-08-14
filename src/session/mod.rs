@@ -694,6 +694,37 @@ mod tests {
     }
 
     #[test]
+    fn omp_truncated_execution_args_fall_back_to_message_arguments() {
+        let raw = r#"{"type":"message","id":"m1","timestamp":"2026-08-14T23:00:00.000Z","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"ls -la /very/long/path/with/plenty/of/segments"}}]}}
+{"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"call_0","toolName":"bash","args":{"command":"ls -la /very/long…"}},"id":"i1","timestamp":"2026-08-14T23:00:01.000Z"}
+"#;
+        let messages = parse_omp(raw);
+        assert_eq!(messages.len(), 1);
+        let call = messages[0].tool.as_ref().unwrap();
+        // The record's args were truncated by omp (the trailing ellipsis);
+        // the full arguments come from the message record.
+        assert_eq!(
+            call.args.as_deref(),
+            Some(r#"{"command":"ls -la /very/long/path/with/plenty/of/segments"}"#)
+        );
+        assert_eq!(
+            messages[0].text,
+            "bash {\"command\":\"ls -la /very/long/path/with/plenty/of/segments\"}"
+        );
+    }
+
+    #[test]
+    fn omp_untruncated_args_keep_the_record_values() {
+        let raw = r#"{"type":"message","id":"m1","timestamp":"2026-08-14T23:00:00.000Z","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"echo full version"}}]}}
+{"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"call_0","toolName":"bash","args":{"command":"echo short"}},"id":"i1","timestamp":"2026-08-14T23:00:01.000Z"}
+"#;
+        let messages = parse_omp(raw);
+        assert_eq!(messages.len(), 1);
+        let call = messages[0].tool.as_ref().unwrap();
+        assert_eq!(call.args.as_deref(), Some(r#"{"command":"echo short"}"#));
+    }
+
+    #[test]
     fn malformed_lines_skipped() {
         let raw = r#"{"type":"message","id":"m1","timestamp":"2026-08-12T22:22:58.354Z","message":{"role":"user","content":"first"}}
 not json at all

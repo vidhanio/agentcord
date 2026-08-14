@@ -1,5 +1,7 @@
 //! The `omp` transcript parser.
 
+use std::collections::VecDeque;
+
 use serde_json::Value;
 
 use super::{
@@ -39,6 +41,43 @@ pub fn parse_omp(raw: &str) -> Vec<SessionMessage> {
     // state is known up front.
     let results = scan_completions(raw, omp_completion);
 
+    // Pre-scan the full arguments from the assistant `toolCall` message
+    // records: omp truncates the args it records in `tool_execution_start`
+    // (about 230 characters), so a truncated record falls back to the
+    // message's full arguments, matched by tool name in record order.
+    let mut full_args: VecDeque<(String, String)> = VecDeque::new();
+    for line in raw.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        for block in message
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if block.get("type").and_then(Value::as_str) != Some("toolCall") {
+                continue;
+            }
+            let (Some(name), Some(arguments)) = (
+                block.get("name").and_then(Value::as_str),
+                block.get("arguments"),
+            ) else {
+                continue;
+            };
+            full_args.push_back((name.to_owned(), compact_args(arguments)));
+        }
+    }
+
     let mut messages = Vec::new();
     for line in raw.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -66,6 +105,19 @@ pub fn parse_omp(raw: &str) -> Vec<SessionMessage> {
                 data.get("intent")
                     .and_then(Value::as_str)
                     .map(|intent| compact_args(&Value::String(intent.to_owned())))
+            });
+            // A record whose args end in an ellipsis was truncated by omp;
+            // the message record carries the full arguments.
+            let args = args.map(|args| {
+                if !args.trim_end_matches(['}', '"']).ends_with('…') {
+                    return args;
+                }
+                full_args
+                    .iter()
+                    .position(|(full_name, _)| full_name == name)
+                    .map_or(args, |index| {
+                        full_args.remove(index).expect("position checked").1
+                    })
             });
             messages.push(tool_message(name.to_owned(), call_id, args, &results));
             continue;
