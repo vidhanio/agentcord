@@ -349,7 +349,6 @@ wire it into git with `prek install`.
 - Backticks around anything referencing code or code constructs in the
   message body — identifiers, paths, commands, API names, types
   (e.g. ``the `Context` data type``, ```ClientBuilder::data``).
-- No body unless the change is large enough to need one.
 
 ## Code Conventions & Common Patterns
 
