@@ -346,6 +346,9 @@ wire it into git with `prek install`.
   https://www.conventionalcommits.org/en/v1.0.0/), with a scope when it
   makes sense (a module or area of the bot, e.g. `fix(relay): …`).
 - Subjects are always lowercase.
+- Backticks around anything referencing code or code constructs in the
+  message body — identifiers, paths, commands, API names, types
+  (e.g. ``the `Context` data type``, ```ClientBuilder::data``).
 - No body unless the change is large enough to need one.
 
 ## Code Conventions & Common Patterns
