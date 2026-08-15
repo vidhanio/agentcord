@@ -494,3 +494,13 @@ wire it into git with `prek install`.
   the fixture tests, the session parser + db tests, the live tests, and
   clippy's pedantic set. New herdr wire shapes should get a fixture +
   parsing test; new session formats should get a parser test.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as GitHub issues, managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context layout: one `CONTEXT.md` at the repo root plus `docs/adr/`. See `docs/agents/domain.md`.
