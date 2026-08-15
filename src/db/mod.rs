@@ -16,7 +16,7 @@ use crate::herdr::SessionPath;
 pub mod migrate;
 pub mod model;
 
-pub(crate) use self::model::{SessionRow, WorkspaceRow};
+pub use self::model::{SessionRow, WorkspaceRow};
 
 /// SQLite-backed store for workspaces and sessions.
 ///
@@ -28,7 +28,8 @@ pub struct Db {
 
 impl Db {
     /// Wraps an already-connected and schema-migrated toasty database.
-    pub(crate) const fn from_inner(db: toasty::Db) -> Self {
+    #[must_use]
+    pub const fn from_inner(db: toasty::Db) -> Self {
         Self { db }
     }
 
@@ -45,7 +46,7 @@ impl Db {
     }
 
     /// Returns the workspace with the given label, if any.
-    pub(crate) async fn get_workspace(&self, label: &str) -> toasty::Result<Option<WorkspaceRow>> {
+    pub async fn get_workspace(&self, label: &str) -> toasty::Result<Option<WorkspaceRow>> {
         let mut conn = self.db.connection().await?;
         let row = WorkspaceRow::filter(WorkspaceRow::fields().label().eq(label))
             .first()
@@ -56,7 +57,7 @@ impl Db {
 
     /// Returns the workspace with the given herdr id, if any — used to
     /// re-key the row when the workspace is renamed.
-    pub(crate) async fn get_workspace_by_id(
+    pub async fn get_workspace_by_id(
         &self,
         workspace_id: &str,
     ) -> toasty::Result<Option<WorkspaceRow>> {
@@ -69,7 +70,7 @@ impl Db {
     }
 
     /// Inserts `row`, or replaces the workspace with the same label.
-    pub(crate) async fn upsert_workspace(&self, row: &WorkspaceRow) -> toasty::Result<()> {
+    pub async fn upsert_workspace(&self, row: &WorkspaceRow) -> toasty::Result<()> {
         let mut conn = self.db.connection().await?;
         WorkspaceRow::upsert_by_label(&row.label)
             .workspace_id(row.workspace_id.clone())
@@ -81,7 +82,7 @@ impl Db {
 
     /// Returns the workspace whose forum channel is `forum_channel_id`, if
     /// any.
-    pub(crate) async fn workspace_by_forum(
+    pub async fn workspace_by_forum(
         &self,
         forum_channel_id: i64,
     ) -> toasty::Result<Option<WorkspaceRow>> {
@@ -98,7 +99,7 @@ impl Db {
     }
 
     /// Returns the session with the given session path, if any.
-    pub(crate) async fn get_session(
+    pub async fn get_session(
         &self,
         session_path: &SessionPath,
     ) -> toasty::Result<Option<SessionRow>> {
@@ -115,7 +116,7 @@ impl Db {
     }
 
     /// Inserts `row`, or replaces the session with the same session path.
-    pub(crate) async fn upsert_session(&self, row: &SessionRow) -> toasty::Result<()> {
+    pub async fn upsert_session(&self, row: &SessionRow) -> toasty::Result<()> {
         let mut conn = self.db.connection().await?;
         SessionRow::upsert_by_session_path(&row.session_path)
             .post_channel_id(row.post_channel_id)
@@ -131,7 +132,7 @@ impl Db {
     }
 
     /// Returns the session bound to forum post `post_channel_id`, if any.
-    pub(crate) async fn session_by_post(
+    pub async fn session_by_post(
         &self,
         post_channel_id: i64,
     ) -> toasty::Result<Option<SessionRow>> {
@@ -145,7 +146,7 @@ impl Db {
 
     /// Returns the session that reads `transcript_path`, if any — the row
     /// that adopted a rotated transcript.
-    pub(crate) async fn get_session_by_transcript(
+    pub async fn get_session_by_transcript(
         &self,
         transcript_path: &str,
     ) -> toasty::Result<Option<SessionRow>> {
@@ -158,7 +159,7 @@ impl Db {
     }
 
     /// Returns every session in `workspace_label`, in no particular order.
-    pub(crate) async fn sessions_by_workspace(
+    pub async fn sessions_by_workspace(
         &self,
         workspace_label: &str,
     ) -> toasty::Result<Vec<SessionRow>> {
@@ -170,14 +171,14 @@ impl Db {
     }
 
     /// Returns every workspace in the database, in no particular order.
-    pub(crate) async fn all_workspaces(&self) -> toasty::Result<Vec<WorkspaceRow>> {
+    pub async fn all_workspaces(&self) -> toasty::Result<Vec<WorkspaceRow>> {
         let mut conn = self.db.connection().await?;
         let rows = WorkspaceRow::all().exec(&mut conn).await?;
         Ok(rows)
     }
 
     /// Deletes the workspace with the given label.
-    pub(crate) async fn delete_workspace(&self, label: &str) -> toasty::Result<()> {
+    pub async fn delete_workspace(&self, label: &str) -> toasty::Result<()> {
         let mut conn = self.db.connection().await?;
         WorkspaceRow::filter(WorkspaceRow::fields().label().eq(label))
             .delete()
@@ -187,7 +188,7 @@ impl Db {
     }
 
     /// Deletes the session with the given session path.
-    pub(crate) async fn delete_session(&self, session_path: &str) -> toasty::Result<()> {
+    pub async fn delete_session(&self, session_path: &str) -> toasty::Result<()> {
         let mut conn = self.db.connection().await?;
         SessionRow::filter(SessionRow::fields().session_path().eq(session_path))
             .delete()
@@ -197,7 +198,7 @@ impl Db {
     }
 
     /// Returns every session in the database, in no particular order.
-    pub(crate) async fn all_sessions(&self) -> toasty::Result<Vec<SessionRow>> {
+    pub async fn all_sessions(&self) -> toasty::Result<Vec<SessionRow>> {
         let mut conn = self.db.connection().await?;
         let rows = SessionRow::all().exec(&mut conn).await?;
         Ok(rows)

@@ -28,13 +28,13 @@ fn agent_name_stamp() -> String {
 impl Forum {
     /// A unique name for a fresh agent: the [`agent_name_stamp`] with a
     /// numeric suffix when the same second already produced a live agent.
-    pub(crate) async fn fresh_agent_name(&self) -> BotResult<String> {
+    pub async fn fresh_agent_name(&self) -> BotResult<String> {
         self.unique_agent_name(&agent_name_stamp()).await
     }
 
     /// A herdr agent name based on `base` that no live agent uses: `base`
     /// itself, or `base-2`, `base-3`, … when taken.
-    pub(crate) async fn unique_agent_name(&self, base: &str) -> BotResult<String> {
+    pub async fn unique_agent_name(&self, base: &str) -> BotResult<String> {
         let taken = self
             .herdr
             .list_agents()
@@ -58,7 +58,7 @@ impl Forum {
     /// The working directory for a new agent in `workspace_label`: the cwd
     /// of a live agent in the workspace when there is one, else the cwd of
     /// a previous session, else the user's home directory.
-    pub(crate) async fn launch_cwd(&self, workspace_label: &str) -> String {
+    pub async fn launch_cwd(&self, workspace_label: &str) -> String {
         // Agents report their workspace by herdr's positional id; match
         // through the workspace list so the identity is the label, the
         // same one the rows use.

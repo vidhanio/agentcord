@@ -31,7 +31,7 @@ impl Forum {
     /// mirrored whole. The cursor commits after every post, so a mid-sync
     /// failure (e.g. a rate limit) resumes from the last posted message
     /// instead of re-posting it.
-    pub(crate) async fn sync_session(
+    pub async fn sync_session(
         &self,
         ctx: &Context,
         session: &SessionRow,
@@ -223,7 +223,7 @@ impl Forum {
     /// Every live herdr agent hosting `session`: matches each agent's
     /// reported session value against the row's key and its adopted
     /// transcript.
-    pub(crate) async fn hosting_agents(&self, session: &SessionRow) -> Vec<Agent> {
+    pub async fn hosting_agents(&self, session: &SessionRow) -> Vec<Agent> {
         self.herdr
             .list_agents()
             .await
@@ -244,7 +244,7 @@ impl Forum {
     }
 
     /// The harness of the live agent hosting `session`, if any.
-    pub(crate) async fn live_agent_harness(&self, session: &SessionRow) -> Option<Harness> {
+    pub async fn live_agent_harness(&self, session: &SessionRow) -> Option<Harness> {
         self.live_agent(session)
             .await
             .and_then(|agent| agent.harness)
@@ -253,7 +253,7 @@ impl Forum {
     /// Syncs a live agent into its post: ensures the post + row, re-applies
     /// harness/status tags and the transcript-sourced post title, and mirrors
     /// the transcript.
-    pub(crate) async fn sync_agent_session(&self, ctx: &Context, agent: &Agent) {
+    pub async fn sync_agent_session(&self, ctx: &Context, agent: &Agent) {
         if let Err(error) = self.ensure_session_post(ctx, agent).await {
             warn!(?error, pane = %agent.pane_id, "failed to ensure session post");
             return;

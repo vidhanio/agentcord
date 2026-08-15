@@ -349,10 +349,7 @@ impl Herdr {
     ///
     /// Returns [`Error::Herdr`], [`Error::Timeout`], [`Error::Io`], or
     /// [`Error::Json`] when the request fails.
-    pub(crate) async fn worktree_list(
-        &self,
-        workspace_id: &WorkspaceId,
-    ) -> Result<WorktreeList, Error> {
+    pub async fn worktree_list(&self, workspace_id: &WorkspaceId) -> Result<WorktreeList, Error> {
         self.call_typed("worktree.list", json!({ "workspace_id": workspace_id }))
             .await
     }

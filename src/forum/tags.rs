@@ -146,7 +146,7 @@ impl Forum {
     /// Applies only the harness tag to a dead session's post: the status
     /// tag is dropped; the thread itself is closed (archived — a message
     /// still unarchives it and resumes the session).
-    pub(crate) async fn dead_post_tags(
+    pub async fn dead_post_tags(
         &self,
         ctx: &Context,
         forum: ChannelId,

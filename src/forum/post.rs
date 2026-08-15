@@ -100,7 +100,7 @@ impl Forum {
 
     /// Creates a forum post for a brand-new session and inserts its
     /// database row.
-    pub(crate) async fn create_session_post(
+    pub async fn create_session_post(
         &self,
         ctx: &Context,
         agent: &Agent,
@@ -233,7 +233,7 @@ impl Forum {
 
     /// The harness of the first harness tag applied to `post`, if
     /// any — the harness a dead session's thread keeps carrying.
-    pub(crate) async fn applied_harness(
+    pub async fn applied_harness(
         &self,
         ctx: &Context,
         post: ChannelId,
@@ -250,7 +250,7 @@ impl Forum {
     }
 
     /// The session row for `agent`, when one exists.
-    pub(crate) async fn session_for_agent(&self, agent: &Agent) -> Option<SessionRow> {
+    pub async fn session_for_agent(&self, agent: &Agent) -> Option<SessionRow> {
         let path = agent.agent_session.as_ref().map(|session| &session.value)?;
         self.db.get_session(path).await.ok().flatten()
     }

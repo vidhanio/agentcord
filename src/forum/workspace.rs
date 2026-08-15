@@ -134,7 +134,7 @@ impl Forum {
     }
 
     /// The herdr workspace with `workspace_id`, if any.
-    pub(crate) async fn workspace_by_id(
+    pub async fn workspace_by_id(
         &self,
         workspace_id: &WorkspaceId,
     ) -> BotResult<Option<Workspace>> {
@@ -145,7 +145,7 @@ impl Forum {
     }
 
     /// The herdr workspace with `label`, if any.
-    pub(crate) async fn workspace_by_label(&self, label: &str) -> BotResult<Option<Workspace>> {
+    pub async fn workspace_by_label(&self, label: &str) -> BotResult<Option<Workspace>> {
         let workspaces = self.herdr.list_workspaces().await?;
         Ok(workspaces
             .into_iter()
@@ -155,7 +155,7 @@ impl Forum {
     /// The branch a worktree workspace has checked out, for the starter
     /// message's `worktree` field: `None` when the workspace is not a
     /// worktree, or its branch is unknown (e.g. detached).
-    pub(crate) async fn worktree_branch(&self, workspace: &Workspace) -> Option<String> {
+    pub async fn worktree_branch(&self, workspace: &Workspace) -> Option<String> {
         workspace.worktree.as_ref()?;
         let list = self
             .herdr
@@ -182,7 +182,7 @@ impl Forum {
     /// The workspace whose forum `workspace` mirrors: a worktree resolves
     /// to its repo's main workspace when that is open, else the worktree
     /// itself (which then gets its own forum).
-    pub(crate) async fn forum_workspace(&self, workspace: &Workspace) -> BotResult<Workspace> {
+    pub async fn forum_workspace(&self, workspace: &Workspace) -> BotResult<Workspace> {
         if workspace.worktree.is_none() {
             return Ok(workspace.clone());
         }
@@ -198,7 +198,7 @@ impl Forum {
     /// Deletes workspace rows whose forum was deleted and whose workspace
     /// no longer exists in herdr. A live workspace keeps its row even when
     /// its forum was deleted — `ensure_workspace_forum` re-creates it.
-    pub(crate) async fn prune_stale_workspaces(&self, ctx: &Context, workspaces: &[Workspace]) {
+    pub async fn prune_stale_workspaces(&self, ctx: &Context, workspaces: &[Workspace]) {
         let live_labels = workspaces
             .iter()
             .map(|workspace| workspace.label.as_str())

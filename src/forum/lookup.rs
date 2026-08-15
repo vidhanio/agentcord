@@ -9,11 +9,7 @@ use crate::{BotResult, error::BotError, forum::Forum};
 impl Forum {
     /// Whether `channel_id` still exists on Discord; `false` when it was
     /// deleted. Other failures propagate.
-    pub(crate) async fn channel_exists(
-        &self,
-        ctx: &Context,
-        channel_id: ChannelId,
-    ) -> BotResult<bool> {
+    pub async fn channel_exists(&self, ctx: &Context, channel_id: ChannelId) -> BotResult<bool> {
         match ctx.http.get_channel(channel_id.widen()).await {
             Ok(_) => Ok(true),
             Err(serenity::Error::Http(serenity::all::HttpError::UnsuccessfulRequest(response)))
@@ -26,11 +22,7 @@ impl Forum {
     }
 
     /// The forum channel containing `post` (its parent channel).
-    pub(crate) async fn forum_for_post(
-        &self,
-        ctx: &Context,
-        post: ChannelId,
-    ) -> BotResult<ChannelId> {
+    pub async fn forum_for_post(&self, ctx: &Context, post: ChannelId) -> BotResult<ChannelId> {
         match ctx.http.get_channel(post.widen()).await? {
             Channel::Guild(channel) => channel
                 .parent_id
@@ -42,7 +34,7 @@ impl Forum {
         }
     }
 
-    pub(crate) async fn forum_channel(
+    pub async fn forum_channel(
         &self,
         ctx: &Context,
         channel_id: ChannelId,
@@ -55,7 +47,7 @@ impl Forum {
 
     /// The thread channel `thread_id` (a forum post) as a
     /// [`GuildThread`], whose parent is the forum channel.
-    pub(crate) async fn forum_thread(
+    pub async fn forum_thread(
         &self,
         ctx: &Context,
         thread_id: ChannelId,

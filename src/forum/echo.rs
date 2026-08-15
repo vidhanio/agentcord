@@ -30,7 +30,7 @@ impl Forum {
     /// line boundaries like agent messages — an overlong echo must never
     /// wedge the sync cursor on a `TooLarge` error. Returns the last
     /// posted message id, or `None` when the echo was skipped.
-    pub(crate) async fn post_user_echo(
+    pub async fn post_user_echo(
         &self,
         ctx: &Context,
         forum: ChannelId,

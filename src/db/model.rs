@@ -1,9 +1,17 @@
 //! The persisted row types: a workspace and its forum channel, and a
 //! session bound to a forum post.
+//!
+//! The module-level `#[expect]` is for a rustc false positive: the
+//! `toasty::Model` derive emits a public `*Fields` struct (no `Debug`) at
+//! the model's call-site span, and `missing_debug_implementations` fires on
+//! it — pointed at the model's own line, where an item-level `#[expect]`
+//! cannot reach it. If a toolchain ever fixes the false positive, the
+//! unfulfilled expectation surfaces and this can be removed.
+#![expect(missing_debug_implementations)]
 
 /// A herdr workspace and its persistent forum channel.
 #[derive(Debug, Clone, toasty::Model)]
-pub(crate) struct WorkspaceRow {
+pub struct WorkspaceRow {
     /// The workspace label — the stable identity the bot keys on.
     #[key]
     pub label: String,
@@ -23,7 +31,7 @@ pub(crate) struct WorkspaceRow {
 /// binding and the transcript sync cursors. Live session state lives in
 /// herdr; posted messages live in Discord.
 #[derive(Debug, Clone, toasty::Model)]
-pub(crate) struct SessionRow {
+pub struct SessionRow {
     /// `agent_session.value`, unique per launch.
     #[key]
     pub session_path: String,

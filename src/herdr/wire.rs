@@ -20,7 +20,7 @@ pub struct Envelope {
 impl Envelope {
     /// Converts the envelope into its `result` payload, mapping server errors
     /// to [`Error::Herdr`].
-    pub(crate) fn into_result(self) -> Result<Value, Error> {
+    pub fn into_result(self) -> Result<Value, Error> {
         if let Some(error) = self.error {
             return Err(Error::Herdr {
                 code: error.code,

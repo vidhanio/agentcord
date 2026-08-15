@@ -35,11 +35,11 @@ pub type BotResult<T = ()> = Result<T, BotError>;
 /// The Discord bot: relays forum posts to herdr agents.
 #[derive(Clone)]
 pub struct Bot {
-    pub(crate) config: Arc<Config>,
-    pub(crate) herdr: Herdr,
-    pub(crate) db: Db,
-    pub(crate) forum: Arc<Forum>,
-    pub(crate) relay: Arc<Relay>,
+    pub config: Arc<Config>,
+    pub herdr: Herdr,
+    pub db: Db,
+    pub forum: Arc<Forum>,
+    pub relay: Arc<Relay>,
 }
 
 impl Debug for Bot {
@@ -102,7 +102,7 @@ impl Bot {
     /// Whether `user_id` may run commands and talk to agents: everyone when
     /// no allowed user is configured, otherwise only that user.
     #[must_use]
-    pub(crate) fn is_allowed(&self, user_id: UserId) -> bool {
+    pub fn is_allowed(&self, user_id: UserId) -> bool {
         self.config
             .allowed_user_id
             .is_none_or(|allowed| allowed == user_id)

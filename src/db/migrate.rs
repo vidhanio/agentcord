@@ -7,7 +7,7 @@ use crate::herdr::Workspace;
 
 /// The toasty schema push is not idempotent: this checks whether the session
 /// table already exists so reopening an existing database skips it.
-pub(crate) async fn tables_exist(db: &toasty::Db) -> toasty::Result<bool> {
+pub async fn tables_exist(db: &toasty::Db) -> toasty::Result<bool> {
     let mut conn = db.connection().await?;
     let rows = toasty::sql::query(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_rows' LIMIT 1",
@@ -39,7 +39,7 @@ async fn migrate_legacy_columns(db: &toasty::Db) -> toasty::Result<()> {
 /// Opens (creating on first use) the database: pushes the schema derived
 /// from the registered models when the tables are missing, else migrates
 /// the legacy column shapes.
-pub(crate) async fn open_connected(url: &str) -> toasty::Result<Db> {
+pub async fn open_connected(url: &str) -> toasty::Result<Db> {
     let db = toasty::Db::builder()
         .models(toasty::models!(crate::*))
         .connect(url)
@@ -56,10 +56,7 @@ impl Db {
     /// Re-keys the live workspace rows from the old positional-id identity
     /// to labels: rows keyed by (or storing) a herdr id get re-keyed to the
     /// workspace's label, with the id recorded. Idempotent.
-    pub(crate) async fn migrate_workspace_ids(
-        &self,
-        workspaces: &[Workspace],
-    ) -> toasty::Result<()> {
+    pub async fn migrate_workspace_ids(&self, workspaces: &[Workspace]) -> toasty::Result<()> {
         for row in self.all_workspaces().await? {
             let Some(workspace) = workspaces.iter().find(|workspace| {
                 workspace.workspace_id.as_str() == row.label
@@ -85,10 +82,7 @@ impl Db {
     /// sessions whose workspace id matches a live herdr workspace get the
     /// workspace's label. Idempotent; run after
     /// [`Db::migrate_workspace_ids`].
-    pub(crate) async fn migrate_session_labels(
-        &self,
-        workspaces: &[Workspace],
-    ) -> toasty::Result<()> {
+    pub async fn migrate_session_labels(&self, workspaces: &[Workspace]) -> toasty::Result<()> {
         for session in self.all_sessions().await? {
             let Some(workspace) = workspaces
                 .iter()
