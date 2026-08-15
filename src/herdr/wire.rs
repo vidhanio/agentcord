@@ -4,7 +4,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Agent, Error, PaneId, Snapshot, TabId, Workspace};
+use super::{AgentRecord, Error, PaneId, Snapshot, TabId, Workspace};
 
 /// Envelope wrapping every herdr response (success or error).
 #[derive(Debug, Deserialize)]
@@ -80,13 +80,13 @@ pub struct RootPane {
 /// `result` payload of `agent.list`.
 #[derive(Debug, Deserialize)]
 pub struct AgentList {
-    pub agents: Vec<Agent>,
+    pub agents: Vec<AgentRecord>,
 }
 
 /// `result` payload of `agent.get`/`agent.start`/`agent.prompt`/`agent.wait`.
 #[derive(Debug, Deserialize)]
 pub struct AgentInfo {
-    pub agent: Agent,
+    pub agent: AgentRecord,
 }
 
 /// `result` payload of `worktree.list`.
@@ -128,7 +128,7 @@ pub struct SnapshotResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::herdr::AgentStatus;
+    use crate::{herdr::AgentStatus, session::AgentKind};
 
     /// Parses the `result` payload of a captured response fixture.
     fn result_of(fixture: &str) -> Value {
@@ -145,7 +145,7 @@ mod tests {
                 .snapshot
                 .agents
                 .iter()
-                .any(|a| a.agent.as_deref() == Some("omp") && a.pane_id.as_str() == "w4:p1")
+                .any(|a| a.kind == Some(AgentKind::Omp) && a.pane_id.as_str() == "w4:p1")
         );
     }
 
@@ -214,7 +214,7 @@ mod tests {
         let list: AgentList = serde_json::from_value(result).unwrap();
         assert!(!list.agents.is_empty());
         let agent = &list.agents[0];
-        assert_eq!(agent.agent.as_deref(), Some("omp"));
+        assert_eq!(agent.kind, Some(AgentKind::Omp));
         assert_eq!(agent.workspace_id.as_str(), "w4");
         assert_eq!(agent.pane_id.as_str(), "w4:p1");
         assert_eq!(agent.status(), AgentStatus::Working);
@@ -226,7 +226,7 @@ mod tests {
         let result = result_of(include_str!("../../tests/fixtures/api/agent_get.json"));
         let info: AgentInfo = serde_json::from_value(result).unwrap();
         let agent = info.agent;
-        assert_eq!(agent.agent.as_deref(), Some("omp"));
+        assert_eq!(agent.kind, Some(AgentKind::Omp));
         assert_eq!(agent.pane_id.as_str(), "w4:p1");
         // The fixture records an unnamed agent: `name` is either absent (None)
         // or, if herdr later assigns one, present (Some).

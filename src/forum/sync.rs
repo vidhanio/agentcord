@@ -20,8 +20,8 @@ use crate::{
         titles::{session_intro, session_title},
         to_i64,
     },
-    herdr::{Agent, SessionPath},
-    session::{AgentKind, SessionMessage, SessionRole, ToolCall, read_session_messages},
+    herdr::{AgentRecord, SessionPath},
+    session::{Agent, AgentKind, SessionMessage, SessionRole, ToolCall},
     utils::split_lines,
 };
 
@@ -69,7 +69,7 @@ impl Forum {
         };
         let post = from_i64(post_id)?;
 
-        let messages = match read_session_messages(kind, &session.transcript_path) {
+        let messages = match Agent::from(kind).read_session_messages(&session.transcript_path) {
             Ok(messages) => messages,
             // The source may be missing: the transcript can be mid-rotation
             // (omp rewrites it via a delete+recreate dance), or the opencode
@@ -239,7 +239,7 @@ impl Forum {
     /// Every live herdr agent hosting `session`: matches each agent's
     /// reported session value against the row's key and its adopted
     /// transcript.
-    pub(crate) async fn hosting_agents(&self, session: &SessionRow) -> Vec<Agent> {
+    pub(crate) async fn hosting_agents(&self, session: &SessionRow) -> Vec<AgentRecord> {
         self.herdr
             .list_agents()
             .await
@@ -255,15 +255,13 @@ impl Forum {
     }
 
     /// The live herdr agent hosting `session`, if any.
-    async fn live_agent(&self, session: &SessionRow) -> Option<Agent> {
+    async fn live_agent(&self, session: &SessionRow) -> Option<AgentRecord> {
         self.hosting_agents(session).await.into_iter().next()
     }
 
     /// The agent kind of the live agent hosting `session`, if any.
     pub(crate) async fn live_agent_kind(&self, session: &SessionRow) -> Option<AgentKind> {
-        self.live_agent(session)
-            .await
-            .and_then(|agent| AgentKind::parse(agent.agent.as_deref().unwrap_or("")))
+        self.live_agent(session).await.and_then(|agent| agent.kind)
     }
 
     /// Creates a forum post for a brand-new session and inserts its
@@ -271,7 +269,7 @@ impl Forum {
     pub(crate) async fn create_session_post(
         &self,
         ctx: &Context,
-        agent: &Agent,
+        agent: &AgentRecord,
         kind: AgentKind,
         session_path: &SessionPath,
     ) -> BotResult<()> {
@@ -343,7 +341,7 @@ impl Forum {
     /// Syncs a live agent into its post: ensures the post + row, re-applies
     /// kind/status tags and the transcript-sourced post title, and mirrors
     /// the transcript.
-    pub(crate) async fn sync_agent_session(&self, ctx: &Context, agent: &Agent) {
+    pub(crate) async fn sync_agent_session(&self, ctx: &Context, agent: &AgentRecord) {
         if let Err(error) = self.ensure_session_post(ctx, agent).await {
             warn!(?error, pane = %agent.pane_id, "failed to ensure session post");
             return;
@@ -352,7 +350,7 @@ impl Forum {
             return;
         };
 
-        let kind = AgentKind::parse(agent.agent.as_deref().unwrap_or("")).unwrap_or(AgentKind::Omp);
+        let kind = agent.kind.unwrap_or(AgentKind::Omp);
         let Some(post_id) = session.post_channel_id else {
             return;
         };
@@ -423,7 +421,7 @@ impl Forum {
         ctx: &Context,
         session: &SessionRow,
         post: ChannelId,
-        agent: &Agent,
+        agent: &AgentRecord,
     ) -> BotResult<()> {
         let worktree = match self.workspace_by_id(&agent.workspace_id).await {
             Ok(Some(workspace)) => self.worktree_branch(&workspace).await,

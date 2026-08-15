@@ -1,4 +1,5 @@
-//! The `opencode` store reader.
+//! The `opencode` harness: a SQLite store reader, titles, and resume
+//! arguments.
 //!
 //! Unlike the other harnesses, opencode persists its sessions in a SQLite
 //! store (`$XDG_DATA_HOME/opencode/opencode-<channel>.db`, usually
@@ -23,6 +24,12 @@ use super::{
     SessionMessage, SessionRole, ToolCallId,
     common::{compact_args, tool_message},
 };
+
+/// The `opencode` harness. Sessions live in a SQLite store rather than
+/// transcript files; the type owns the store access, the session titles,
+/// and the resume arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Opencode;
 
 /// The store directory: `$XDG_DATA_HOME/opencode`, falling back to
 /// `~/.local/share/opencode`.
@@ -73,7 +80,7 @@ fn opencode_db_path(data_dir: &Path) -> Option<PathBuf> {
 /// Returns [`ErrorKind::NotFound`] when no store exists yet (opencode has
 /// never written one), so callers can treat a missing store like a missing
 /// transcript.
-pub fn open_opencode_db() -> IoResult<Connection> {
+fn open_db() -> IoResult<Connection> {
     let Some(data_dir) = opencode_data_dir() else {
         return Err(IoError::new(ErrorKind::NotFound, "no data directory"));
     };
@@ -122,7 +129,7 @@ fn sql_error(error: SqlError) -> IoError {
 /// (pending/running → running, completed → done, error → failed). The
 /// `reasoning`, `step-*`, `patch` and `file` parts never carry conversation
 /// and are skipped. An unknown `session_id` yields an empty transcript.
-pub fn read_opencode_session(conn: &Connection, session_id: &str) -> IoResult<Vec<SessionMessage>> {
+fn read_opencode_session(conn: &Connection, session_id: &str) -> IoResult<Vec<SessionMessage>> {
     let messages = load_messages(conn, session_id)?;
     let parts = load_parts(conn, session_id)?;
     // Pre-scan completion records: a `tool` part carries its own final state
@@ -261,7 +268,7 @@ fn tool_part(
 /// Reads the session's own title from the store (`session.title`); `None`
 /// for an unknown session or a blank title.
 #[must_use]
-pub fn read_opencode_title(conn: &Connection, session_id: &str) -> Option<String> {
+fn read_opencode_title(conn: &Connection, session_id: &str) -> Option<String> {
     let title = conn
         .query_row(
             "SELECT title FROM session WHERE id = ?1",
@@ -272,6 +279,34 @@ pub fn read_opencode_title(conn: &Connection, session_id: &str) -> Option<String
         .flatten()?;
     let title = title.trim().to_owned();
     (!title.is_empty()).then_some(title)
+}
+
+impl Opencode {
+    /// Reads a session's transcript from the opencode store, keyed by
+    /// session id (see [`read_opencode_session`] for the semantics).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::NotFound`] when no store exists yet.
+    pub fn read_session(session_id: &str) -> IoResult<Vec<SessionMessage>> {
+        open_db().and_then(|conn| read_opencode_session(&conn, session_id))
+    }
+
+    /// The store's title for a session; `None` when no store exists, the
+    /// session is unknown, or the title is blank.
+    #[must_use]
+    pub fn read_title(session_id: &str) -> Option<String> {
+        open_db()
+            .ok()
+            .and_then(|conn| read_opencode_title(&conn, session_id))
+    }
+
+    /// The `agent.start` arguments that resume a session: opencode resumes
+    /// by session id via `--session`.
+    #[must_use]
+    pub fn resume_args(session: &str) -> Vec<String> {
+        vec!["--session".into(), session.to_owned()]
+    }
 }
 
 #[cfg(test)]

@@ -6,10 +6,9 @@
 use std::{path::Path, process::Command, time::Duration};
 
 use herdcord::{
-    AgentKind,
+    Agent, AgentKind,
     config::socket_path,
     herdr::{AgentStatus, EventKind, Herdr, Subscription},
-    read_session,
 };
 
 /// Closes a workspace by calling the herdr CLI synchronously, so cleanup
@@ -65,7 +64,7 @@ async fn spawn_prompt_read_close_roundtrip() {
 
     let name = format!("bottest{pid}");
     let agent = herdr
-        .start_agent(&name, "omp", &created.pane_id, &[])
+        .start_agent(&name, AgentKind::Omp, &created.pane_id, &[])
         .await
         .expect("start agent");
     assert_eq!(agent.name.as_deref(), Some(name.as_str()));
@@ -118,7 +117,7 @@ async fn event_stream_delivers_pane_updates() {
 
     let name = format!("bottest{pid}events");
     let agent = herdr
-        .start_agent(&name, "omp", &created.pane_id, &[])
+        .start_agent(&name, AgentKind::Omp, &created.pane_id, &[])
         .await
         .expect("start agent");
 
@@ -197,7 +196,7 @@ async fn session_file_records_conversation() {
 
     let name = format!("bottest{pid}session");
     let agent = herdr
-        .start_agent(&name, "omp", &created.pane_id, &[])
+        .start_agent(&name, AgentKind::Omp, &created.pane_id, &[])
         .await
         .expect("start agent");
 
@@ -219,8 +218,9 @@ async fn session_file_records_conversation() {
         .agent_session
         .expect("agent reports a session");
 
-    let messages =
-        read_session(AgentKind::Omp, Path::new(session.value.as_str())).expect("read session file");
+    let messages = Agent::from(AgentKind::Omp)
+        .read_session(Path::new(session.value.as_str()))
+        .expect("read session file");
     assert!(
         messages
             .iter()
