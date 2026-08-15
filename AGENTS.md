@@ -188,8 +188,7 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
               │             workspace dropdown, prompt input)
               │     submit ──► launch_from_modal: spawn → bind session post →
               │                relay the prompt → ephemeral thread link
-              │  /workspace ──► folder-path arg w/ filesystem autocomplete
-              │     (tilde expansion for home; dirs only, trailing slash)
+              │  /workspace ──► folder-path arg (tilde expansion for home)
               │     ──► resolve+validate path → herdr workspace.create
               │         (label = dir name; duplicate labels rejected)
               │
@@ -250,15 +249,12 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
   response, awaits the submit through serenity's modal collector, defers
   the submit, and launches via the forum's spawn/bind/relay helpers,
   editing the deferred response with the thread link. `/workspace` takes
-  one folder-path argument with filesystem autocomplete (`complete_path`:
-  directories only, trailing slashes, `~`/`~/` expand to home for browsing
-  and stay in tilde form in suggestions, `~user` unsupported, hidden
-  entries skipped unless the basename starts with a dot, 25-suggestion
-  cap) and creates a herdr workspace — `resolve_folder` validates the
-  path (tilde expansion, existence, directory-ness, canonicalization),
-  the label is the directory's name, and an already-used label is
-  rejected so label-keyed rows/forums never collide. The `allowed` check
-  gates every command on `ALLOWED_USER_ID`.
+  one folder-path argument and creates a herdr workspace —
+  `resolve_folder` expands a leading `~`/`~/` to the home directory
+  (`~user` unsupported) and validates the path (existence,
+  directory-ness, canonicalization), the label is the directory's name,
+  and an already-used label is rejected so label-keyed rows/forums never
+  collide. The `allowed` check gates every command on `ALLOWED_USER_ID`.
 - `src/relay.rs` — per-agent conversation workers (keyed by pane id —
   agents are unnamed; the `RelayJob` carries the session path): one `mpsc`
   channel per agent (shared `Arc<Mutex<HashMap>>` of senders with

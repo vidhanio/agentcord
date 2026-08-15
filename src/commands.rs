@@ -11,9 +11,8 @@
 //! serenity's modal collector, and the launch result edits the submit's
 //! deferred response (see the note in [`agent`]).
 //!
-//! `/workspace` creates a herdr workspace for a folder path. Its argument
-//! autocompletes directory paths, expanding `~` to the home directory for
-//! both completion and resolution.
+//! `/workspace` creates a herdr workspace for a folder path, expanding a
+//! leading `~` to the home directory.
 
 use std::{
     path::{Path, PathBuf},
@@ -22,11 +21,10 @@ use std::{
 
 use poise::{CreateReply, FrameworkError, serenity_prelude as serenity};
 use serenity::{
-    AutocompleteChoice, CreateAutocompleteResponse, CreateInputText, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateLabel, CreateModal, CreateModalComponent,
-    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, EditInteractionResponse,
-    InputTextStyle, LabelComponent, ModalComponent, ModalInteraction, ModalInteractionData,
-    collector::ModalInteractionCollector,
+    CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateLabel,
+    CreateModal, CreateModalComponent, CreateSelectMenu, CreateSelectMenuKind,
+    CreateSelectMenuOption, EditInteractionResponse, InputTextStyle, LabelComponent,
+    ModalComponent, ModalInteraction, ModalInteractionData, collector::ModalInteractionCollector,
 };
 use tracing::{info, warn};
 
@@ -252,9 +250,7 @@ async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), 
 #[poise::command(slash_command, check = "allowed")]
 async fn workspace(
     ctx: poise::ApplicationContext<'_, Bot, BotError>,
-    #[description = "folder path, e.g. `~/code/project`"]
-    #[autocomplete = "autocomplete_path"]
-    path: String,
+    #[description = "folder path, e.g. `~/code/project`"] path: String,
 ) -> Result<(), BotError> {
     let bot = ctx.data().clone();
 
@@ -302,30 +298,6 @@ async fn workspace(
     Ok(())
 }
 
-/// Autocompletes the `/workspace` path argument with directory
-/// suggestions, keeping the `~` form when the input uses one.
-// The `async` is required: poise's autocomplete callback type wraps the
-// function in a BoxFuture.
-#[allow(clippy::unused_async)]
-async fn autocomplete_path<'a>(
-    _ctx: poise::ApplicationContext<'a, Bot, BotError>,
-    partial: &'a str,
-) -> CreateAutocompleteResponse<'a> {
-    let suggestions = dirs::home_dir()
-        .map(|home| complete_path(partial, &home))
-        .unwrap_or_default();
-    CreateAutocompleteResponse::new().set_choices(
-        suggestions
-            .into_iter()
-            .map(AutocompleteChoice::from)
-            .collect::<Vec<_>>(),
-    )
-}
-
-/// How many directory suggestions the `/workspace` autocomplete may show
-/// (Discord's autocomplete limit).
-const MAX_PATH_SUGGESTIONS: usize = 25;
-
 /// Resolves `input` to an absolute directory path: expands a leading `~`
 /// to `home` (via [`expand_home`]), canonicalizes (resolving symlinks),
 /// and rejects anything that is not a directory. Returns a user-facing
@@ -359,92 +331,6 @@ fn expand_home(input: &str, home: &Path) -> Option<PathBuf> {
         return None;
     }
     Some(PathBuf::from(input))
-}
-
-/// Directory completions for `input` as a folder path: every directory
-/// under the input's parent whose name starts with the input's basename,
-/// each with a trailing slash so the user can keep typing deeper. `~` and
-/// `~/…` browse from `home` and keep the `~` form in the suggestions;
-/// `~user` is not supported and yields nothing. Hidden entries are
-/// skipped unless the input's basename starts with a dot. Sorted
-/// case-insensitively, capped at [`MAX_PATH_SUGGESTIONS`].
-fn complete_path(input: &str, home: &Path) -> Vec<String> {
-    if input.is_empty() {
-        // One obvious entry point: the home directory.
-        return vec!["~/".to_owned()];
-    }
-
-    let (search_root, prefix, basename) = if let Some(rest) = input.strip_prefix("~/") {
-        let (parent, basename) = split_path(Path::new(rest));
-        let rel = with_slash(&parent);
-        let prefix = if rel.is_empty() {
-            "~/".to_owned()
-        } else {
-            format!("~{rel}")
-        };
-        (home.join(parent), prefix, basename)
-    } else if input == "~" {
-        (home.to_path_buf(), "~/".to_owned(), String::new())
-    } else if input.starts_with('~') {
-        return Vec::new();
-    } else {
-        let (parent, basename) = split_path(Path::new(input));
-        let root = if parent.as_os_str().is_empty() {
-            PathBuf::from(".")
-        } else {
-            parent.clone()
-        };
-        (root, with_slash(&parent), basename)
-    };
-
-    let show_hidden = basename.starts_with('.');
-    let mut suggestions = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&search_root) else {
-        return Vec::new();
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') && !show_hidden {
-            continue;
-        }
-        if !name.starts_with(&basename) {
-            continue;
-        }
-        // `is_dir` on the full path follows symlinks, so linked
-        // directories complete too.
-        if entry.path().is_dir() {
-            suggestions.push(format!("{prefix}{name}/"));
-        }
-    }
-    suggestions.sort_by_key(|s| s.to_lowercase());
-    suggestions.truncate(MAX_PATH_SUGGESTIONS);
-    suggestions
-}
-
-/// The parent and file-name parts of `path`: a trailing slash (or `..`)
-/// makes the whole path the parent, so its children are listed, and a
-/// bare relative name has an empty parent.
-fn split_path(path: &Path) -> (PathBuf, String) {
-    let text = path.as_os_str().to_str().unwrap_or_default();
-    if text.ends_with('/') || text.ends_with("..") {
-        return (path.to_path_buf(), String::new());
-    }
-    let parent = path.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
-    let basename = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    (parent, basename)
-}
-
-/// `path` as a display string with a trailing slash; empty stays empty.
-fn with_slash(path: &Path) -> String {
-    let text = path.display().to_string();
-    if text.is_empty() || text.ends_with('/') {
-        text
-    } else {
-        format!("{text}/")
-    }
 }
 
 /// The agent modal: the harness dropdown (the configured default kind
@@ -625,7 +511,7 @@ mod tests {
 
     use poise::serenity_prelude::ModalInteractionData;
 
-    use super::{AgentSelection, complete_path, expand_home, parse_agent_modal, resolve_folder};
+    use super::{AgentSelection, expand_home, parse_agent_modal, resolve_folder};
     use crate::session::AgentKind;
 
     /// A throwaway directory for path tests, removed on drop. Each test
@@ -786,80 +672,5 @@ mod tests {
         assert!(error.contains("not a directory"), "{error}");
         let error = resolve_folder("~other/project", tmp.path()).expect_err("~user");
         assert!(error.contains("only `~`"), "{error}");
-    }
-
-    #[test]
-    fn complete_path_lists_matching_directories() {
-        let tmp = TempDir::new("complete");
-        std::fs::create_dir_all(tmp.path().join("foo/bar")).expect("foo/bar");
-        std::fs::create_dir_all(tmp.path().join("foobar")).expect("foobar");
-        std::fs::create_dir_all(tmp.path().join("alpha")).expect("alpha");
-        std::fs::create_dir_all(tmp.path().join(".hidden")).expect(".hidden");
-        std::fs::write(tmp.path().join("file.txt"), "x").expect("file");
-        let root = tmp.path().to_str().expect("utf8");
-
-        assert_eq!(
-            complete_path(&format!("{root}/fo"), tmp.path()),
-            vec![format!("{root}/foo/"), format!("{root}/foobar/")]
-        );
-        // The input's own basename is listed only under the parent's
-        // children (trailing slash), never as a duplicate of the input.
-        assert_eq!(
-            complete_path(&format!("{root}/foo/"), tmp.path()),
-            vec![format!("{root}/foo/bar/")]
-        );
-        // Files never complete; hidden entries appear once the basename
-        // starts with a dot.
-        assert_eq!(
-            complete_path(&format!("{root}/.h"), tmp.path()),
-            vec![format!("{root}/.hidden/")]
-        );
-        assert_eq!(
-            complete_path(&format!("{root}/file"), tmp.path()),
-            Vec::<String>::new()
-        );
-        // A nonexistent parent yields nothing.
-        assert_eq!(
-            complete_path(&format!("{root}/missing/"), tmp.path()),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn complete_path_keeps_tilde_form() {
-        let tmp = TempDir::new("tilde");
-        std::fs::create_dir_all(tmp.path().join("foo")).expect("foo");
-        std::fs::create_dir_all(tmp.path().join("foobar")).expect("foobar");
-        std::fs::create_dir_all(tmp.path().join("alpha")).expect("alpha");
-        std::fs::create_dir_all(tmp.path().join(".hidden")).expect(".hidden");
-        std::fs::write(tmp.path().join("file.txt"), "x").expect("file");
-
-        assert_eq!(
-            complete_path("~/fo", tmp.path()),
-            vec!["~/foo/".to_owned(), "~/foobar/".to_owned()]
-        );
-        assert_eq!(
-            complete_path("~", tmp.path()),
-            vec![
-                "~/alpha/".to_owned(),
-                "~/foo/".to_owned(),
-                "~/foobar/".to_owned()
-            ]
-        );
-        // The empty input suggests the home directory as the entry point.
-        assert_eq!(complete_path("", tmp.path()), vec!["~/".to_owned()]);
-        // `~user` is unsupported: no suggestions.
-        assert_eq!(complete_path("~user", tmp.path()), Vec::<String>::new());
-    }
-
-    #[test]
-    fn complete_path_caps_at_discord_limit() {
-        let tmp = TempDir::new("cap");
-        for index in 0..30 {
-            std::fs::create_dir_all(tmp.path().join(format!("d{index}"))).expect("dir");
-        }
-        let suggestions = complete_path(&format!("{}/", tmp.path().display()), tmp.path());
-        assert_eq!(suggestions.len(), 25);
-        assert!(suggestions.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 }
