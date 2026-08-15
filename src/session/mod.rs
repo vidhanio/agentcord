@@ -1,22 +1,19 @@
 //! Normalized session transcripts for the supported agent harnesses.
 //!
-//! Each harness is its own type ([`Omp`], [`ClaudeCode`], [`Codex`], [`Pi`],
-//! [`Opencode`]) owning its session logic — transcript parsing, titles,
-//! resume arguments — and [`Agent`] is the discriminated union over them,
-//! mapping to the plain [`AgentKind`] enum. Each harness writes its own
-//! JSONL session format under a different path (`~/.omp/agent/sessions/...`,
-//! `~/.claude/projects/...`, `~/.codex/sessions/...`); [`Agent::read_session`]
-//! parses any of them into a common [`SessionMessage`] stream. `opencode`
-//! is the exception: its sessions live in a SQLite store and are read via
-//! [`Agent::read_session_messages`].
+//! Each harness writes its own JSONL session format under a different path
+//! (`~/.omp/agent/sessions/...`, `~/.claude/projects/...`,
+//! `~/.codex/sessions/...`); [`read_session`] parses any of them into a
+//! common [`SessionMessage`] stream. `opencode` is the exception: its
+//! sessions live in a SQLite store and are read via [`read_session_messages`].
 
 use std::{
     fmt::{self, Display, Formatter},
-    io::Result as IoResult,
+    io::{BufRead, Result as IoResult},
     path::Path,
 };
 
 use nutype::nutype;
+use serde_json::Value;
 
 mod claude;
 mod codex;
@@ -25,9 +22,10 @@ mod omp;
 mod opencode;
 mod pi;
 
-use self::common::TOOL_TEXT_LIMIT;
-pub use self::{
-    claude::ClaudeCode, codex::Codex, common::cap, omp::Omp, opencode::Opencode, pi::Pi,
+pub use self::common::cap;
+use self::{
+    claude::parse_claude_code, codex::parse_codex, common::TOOL_TEXT_LIMIT, omp::parse_omp,
+    pi::parse_pi,
 };
 
 /// The supported agent harnesses (strict enum — no free strings).
@@ -104,130 +102,6 @@ impl AgentKind {
             Self::Codex => "Codex",
             Self::Pi => "Pi",
             Self::Opencode => "OpenCode",
-        }
-    }
-}
-
-/// A session bound to one of the supported harnesses: the discriminated
-/// union over the harness types ([`Omp`], [`ClaudeCode`], [`Codex`], [`Pi`],
-/// [`Opencode`]).
-///
-/// Each harness type owns its distinct session logic — transcript parsing,
-/// titles, resume arguments. Maps to the plain [`AgentKind`] enum, which
-/// describes the same harnesses without carrying any logic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Agent {
-    /// The `oh-my-pi` (`omp`) harness.
-    Omp(Omp),
-    /// Anthropic's Claude Code CLI.
-    ClaudeCode(ClaudeCode),
-    /// `Codex` CLI.
-    Codex(Codex),
-    /// The `pi` agent CLI.
-    Pi(Pi),
-    /// The `opencode` agent CLI.
-    Opencode(Opencode),
-}
-
-impl Agent {
-    /// The plain harness kind: what the wire text describes.
-    #[must_use]
-    pub const fn kind(&self) -> AgentKind {
-        match self {
-            Self::Omp(_) => AgentKind::Omp,
-            Self::ClaudeCode(_) => AgentKind::ClaudeCode,
-            Self::Codex(_) => AgentKind::Codex,
-            Self::Pi(_) => AgentKind::Pi,
-            Self::Opencode(_) => AgentKind::Opencode,
-        }
-    }
-
-    /// Reads and normalizes a session transcript into a conversation log.
-    ///
-    /// Lines are processed in file order. Malformed lines and lines whose
-    /// text is empty or whitespace-only are skipped, and a truncated final
-    /// line is tolerated. Synchronous: transcript files are small, so
-    /// callers may run this on a Tokio task.
-    ///
-    /// `Opencode` sessions live in a SQLite store rather than a transcript
-    /// file, so this returns [`std::io::ErrorKind::Unsupported`] for them —
-    /// use [`Agent::read_session_messages`] instead.
-    pub fn read_session(&self, path: &Path) -> IoResult<Vec<SessionMessage>> {
-        match self {
-            Self::Omp(_) => Omp::read_session(path),
-            Self::ClaudeCode(_) => ClaudeCode::read_session(path),
-            Self::Codex(_) => Codex::read_session(path),
-            Self::Pi(_) => Pi::read_session(path),
-            Self::Opencode(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "opencode sessions are store-backed",
-            )),
-        }
-    }
-
-    /// Reads a session's messages by harness.
-    ///
-    /// `Opencode` sessions come from their SQLite store, keyed by session id
-    /// (`path_or_id` is the store's session id); every other kind comes from
-    /// its transcript file (`path_or_id` is the file path), with the same
-    /// semantics as [`Agent::read_session`].
-    pub fn read_session_messages(&self, path_or_id: &str) -> IoResult<Vec<SessionMessage>> {
-        match self {
-            Self::Opencode(_) => Opencode::read_session(path_or_id),
-            _ => self.read_session(Path::new(path_or_id)),
-        }
-    }
-
-    /// Reads the session's own title from its source, when the harness
-    /// records one. Stable — unlike herdr's terminal title, which animates —
-    /// so the post title only changes when the task does.
-    ///
-    /// - `omp`: `{"type":"title","title":…}` (new) /
-    ///   `{"type":"title_change","title":…}` (legacy) records; the last one
-    ///   wins.
-    /// - `claude-code`: `custom-title` (user-set), `ai-title` (auto), or the
-    ///   first-line `summary`, in that priority.
-    /// - `pi`: `{"type":"session_info","name":…}` records; the last one wins.
-    /// - `opencode`: the store's `session.title` column for the session id (the
-    ///   path's string form).
-    /// - `codex`: no title record; `None`.
-    ///
-    /// `None` when the source is missing or no usable title exists yet.
-    #[must_use]
-    pub fn read_title(&self, path: &Path) -> Option<String> {
-        match self {
-            Self::Omp(_) => Omp::read_title(path),
-            Self::ClaudeCode(_) => ClaudeCode::read_title(path),
-            Self::Codex(_) => None,
-            Self::Pi(_) => Pi::read_title(path),
-            Self::Opencode(_) => Opencode::read_title(&path.to_string_lossy()),
-        }
-    }
-
-    /// The `agent.start` arguments that resume `session`'s conversation in
-    /// this harness: omp resumes by transcript path, claude-code and codex
-    /// by session id (the row key — herdr's reported session reference), pi
-    /// and opencode by session id via `--session`.
-    #[must_use]
-    pub fn resume_args(&self, transcript: &str, session: &str) -> Vec<String> {
-        match self {
-            Self::Omp(_) => Omp::resume_args(transcript),
-            Self::ClaudeCode(_) => ClaudeCode::resume_args(session),
-            Self::Codex(_) => Codex::resume_args(session),
-            Self::Pi(_) => Pi::resume_args(session),
-            Self::Opencode(_) => Opencode::resume_args(session),
-        }
-    }
-}
-
-impl From<AgentKind> for Agent {
-    fn from(kind: AgentKind) -> Self {
-        match kind {
-            AgentKind::Omp => Self::Omp(Omp),
-            AgentKind::ClaudeCode => Self::ClaudeCode(ClaudeCode),
-            AgentKind::Codex => Self::Codex(Codex),
-            AgentKind::Pi => Self::Pi(Pi),
-            AgentKind::Opencode => Self::Opencode(Opencode),
         }
     }
 }
@@ -326,11 +200,124 @@ pub struct SessionMessage {
     pub tool: Option<ToolCall>,
 }
 
+/// Reads and normalizes a session transcript into a conversation log.
+///
+/// Lines are processed in file order. Malformed lines and lines whose text is
+/// empty or whitespace-only are skipped, and a truncated final line is
+/// tolerated. Synchronous: transcript files are small, so callers may run
+/// this on a Tokio task.
+///
+/// `Opencode` sessions live in a SQLite store rather than a transcript file,
+/// so this returns [`std::io::ErrorKind::Unsupported`] for them — use
+/// [`read_session_messages`] instead.
+pub fn read_session(kind: AgentKind, path: &Path) -> IoResult<Vec<SessionMessage>> {
+    let raw = std::fs::read_to_string(path)?;
+    Ok(match kind {
+        AgentKind::Omp => parse_omp(&raw),
+        AgentKind::ClaudeCode => parse_claude_code(&raw),
+        AgentKind::Codex => parse_codex(&raw),
+        AgentKind::Pi => parse_pi(&raw),
+        AgentKind::Opencode => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "opencode sessions are store-backed",
+            ));
+        }
+    })
+}
+
+/// Reads a session's messages by kind.
+///
+/// `Opencode` sessions come from their SQLite store, keyed by session id
+/// (`path_or_id` is the store's session id); every other kind comes from
+/// its transcript file (`path_or_id` is the file path), with the same
+/// semantics as [`read_session`].
+pub fn read_session_messages(kind: AgentKind, path_or_id: &str) -> IoResult<Vec<SessionMessage>> {
+    if kind == AgentKind::Opencode {
+        return opencode::open_opencode_db()
+            .and_then(|conn| opencode::read_opencode_session(&conn, path_or_id));
+    }
+    read_session(kind, Path::new(path_or_id))
+}
+
+/// Reads the session's own title from its transcript, when the harness
+/// records one. Stable — unlike herdr's terminal title, which animates —
+/// so the post title only changes when the task does.
+///
+/// - `omp`: `{"type":"title","title":…}` (new) /
+///   `{"type":"title_change","title":…}` (legacy) records; the last one wins.
+/// - `claude-code`: `custom-title` (user-set), `ai-title` (auto), or the
+///   first-line `summary`, in that priority.
+/// - `pi`: `{"type":"session_info","name":…}` records; the last one wins.
+/// - `opencode`: the store's `session.title` column for the session id (the
+///   path's string form).
+/// - `codex`: no title record; `None`.
+///
+/// `None` when the source is missing or no usable title exists yet.
+#[must_use]
+pub fn read_session_title(kind: AgentKind, path: &Path) -> Option<String> {
+    if kind == AgentKind::Codex {
+        return None;
+    }
+    if kind == AgentKind::Opencode {
+        let session_id = path.to_string_lossy();
+        return opencode::open_opencode_db()
+            .ok()
+            .and_then(|conn| opencode::read_opencode_title(&conn, &session_id));
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let mut title: Option<String> = None;
+    let mut custom: Option<String> = None;
+    let mut ai: Option<String> = None;
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match (kind, value.get("type").and_then(Value::as_str)) {
+            (AgentKind::Omp, Some("title" | "title_change")) => {
+                title = value
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+            (AgentKind::Pi, Some("session_info")) => {
+                title = value.get("name").and_then(Value::as_str).map(str::to_owned);
+            }
+            (AgentKind::ClaudeCode, Some("custom-title")) => {
+                custom = value
+                    .get("customTitle")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+            (AgentKind::ClaudeCode, Some("ai-title")) => {
+                ai = value
+                    .get("aiTitle")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+            (AgentKind::ClaudeCode, Some("summary")) => {
+                title = value
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+            _ => {}
+        }
+    }
+    let chosen = match kind {
+        AgentKind::ClaudeCode => custom.or(ai).or(title),
+        _ => title,
+    };
+    chosen
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Agent, AgentKind, ClaudeCode, Codex, Omp, SessionRole, TOOL_TEXT_LIMIT, ToolCallId,
-        ToolState,
+        AgentKind, SessionRole, TOOL_TEXT_LIMIT, ToolCallId, ToolState, claude::parse_claude_code,
+        codex::parse_codex, omp::parse_omp, read_session, read_session_title,
     };
 
     #[test]
@@ -381,7 +368,7 @@ mod tests {
 {"type":"mode_change","id":"x","parentId":null,"timestamp":"2026-08-12T22:22:58.290Z","mode":"goal"}
 {"type":"title_change","title":"new title"}
 "#;
-        let messages = Omp::parse_transcript(raw);
+        let messages = parse_omp(raw);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, SessionRole::User);
         assert_eq!(messages[0].text, "create a discord bot");
@@ -395,7 +382,7 @@ mod tests {
 {"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"call_00_2","toolName":"ask","startedAt":"2026-08-12T22:23:04.000Z","intent":"ask the user"},"id":"i2","parentId":"m2","timestamp":"2026-08-12T22:23:04.000Z"}
 {"type":"custom","customType":"goal-mode-context","content":"<goal_context>"}
 "#;
-        let messages = Omp::parse_transcript(raw);
+        let messages = parse_omp(raw);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, SessionRole::Tool);
         assert_eq!(messages[0].text, "read {\"path\":\"src/forum.rs:480-745\"}");
@@ -426,7 +413,7 @@ mod tests {
 {"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"call_2","toolName":"ask","startedAt":"2026-08-12T22:23:04.000Z"},"id":"i3","timestamp":"2026-08-12T22:23:04.000Z"}
 {"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"call_3","toolName":"read","args":{"path":"src"},"intent":"read a file"},"id":"i4","timestamp":"2026-08-12T22:23:05.000Z"}
 "#;
-        let messages = Omp::parse_transcript(raw);
+        let messages = parse_omp(raw);
         assert_eq!(messages.len(), 4);
         // No arguments recorded: the intent stands in as the argument.
         let call = messages[0].tool.as_ref().unwrap();
@@ -457,7 +444,7 @@ mod tests {
 {{"type":"message","id":"m3","parentId":"m2","timestamp":"2026-08-12T22:23:05.000Z","message":{{"role":"toolResult","toolCallId":"call_0","toolName":"read","content":[{{"type":"text","text":"ok"}}]}}}}
 {{"type":"message","id":"m4","parentId":"m3","timestamp":"2026-08-12T22:23:06.000Z","message":{{"role":"toolResult","toolCallId":"call_1","toolName":"write","isError":true,"content":[{{"type":"text","text":"{blob}"}}]}}}}"#
         );
-        let messages = Omp::parse_transcript(&raw);
+        let messages = parse_omp(&raw);
         assert_eq!(messages.len(), 2);
         // Completed without an error.
         let call = messages[0].tool.as_ref().unwrap();
@@ -481,7 +468,7 @@ mod tests {
         let raw = format!(
             r#"{{"type":"custom","customType":"tool_execution_start","data":{{"toolCallId":"call_00_3","toolName":"read","startedAt":"2026-08-12T22:23:05.000Z","args":{{"content":"{blob}"}},"intent":"read a file"}},"id":"i3","parentId":"m2","timestamp":"2026-08-12T22:23:05.000Z"}}"#
         );
-        let messages = Omp::parse_transcript(&raw);
+        let messages = parse_omp(&raw);
         assert_eq!(messages.len(), 1);
         let call = messages[0].tool.as_ref().unwrap();
         assert_eq!(call.name, "read");
@@ -502,7 +489,7 @@ mod tests {
 {"type":"message","id":"m3","timestamp":"2026-08-12T22:23:00.000Z","message":{"role":"user","content":[{"type":"thinking","thinking":"only thinking"}]}}
 {"type":"message","id":"m4","timestamp":"2026-08-12T22:23:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"real reply"}]}}
 "#;
-        let messages = Omp::parse_transcript(raw);
+        let messages = parse_omp(raw);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].text, "real reply");
     }
@@ -515,7 +502,7 @@ mod tests {
 {"type":"file-history-snapshot","timestamp":"2025-12-01T10:00:02Z","fileHistory":[]}
 {"type":"user","timestamp":"2025-12-01T10:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"ls output"}]}}
 "#;
-        let messages = ClaudeCode::parse_transcript(raw);
+        let messages = parse_claude_code(raw);
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].role, SessionRole::User);
         assert_eq!(messages[0].text, "Hello Claude");
@@ -545,7 +532,7 @@ mod tests {
 {"type":"user","timestamp":"2025-12-01T10:00:04Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"ls output"}]}}
 {"type":"user","timestamp":"2025-12-01T10:00:05Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_3","is_error":true,"content":[{"type":"text","text":"command failed"}]}]}}
 "#;
-        let messages = ClaudeCode::parse_transcript(raw);
+        let messages = parse_claude_code(raw);
         // Only the three tool calls: results carry no conversation text.
         assert_eq!(messages.len(), 3);
         // Done: clean tool_result present.
@@ -570,7 +557,7 @@ mod tests {
     fn claude_top_level_content_fallback() {
         let raw = r#"{"type":"user","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user"},"content":"hello from top level"}
 "#;
-        let messages = ClaudeCode::parse_transcript(raw);
+        let messages = parse_claude_code(raw);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].text, "hello from top level");
     }
@@ -588,7 +575,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            Agent::from(AgentKind::Omp).read_title(&path).as_deref(),
+            read_session_title(AgentKind::Omp, &path).as_deref(),
             Some("Second task")
         );
         std::fs::remove_file(&path).ok();
@@ -607,9 +594,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            Agent::from(AgentKind::ClaudeCode)
-                .read_title(&path)
-                .as_deref(),
+            read_session_title(AgentKind::ClaudeCode, &path).as_deref(),
             Some("My Title")
         );
         std::fs::remove_file(&path).ok();
@@ -627,16 +612,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            Agent::from(AgentKind::ClaudeCode)
-                .read_title(&path)
-                .as_deref(),
+            read_session_title(AgentKind::ClaudeCode, &path).as_deref(),
             Some("Auto title")
         );
         std::fs::write(&path, r#"{"type":"summary","summary":"A summary title"}"#).unwrap();
         assert_eq!(
-            Agent::from(AgentKind::ClaudeCode)
-                .read_title(&path)
-                .as_deref(),
+            read_session_title(AgentKind::ClaudeCode, &path).as_deref(),
             Some("A summary title")
         );
         std::fs::remove_file(&path).ok();
@@ -651,11 +632,11 @@ mod tests {
             r#"{"type":"response_item","payload":{"type":"message"}}"#,
         )
         .unwrap();
-        assert_eq!(Agent::from(AgentKind::Codex).read_title(&path), None);
+        assert_eq!(read_session_title(AgentKind::Codex, &path), None);
         std::fs::remove_file(&path).ok();
         let missing =
             std::env::temp_dir().join(format!("herdcord-title-missing-{}", std::process::id()));
-        assert_eq!(Agent::from(AgentKind::Omp).read_title(&missing), None);
+        assert_eq!(read_session_title(AgentKind::Omp, &missing), None);
     }
 
     #[test]
@@ -667,7 +648,7 @@ mod tests {
 {"timestamp":"2026-06-28T10:00:04.000Z","type":"token_count","payload":{"input_tokens":100,"output_tokens":10}}
 {"timestamp":"2026-06-28T10:00:05.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"encrypted"}]}}
 "#;
-        let messages = Codex::parse_transcript(raw);
+        let messages = parse_codex(raw);
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].role, SessionRole::User);
         assert_eq!(messages[0].text, "please inspect the files");
@@ -691,7 +672,7 @@ mod tests {
 {"timestamp":"2026-06-28T10:00:06.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"file contents"}}
 {"timestamp":"2026-06-28T10:00:07.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_2","output":"user declined","is_error":true}}
 "#;
-        let messages = Codex::parse_transcript(raw);
+        let messages = parse_codex(raw);
         assert_eq!(messages.len(), 3);
         // Done: clean output present.
         let call = messages[0].tool.as_ref().unwrap();
@@ -717,7 +698,7 @@ mod tests {
         let raw = r#"{"type":"message","id":"m1","timestamp":"2026-08-14T23:00:00.000Z","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"ls -la /very/long/path/with/plenty/of/segments"}}]}}
 {"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"call_0","toolName":"bash","args":{"command":"ls -la /very/long…"}},"id":"i1","timestamp":"2026-08-14T23:00:01.000Z"}
 "#;
-        let messages = Omp::parse_transcript(raw);
+        let messages = parse_omp(raw);
         assert_eq!(messages.len(), 1);
         let call = messages[0].tool.as_ref().unwrap();
         // The record's args were truncated by omp (the trailing ellipsis);
@@ -737,7 +718,7 @@ mod tests {
         let raw = r#"{"type":"message","id":"m1","timestamp":"2026-08-14T23:00:00.000Z","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"echo full version"}}]}}
 {"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"call_0","toolName":"bash","args":{"command":"echo short"}},"id":"i1","timestamp":"2026-08-14T23:00:01.000Z"}
 "#;
-        let messages = Omp::parse_transcript(raw);
+        let messages = parse_omp(raw);
         assert_eq!(messages.len(), 1);
         let call = messages[0].tool.as_ref().unwrap();
         assert_eq!(call.args.as_deref(), Some(r#"{"command":"echo short"}"#));
@@ -750,7 +731,7 @@ not json at all
 {"type":"message","id":"m2","timestamp":"2026-08-12T22:22:59.000Z","message":{"role":"assistant","content":[{"type":"text","text":"second"}]}}
 { broken json
 "#;
-        let messages = Omp::parse_transcript(raw);
+        let messages = parse_omp(raw);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].text, "first");
         assert_eq!(messages[1].text, "second");
@@ -760,7 +741,7 @@ not json at all
     fn truncated_final_line() {
         let raw = r#"{"type":"message","id":"m1","timestamp":"2026-08-12T22:22:58.354Z","message":{"role":"user","content":"first"}}
 {"type":"message","id":"m2","timestamp":"2026-08-12T22:22:59.000Z","message":{"role":"assistant","content":"trunc"#;
-        let messages = Omp::parse_transcript(raw);
+        let messages = parse_omp(raw);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].text, "first");
     }
@@ -775,12 +756,12 @@ not json at all
 "#,
         )
         .unwrap();
-        let messages = Agent::from(AgentKind::Omp).read_session(&path).unwrap();
+        let messages = read_session(AgentKind::Omp, &path).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].text, "hello");
 
         let missing = std::env::temp_dir().join("herdcord-session-does-not-exist.jsonl");
-        assert!(Agent::from(AgentKind::Omp).read_session(&missing).is_err());
+        assert!(read_session(AgentKind::Omp, &missing).is_err());
     }
 }

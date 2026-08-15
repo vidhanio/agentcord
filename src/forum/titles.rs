@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use crate::{
-    herdr::{AgentRecord, SessionPath},
-    session::{Agent, AgentKind},
+    herdr::{Agent, SessionPath},
+    session::AgentKind,
 };
 
 /// The post title for a session: the transcript's own title when the
@@ -13,8 +13,8 @@ use crate::{
 /// thread-name limit. The agent name is deliberately not used — the
 /// transcript/terminal titles describe the work.
 #[must_use]
-pub fn session_title(agent: &AgentRecord, kind: AgentKind, path: &Path) -> String {
-    Agent::from(kind).read_title(path).map_or_else(
+pub fn session_title(agent: &Agent, kind: AgentKind, path: &Path) -> String {
+    crate::session::read_session_title(kind, path).map_or_else(
         || post_title(agent, kind),
         |title| title.chars().take(100).collect(),
     )
@@ -26,7 +26,7 @@ pub fn session_title(agent: &AgentRecord, kind: AgentKind, path: &Path) -> Strin
 /// ANSI escapes and the leading activity glyph, so the title only changes
 /// when its text does.
 #[must_use]
-pub fn post_title(agent: &AgentRecord, kind: AgentKind) -> String {
+pub fn post_title(agent: &Agent, kind: AgentKind) -> String {
     let fallback = format!("{} session", kind.as_str());
     let Some(title) = agent.terminal_title_stripped.as_deref() else {
         return fallback;
@@ -68,7 +68,7 @@ pub fn forum_channel_name(label: &str) -> String {
 /// (no live agent) the pane part is the literal `inactive`.
 #[must_use]
 pub fn session_intro(
-    agent: Option<&AgentRecord>,
+    agent: Option<&Agent>,
     worktree: Option<&str>,
     cwd: &Path,
     session_path: Option<&SessionPath>,

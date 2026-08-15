@@ -22,8 +22,8 @@ use crate::{
     db::{Db, SessionRow, WorkspaceRow},
     error::BotError,
     forum::titles::forum_channel_name,
-    herdr::{AgentRecord, AgentStatus, Herdr, PaneId, SessionPath, Workspace, WorkspaceId},
-    session::{Agent, AgentKind, ToolCallId, ToolState},
+    herdr::{Agent, AgentStatus, Herdr, PaneId, SessionPath, Workspace, WorkspaceId},
+    session::{AgentKind, ToolCallId, ToolState},
 };
 
 mod events;
@@ -361,13 +361,13 @@ impl Forum {
     /// database row) on first sight, and records the pane→session mapping
     /// so a `pane.closed` event can mark the post dead instantly. Agents
     /// without a session reference or with an unknown kind get no post.
-    pub async fn ensure_session_post(&self, ctx: &Context, agent: &AgentRecord) -> BotResult<()> {
+    pub async fn ensure_session_post(&self, ctx: &Context, agent: &Agent) -> BotResult<()> {
         let Some(session_path) = agent.agent_session.as_ref().map(|session| &session.value) else {
             return Ok(());
         };
 
-        let Some(kind) = agent.kind else {
-            warn!(agent = ?agent.kind, %session_path, "unknown agent kind, skipping session post");
+        let Some(kind) = AgentKind::parse(agent.agent.as_deref().unwrap_or("")) else {
+            warn!(agent = ?agent.agent, %session_path, "unknown agent kind, skipping session post");
             return Ok(());
         };
 
@@ -568,7 +568,7 @@ impl Forum {
         &self,
         ctx: &Context,
         session: &SessionRow,
-    ) -> BotResult<Option<AgentRecord>> {
+    ) -> BotResult<Option<Agent>> {
         let key = SessionPath::from(session.session_path.clone());
         {
             let mut resuming = self.resuming.lock().expect("resuming lock poisoned");
@@ -584,11 +584,7 @@ impl Forum {
         result.map(Some)
     }
 
-    async fn resume_session_inner(
-        &self,
-        ctx: &Context,
-        session: &SessionRow,
-    ) -> BotResult<AgentRecord> {
+    async fn resume_session_inner(&self, ctx: &Context, session: &SessionRow) -> BotResult<Agent> {
         let post_id = session.post_channel_id.ok_or_else(|| {
             BotError::Other(format!(
                 "session `{}` has no forum post",
@@ -600,7 +596,7 @@ impl Forum {
             .applied_kind(ctx, post)
             .await?
             .unwrap_or(crate::config::DEFAULT_AGENT_KIND);
-        let args = Agent::from(kind).resume_args(&session.transcript_path, &session.session_path);
+        let args = resume_args(kind, session);
         let workspace = self.workspace_by_label(&session.workspace_label).await?;
         let name = self.fresh_agent_name().await?;
 
@@ -676,7 +672,7 @@ impl Forum {
         kind: AgentKind,
         cwd: &str,
         args: &[String],
-    ) -> BotResult<AgentRecord> {
+    ) -> BotResult<Agent> {
         let tab = match self
             .herdr
             .create_tab(&workspace.workspace_id, name, cwd)
@@ -686,7 +682,11 @@ impl Forum {
             Err(error) => return Err(error.into()),
         };
 
-        match self.herdr.start_agent(name, kind, &tab.pane_id, args).await {
+        match self
+            .herdr
+            .start_agent(name, kind.as_str(), &tab.pane_id, args)
+            .await
+        {
             Ok(agent) => {
                 info!(?agent, "started agent");
                 Ok(agent)
@@ -713,12 +713,12 @@ impl Forum {
         kind: AgentKind,
         cwd: &str,
         args: &[String],
-    ) -> BotResult<AgentRecord> {
+    ) -> BotResult<Agent> {
         let created = self.herdr.create_workspace_with_pane(label, cwd).await?;
 
         match self
             .herdr
-            .start_agent(name, kind, &created.pane_id, args)
+            .start_agent(name, kind.as_str(), &created.pane_id, args)
             .await
         {
             Ok(agent) => {
@@ -742,7 +742,7 @@ impl Forum {
     }
 
     /// The session row for `agent`, when one exists.
-    async fn session_for_agent(&self, agent: &AgentRecord) -> Option<SessionRow> {
+    async fn session_for_agent(&self, agent: &Agent) -> Option<SessionRow> {
         let path = agent.agent_session.as_ref().map(|session| &session.value)?;
         self.db.get_session(path).await.ok().flatten()
     }
@@ -873,6 +873,22 @@ fn tag_names(forum: &GuildChannel) -> HashMap<ForumTagId, &str> {
         .collect()
 }
 
+/// The `agent.start` arguments that resume `session`'s conversation in its
+/// harness: omp resumes by transcript path, claude-code and codex by
+/// session id (the row key — herdr's reported session reference), pi and
+/// opencode by session id via `--session`.
+#[must_use]
+fn resume_args(kind: AgentKind, session: &SessionRow) -> Vec<String> {
+    match kind {
+        AgentKind::Omp => vec![format!("--resume={}", session.transcript_path)],
+        AgentKind::ClaudeCode => vec!["--resume".into(), session.session_path.clone()],
+        AgentKind::Codex => vec!["resume".into(), session.session_path.clone()],
+        AgentKind::Pi | AgentKind::Opencode => {
+            vec!["--session".into(), session.session_path.clone()]
+        }
+    }
+}
+
 /// Converts a Discord snowflake (channel or message id) to the database's
 /// i64 representation.
 fn to_i64(id: impl Into<u64>) -> BotResult<i64> {
@@ -891,13 +907,13 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        agent_name_stamp,
+        agent_name_stamp, resume_args,
         titles::{forum_channel_name, post_title, session_intro},
     };
     use crate::{
         db::SessionRow,
-        herdr::{AgentRecord, PaneId, SessionPath, TabId, WorkspaceId},
-        session::{Agent, AgentKind},
+        herdr::{Agent, PaneId, SessionPath, TabId, WorkspaceId},
+        session::AgentKind,
     };
 
     #[test]
@@ -965,14 +981,26 @@ mod tests {
             last_discord_message_id: None,
             starter_message_id: None,
         };
-        let args = |kind: AgentKind| {
-            Agent::from(kind).resume_args(&session.transcript_path, &session.session_path)
-        };
-        assert_eq!(args(AgentKind::Omp), vec!["--resume=/tmp/s1.jsonl"]);
-        assert_eq!(args(AgentKind::ClaudeCode), vec!["--resume", "s1"]);
-        assert_eq!(args(AgentKind::Codex), vec!["resume", "s1"]);
-        assert_eq!(args(AgentKind::Pi), vec!["--session", "s1"]);
-        assert_eq!(args(AgentKind::Opencode), vec!["--session", "s1"]);
+        assert_eq!(
+            resume_args(AgentKind::Omp, &session),
+            vec!["--resume=/tmp/s1.jsonl"]
+        );
+        assert_eq!(
+            resume_args(AgentKind::ClaudeCode, &session),
+            vec!["--resume", "s1"]
+        );
+        assert_eq!(
+            resume_args(AgentKind::Codex, &session),
+            vec!["resume", "s1"]
+        );
+        assert_eq!(
+            resume_args(AgentKind::Pi, &session),
+            vec!["--session", "s1"]
+        );
+        assert_eq!(
+            resume_args(AgentKind::Opencode, &session),
+            vec!["--session", "s1"]
+        );
     }
 
     #[test]
@@ -1016,9 +1044,9 @@ mod tests {
         );
     }
 
-    fn agent_fixture() -> AgentRecord {
-        AgentRecord {
-            kind: Some(AgentKind::Omp),
+    fn agent_fixture() -> Agent {
+        Agent {
+            agent: Some("omp".to_owned()),
             agent_status: "idle".to_owned(),
             name: Some("agent".to_owned()),
             pane_id: PaneId::from("w1:p1"),

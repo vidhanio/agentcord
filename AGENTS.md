@@ -109,13 +109,13 @@ agents.
   preserved). The 2s poll detects the breakage and escalates to the full
   live-agent sync, so recovery happens without waiting for an event.
 - **Conversations come from session files.** The bot reads each agent's
-  transcript file directly and normalizes it with per-harness types
-  (`src/session/`: `Omp`/`ClaudeCode`/`Codex`/`Pi` JSONL format parsing,
+  transcript file directly and normalizes it with per-harness parsers
+  (`src/session/`: `omp.rs`, `claude.rs`, `codex.rs`, `pi.rs` JSONL formats
   sharing one completion pre-scan skeleton in `common.rs`), instead of
-  scraping terminal output. `Opencode` is the exception: opencode
+  scraping terminal output. `opencode.rs` is the exception: opencode
   persists sessions in a SQLite store
   (`$XDG_DATA_HOME/opencode/opencode-<channel>.db`), so its transcript is
-  read from the store by session id (`Opencode::read_session`). User/assistant turns are posted as plain messages;
+  read from the store by session id (`read_session_messages`). User/assistant turns are posted as plain messages;
   **tool calls** are parsed out of each harness's tool records — one per
   call, posted once and **edited in place** when the call completes (the
   colour carries running/done/failed; the `tool_messages` map tracks the
@@ -170,7 +170,7 @@ Discord ──► Bot event handler (src/lib.rs, serenity EventHandler::dispatch
               │                              │ task: typing + wait until idle/done/blocked
               │                              │ ──► sync session file + blocked notice
               │                              ▼
-              │                    read session file ──► messages since last sync
+              │                    read_session(session file) ──► messages since last sync
               │                              │ (delta tracked on the SessionRow)
               │                              ▼
               │                    chunked messages + tool embeds + tag update
@@ -210,27 +210,22 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
 - `src/herdr/` — typed async client over herdr's Unix socket (NDJSON, one
   request per connection: the server answers once, then FINs the stream,
   so every call dials afresh; only `events.subscribe` is long-lived).
-  `mod.rs` holds the client, the wire `AgentRecord` (with `AgentSession`)
-  and `Workspace` models, the nutype ids
+  `mod.rs` holds the client, `Agent`/`Workspace` models, the nutype ids
   (`WorkspaceId`/`PaneId`/`TabId`/`SessionPath`), `AgentStatus`, and
   `Error` (`is_timeout`/`is_stalled`); `event.rs` holds `EventKind`/
   `Subscription`/`Event`/`EventStream` (broadcast, drop-oldest) and the
   wire `EventLine`; `wire.rs` holds the response envelope + per-method
   result payloads, each pinned by a fixture test
   (`tests/fixtures/api/*.json` via `include_str!`).
-- `src/session/` — normalized transcripts: each harness is its own type —
-  `Omp`, `ClaudeCode`, `Codex`, `Pi`, `Opencode` — owning its session
-  logic (transcript parsing, titles, resume arguments), and `Agent` is
-  the discriminated union over them (`Agent::Omp(Omp)`, …) mapping to
-  the plain `AgentKind` enum (the string-shaped description, used at the
-  wire/tag/modal boundary). `mod.rs` defines `AgentKind`, `Agent`,
-  `SessionRole`, `ToolState`, `ToolCall`, `SessionMessage`; `common.rs`
-  is the shared parsing skeleton (text extraction, caps, completion
-  pre-scan, tool-message builder, file read + title scan);
-  `omp.rs`/`claude.rs`/`codex.rs`/`pi.rs` define the file-backed harness
-  types and `opencode.rs` the SQLite store reader. Malformed/empty lines
-  are skipped; truncated final lines are tolerated. Line timestamps are
-  not parsed (nothing consumes them).
+- `src/session/` — normalized transcripts: `mod.rs` defines `AgentKind`,
+  `SessionRole`, `ToolState`, `ToolCall`, `SessionMessage`, `read_session`,
+  and `read_session_title` (transcript-sourced titles per harness);
+  `common.rs` is the shared parsing skeleton (text extraction, caps,
+  completion pre-scan, tool-message builder); `omp.rs`/`claude.rs`/
+  `codex.rs`/`pi.rs` are the per-harness file parsers and `opencode.rs`
+  reads the opencode SQLite store. Malformed/empty lines are
+  skipped; truncated final lines are tolerated. Line timestamps are not
+  parsed (nothing consumes them).
 - `src/forum/` — forum↔herdr reconciliation. `mod.rs` holds the `Forum`
   struct and the workspace-forum/session-post lifecycle (ensure/rename
   forums, ensure posts, tag application, manual-post deletion, dead-thread
@@ -291,7 +286,7 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
 |`src/`|Bot core: `lib.rs` (Bot + event-handler dispatch), `config.rs`, `error.rs`, `db.rs`, `relay.rs`, `commands.rs` (poise slash commands: the `/agent` modal, the `/workspace` path command), `utils.rs`|
 |`src/forum/`|Forum-side state: `mod.rs` (struct + lifecycle), `sync.rs` (transcript mirror), `events.rs` (event loop + reconcile), `poll.rs` (2s transcript poll + rotations), `titles.rs` (titles + starter message)|
 | `src/herdr/` | herdr Unix-socket client: `mod.rs` (client + models + errors), `event.rs` (subscription machinery), `wire.rs` (envelope + result payloads) |
-| `src/session/` | Transcript normalization: `mod.rs` (models + the `Agent` harness union), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs`/`pi.rs` (file-backed harness types), `opencode.rs` (opencode SQLite store reader) |
+| `src/session/` | Transcript normalization: `mod.rs` (models + read_session), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs`/`pi.rs` (per-harness file parsers), `opencode.rs` (opencode SQLite store reader) |
 | `tests/` | `herdr_live.rs` (live integration, gated) and `fixtures/api/` (captured herdr API JSON, embedded via `include_str!`) |
 | `.github/workflows/` | CI — `ci-cd.yaml` (test, test-docs, check/clippy, check-docs, check-format via the flake's treefmt check; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs, nix for formatting) and `security-audit.yaml` (daily + on manifest changes, cargo-deny) |
 
@@ -388,11 +383,9 @@ wire it into git with `prek install`.
 - **Sessions**: a session is identified by herdr's reported session
   reference (`agent_session.value`): a transcript path for omp, a session
   id for claude-code and codex — unique per launch, and exactly what the
-  harness resumes with. Session transcripts are read through the harness
-  union — `Agent::from(kind).read_session_messages(path_or_id)` — never
-  scraped from terminal output. The kind is typed on the wire record
-  (`AgentRecord::kind: Option<AgentKind>`, deserialized from herdr's
-  `"agent"` label) — no string parsing at use sites.
+  harness resumes with. Session transcripts are read with
+  `read_session(AgentKind::parse(&kind), Path::new(&session.transcript_path))`
+  — never scraped from terminal output.
 - **herdr socket discipline**: dial a fresh connection per request — the
   server answers the first request and FINs the stream, so a second request
   on the same connection is never answered; `events.subscribe` is the one
@@ -475,9 +468,8 @@ wire it into git with `prek install`.
   fixture envelopes (`tests/fixtures/api/*.json` via `include_str!`; the
   fixtures are the contract for herdr's wire format — regenerate them
   from a live server, not by hand), `src/session/` tests the transcript
-  parsers (`Omp::parse_transcript`/`ClaudeCode::parse_transcript`/
-  `Codex::parse_transcript`/`Pi::parse_transcript`,
-  malformed/truncated lines, titles) and `Agent::read_session`, `src/db.rs` tests
+  parsers (`parse_omp`/`parse_claude_code`/`parse_codex`,
+  malformed/truncated lines, titles) and `read_session`, `src/db.rs` tests
   workspace/session upserts and lookups on an in-memory database,
   `src/forum/` tests the agent-name timestamp, the title selection, the
   modal construction, and the per-kind resume args, `src/config.rs`
@@ -489,7 +481,7 @@ wire it into git with `prek install`.
   prompt → close), an event-stream test asserting
   `pane.agent_status_changed` events reach the bot, and a session-file test
   asserting the agent's transcript records the conversation and parses via
-  `Agent::from(AgentKind::Omp).read_session`; self-clean via a synchronous `std::process::Command` Drop
+  `read_session`; self-clean via a synchronous `std::process::Command` Drop
   guard (async cleanup dies with the tokio runtime) plus a startup sweep of
   leaked workspaces. Never run in CI.
 - **QA gates**: clippy `--all-targets -- -D warnings` (pedantic+nursery),

@@ -10,7 +10,7 @@ use crate::{
     BotResult,
     forum::{Forum, RESUBSCRIBE_DELAY, Typing, from_i64, titles::session_intro},
     herdr::{
-        AgentRecord, AgentStatus, Event, EventKind, EventStream, PaneId, SessionPath, Subscription,
+        Agent, AgentStatus, Event, EventKind, EventStream, PaneId, SessionPath, Subscription,
         Workspace, WorkspaceId,
     },
 };
@@ -321,7 +321,7 @@ impl Forum {
 
     /// The subscription set for `agents`: session-wide lifecycle events
     /// plus a pane-scoped status subscription for every agent pane.
-    fn subscriptions(agents: &[AgentRecord]) -> Vec<Subscription> {
+    fn subscriptions(agents: &[Agent]) -> Vec<Subscription> {
         let mut subscriptions = vec![
             Subscription::new(EventKind::WorkspaceCreated),
             Subscription::new(EventKind::WorkspaceUpdated),
@@ -479,7 +479,7 @@ impl Forum {
     /// Starts or stops the session post's typing indicator to match the
     /// agent's state: working shows it, any settled state drops it (the
     /// task aborts on drop).
-    async fn sync_agent_typing(&self, typing: &mut Typing, ctx: &Context, agent: &AgentRecord) {
+    async fn sync_agent_typing(&self, typing: &mut Typing, ctx: &Context, agent: &Agent) {
         let Some(session) = self.session_for_agent(agent).await else {
             return;
         };

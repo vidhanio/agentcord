@@ -23,7 +23,9 @@ use serenity::all::{
     ChannelId, ClientBuilder, Context, EventHandler, FullEvent, GatewayIntents, HttpBuilder,
     Message, Token, UserId, async_trait,
 };
-pub use session::{Agent, AgentKind, ClaudeCode, Codex, Omp, Opencode, Pi, SessionRole};
+pub use session::{
+    AgentKind, SessionRole, read_session, read_session_messages, read_session_title,
+};
 use tracing::{info, warn};
 
 pub use self::config::Config;

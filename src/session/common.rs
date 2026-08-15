@@ -1,43 +1,11 @@
 //! Shared transcript-parsing helpers: text extraction, caps, the
-//! completion pre-scan, the tool-call message builder, and the
-//! file-reading skeleton shared by the file-backed harnesses.
+//! completion pre-scan, and the tool-call message builder.
 
-use std::{collections::HashMap, io::BufRead, path::Path};
+use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::{IoResult, SessionMessage, SessionRole, ToolCall, ToolCallId, ToolState};
-
-/// Reads a transcript file and parses it with the harness's parser. Shared
-/// by every file-backed harness (`opencode` reads a SQLite store instead).
-pub fn read_transcript(
-    path: &Path,
-    parse: fn(&str) -> Vec<SessionMessage>,
-) -> IoResult<Vec<SessionMessage>> {
-    Ok(parse(&std::fs::read_to_string(path)?))
-}
-
-/// The last transcript record of any `record_types` carrying `field`; the
-/// last record wins. `None` when the source is missing or no record exists.
-pub fn transcript_title(path: &Path, record_types: &[&str], field: &str) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut title: Option<String> = None;
-    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let Some(record_type) = value.get("type").and_then(Value::as_str) else {
-            continue;
-        };
-        if !record_types.contains(&record_type) {
-            continue;
-        }
-        if let Some(text) = value.get(field).and_then(Value::as_str) {
-            title = Some(text.to_owned());
-        }
-    }
-    title.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty())
-}
+use super::{SessionMessage, SessionRole, ToolCall, ToolCallId, ToolState};
 
 /// Text-bearing content block types for Claude Code and Codex transcripts.
 pub const AGENT_TEXT_TYPES: [&str; 3] = ["text", "input_text", "output_text"];

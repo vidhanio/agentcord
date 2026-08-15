@@ -9,7 +9,7 @@
 use std::{path::PathBuf, str::FromStr, time::Duration};
 
 use nutype::nutype;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
@@ -17,8 +17,6 @@ use tokio::{
     net::UnixStream,
     sync::broadcast,
 };
-
-use crate::session::AgentKind;
 
 mod event;
 mod wire;
@@ -156,16 +154,14 @@ pub struct TabId(String);
 )]
 pub struct SessionPath(String);
 
-/// A herdr agent and the pane, tab, and workspace it runs in — the wire
-/// record herdr reports (see [`crate::session::Agent`] for the harness
-/// union). Deserialized only; never serialized back to herdr.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AgentRecord {
-    /// Agent kind, e.g. [`AgentKind::Omp`]; absent while the agent is still
-    /// launching or the harness is unknown.
-    #[serde(default, rename = "agent", deserialize_with = "de_agent_kind")]
-    pub kind: Option<AgentKind>,
-    /// Raw status string as reported by herdr; prefer [`AgentRecord::status`].
+/// A herdr agent and the pane, tab, and workspace it runs in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Agent {
+    /// Agent kind label, e.g. `"omp"`; absent while the agent is still
+    /// launching.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Raw status string as reported by herdr; prefer [`Agent::status`].
     pub agent_status: String,
     /// Unique agent name; absent while the agent is unnamed.
     #[serde(default)]
@@ -196,11 +192,11 @@ pub struct AgentRecord {
 }
 
 /// A herdr agent's persistent session reference.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSession {
-    /// Agent harness, e.g. [`AgentKind::Omp`]; absent when unknown.
-    #[serde(default, rename = "agent", deserialize_with = "de_agent_kind")]
-    pub harness: Option<AgentKind>,
+    /// Agent harness name, e.g. `"omp"`.
+    #[serde(default)]
+    pub agent: String,
     /// Session kind, e.g. `"jsonl"`.
     #[serde(default)]
     pub kind: String,
@@ -212,24 +208,13 @@ pub struct AgentSession {
     pub value: SessionPath,
 }
 
-impl AgentRecord {
-    /// Parses [`AgentRecord::agent_status`], falling back to
-    /// [`AgentStatus::Unknown`] when the status string is unrecognized.
+impl Agent {
+    /// Parses [`Agent::agent_status`], falling back to [`AgentStatus::Unknown`]
+    /// when the status string is unrecognized.
     #[must_use]
     pub fn status(&self) -> AgentStatus {
         self.agent_status.parse().unwrap_or(AgentStatus::Unknown)
     }
-}
-
-/// Deserializes herdr's optional agent-kind label (`"omp"`, `"claude-code"`,
-/// …): unknown labels map to `None` rather than failing the record — an
-/// agent of an unknown harness simply gets no session post.
-fn de_agent_kind<'de, D>(deserializer: D) -> Result<Option<AgentKind>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<String>::deserialize(deserializer)
-        .map(|kind| kind.as_deref().and_then(AgentKind::parse))
 }
 
 /// A herdr workspace.
@@ -298,7 +283,7 @@ pub struct CreatedWorkspace {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Snapshot {
     /// All agents in the session.
-    pub agents: Vec<AgentRecord>,
+    pub agents: Vec<Agent>,
 }
 
 /// Typed async client over the herdr Unix-socket API.
@@ -471,7 +456,7 @@ impl Herdr {
     ///
     /// Returns [`Error::Herdr`], [`Error::Timeout`], [`Error::Io`], or
     /// [`Error::Json`] when the request fails.
-    pub async fn list_agents(&self) -> Result<Vec<AgentRecord>, Error> {
+    pub async fn list_agents(&self) -> Result<Vec<Agent>, Error> {
         let list: AgentList = self.call_typed("agent.list", json!({})).await?;
         Ok(list.agents)
     }
@@ -483,7 +468,7 @@ impl Herdr {
     /// Returns [`Error::Herdr`] with code `agent_not_found` when no agent
     /// matches `target`, or [`Error::Timeout`], [`Error::Io`], or
     /// [`Error::Json`] when the request fails.
-    pub async fn get_agent(&self, target: &PaneId) -> Result<AgentRecord, Error> {
+    pub async fn get_agent(&self, target: &PaneId) -> Result<Agent, Error> {
         let info: AgentInfo = self
             .call_typed("agent.get", json!({ "target": target }))
             .await?;
@@ -500,16 +485,16 @@ impl Herdr {
     pub async fn start_agent(
         &self,
         name: &str,
-        kind: AgentKind,
+        kind: &str,
         pane_id: &PaneId,
         agent_args: &[String],
-    ) -> Result<AgentRecord, Error> {
+    ) -> Result<Agent, Error> {
         let info: AgentInfo = self
             .call_typed(
                 "agent.start",
                 json!({
                     "name": name,
-                    "kind": kind.as_str(),
+                    "kind": kind,
                     "pane_id": pane_id,
                     "args": agent_args,
                 }),
@@ -555,7 +540,7 @@ impl Herdr {
         target: &PaneId,
         text: &str,
         timeout: Duration,
-    ) -> Result<AgentRecord, Error> {
+    ) -> Result<Agent, Error> {
         let info: AgentInfo = self
             .call_typed(
                 "agent.prompt",
@@ -582,7 +567,7 @@ impl Herdr {
     ///
     /// Returns [`Error::Herdr`], [`Error::Timeout`], [`Error::Io`], or
     /// [`Error::Json`] when the request fails.
-    pub async fn send_prompt(&self, target: &PaneId, text: &str) -> Result<AgentRecord, Error> {
+    pub async fn send_prompt(&self, target: &PaneId, text: &str) -> Result<Agent, Error> {
         let info: AgentInfo = self
             .call_typed(
                 "agent.prompt",
@@ -602,11 +587,7 @@ impl Herdr {
     /// Returns [`Error::Herdr`] (with code `timeout` when the agent is still
     /// working), [`Error::Timeout`], [`Error::Io`], or [`Error::Json`] when
     /// the request fails.
-    pub async fn wait_agent(
-        &self,
-        target: &PaneId,
-        timeout: Duration,
-    ) -> Result<AgentRecord, Error> {
+    pub async fn wait_agent(&self, target: &PaneId, timeout: Duration) -> Result<Agent, Error> {
         let info: AgentInfo = self
             .call_typed(
                 "agent.wait",
@@ -643,7 +624,7 @@ impl Herdr {
     ///
     /// Returns [`Error::Herdr`], [`Error::Timeout`], [`Error::Io`], or
     /// [`Error::Json`] when the request fails.
-    pub async fn session_snapshot(&self) -> Result<Vec<AgentRecord>, Error> {
+    pub async fn session_snapshot(&self) -> Result<Vec<Agent>, Error> {
         let snapshot: SnapshotResult = self.call_typed("session.snapshot", json!({})).await?;
         Ok(snapshot.snapshot.agents)
     }

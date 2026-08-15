@@ -12,7 +12,7 @@ use tracing::warn;
 use crate::{
     error::BotError,
     forum::Forum,
-    herdr::{AgentRecord, AgentStatus, Herdr, PaneId, SessionPath},
+    herdr::{Agent, AgentStatus, Herdr, PaneId, SessionPath},
 };
 
 /// A user message queued for an agent.
@@ -272,7 +272,7 @@ impl Relay {
         target: &PaneId,
         channel_id: ChannelId,
         timeout: Duration,
-    ) -> Result<AgentRecord, BotError> {
+    ) -> Result<Agent, BotError> {
         loop {
             match self.herdr.wait_agent(target, timeout).await {
                 Ok(next) => return Ok(next),

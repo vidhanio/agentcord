@@ -1,4 +1,4 @@
-//! The `pi` harness: transcript parsing, titles, and resume arguments.
+//! The `pi` transcript parser.
 //!
 //! Pi writes JSONL sessions under `~/.pi/agent/sessions/<encoded-cwd>/`.
 //! Tool calls are `toolCall` content blocks inside `assistant` messages;
@@ -7,22 +7,12 @@
 //! (`session`, `model_change`, `thinking_level_change`, `session_info`, …)
 //! never carry conversation.
 
-use std::{io::Result as IoResult, path::Path};
-
 use serde_json::Value;
 
 use super::{
     SessionMessage, SessionRole, ToolCallId,
-    common::{
-        compact_args, content_text, read_transcript, scan_completions, tool_message,
-        transcript_title,
-    },
+    common::{compact_args, content_text, scan_completions, tool_message},
 };
-
-/// The `pi` harness. Sessions are JSONL transcript files; the type owns
-/// their parsing, their title records, and the resume arguments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pi;
 
 /// Text-bearing content block types for `pi` transcripts. `thinking` blocks
 /// are deliberately excluded: they are not conversation.
@@ -71,140 +61,115 @@ fn pi_completions(value: &Value) -> Vec<(ToolCallId, bool, String)> {
     }
 }
 
-impl Pi {
-    /// Parses a `pi` session transcript.
-    #[must_use]
-    pub fn parse_transcript(raw: &str) -> Vec<SessionMessage> {
-        // Pre-scan completion records: tool results arrive as `toolResult` and
-        // `bashExecution` message lines, and the file is parsed whole, so every
-        // call's state is known up front.
-        let results = scan_completions(raw, pi_completions);
+/// Parses a `pi` session transcript.
+#[must_use]
+pub fn parse_pi(raw: &str) -> Vec<SessionMessage> {
+    // Pre-scan completion records: tool results arrive as `toolResult` and
+    // `bashExecution` message lines, and the file is parsed whole, so every
+    // call's state is known up front.
+    let results = scan_completions(raw, pi_completions);
 
-        let mut messages = Vec::new();
-        for line in raw.lines() {
-            let Ok(value) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if value.get("type").and_then(Value::as_str) != Some("message") {
-                // Session headers, model/thinking-level changes, `session_info`
-                // records, compaction/branch summaries, extension records and
-                // labels never carry conversation.
-                continue;
-            }
-            let Some(message) = value.get("message") else {
-                continue;
-            };
-            match message.get("role").and_then(Value::as_str) {
-                Some("user") => {
-                    let Some(text) = content_text(message.get("content"), &PI_TEXT_TYPES) else {
-                        continue;
-                    };
-                    if text.trim().is_empty() {
-                        continue;
-                    }
-                    messages.push(SessionMessage {
-                        role: SessionRole::User,
-                        text,
-                        tool: None,
-                    });
-                }
-                Some("assistant") => {
-                    // Tool calls are `toolCall` content blocks: one message per
-                    // call, after the assistant text.
-                    let mut tools = Vec::new();
-                    if let Some(Value::Array(blocks)) = message.get("content") {
-                        for block in blocks {
-                            if block.get("type").and_then(Value::as_str) != Some("toolCall") {
-                                continue;
-                            }
-                            let Some(name) = block.get("name").and_then(Value::as_str) else {
-                                continue;
-                            };
-                            let call_id = block
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .map(ToolCallId::from)
-                                .unwrap_or_default();
-                            let args = block.get("arguments").map(compact_args);
-                            tools.push(tool_message(name.to_owned(), call_id, args, &results));
-                        }
-                    }
-                    let Some(text) = content_text(message.get("content"), &PI_TEXT_TYPES) else {
-                        messages.extend(tools);
-                        continue;
-                    };
-                    if text.trim().is_empty() {
-                        messages.extend(tools);
-                        continue;
-                    }
-                    messages.push(SessionMessage {
-                        role: SessionRole::Agent,
-                        text,
-                        tool: None,
-                    });
-                    messages.extend(tools);
-                }
-                // `!`-commands are recorded as a single `bashExecution` message
-                // carrying the call and its result: emit the call, anchored to
-                // the completion pre-scan.
-                Some("bashExecution") => {
-                    let Some(command) = message.get("command").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let call_id = value
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(ToolCallId::from)
-                        .unwrap_or_default();
-                    // The record's fields are the call's arguments: the single
-                    // `command` field flows through the same single-argument
-                    // rendering path as any other tool call.
-                    let args = compact_args(&serde_json::json!({ "command": command }));
-                    messages.push(tool_message(
-                        "bash".to_owned(),
-                        call_id,
-                        Some(args),
-                        &results,
-                    ));
-                }
-                // Tool results and any other non-conversation roles (`custom`
-                // extension messages, branch/compaction summaries, …) never
-                // carry conversation text.
-                _ => {}
-            }
+    let mut messages = Vec::new();
+    for line in raw.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("message") {
+            // Session headers, model/thinking-level changes, `session_info`
+            // records, compaction/branch summaries, extension records and
+            // labels never carry conversation.
+            continue;
         }
-        messages
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        match message.get("role").and_then(Value::as_str) {
+            Some("user") => {
+                let Some(text) = content_text(message.get("content"), &PI_TEXT_TYPES) else {
+                    continue;
+                };
+                if text.trim().is_empty() {
+                    continue;
+                }
+                messages.push(SessionMessage {
+                    role: SessionRole::User,
+                    text,
+                    tool: None,
+                });
+            }
+            Some("assistant") => {
+                // Tool calls are `toolCall` content blocks: one message per
+                // call, after the assistant text.
+                let mut tools = Vec::new();
+                if let Some(Value::Array(blocks)) = message.get("content") {
+                    for block in blocks {
+                        if block.get("type").and_then(Value::as_str) != Some("toolCall") {
+                            continue;
+                        }
+                        let Some(name) = block.get("name").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        let call_id = block
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(ToolCallId::from)
+                            .unwrap_or_default();
+                        let args = block.get("arguments").map(compact_args);
+                        tools.push(tool_message(name.to_owned(), call_id, args, &results));
+                    }
+                }
+                let Some(text) = content_text(message.get("content"), &PI_TEXT_TYPES) else {
+                    messages.extend(tools);
+                    continue;
+                };
+                if text.trim().is_empty() {
+                    messages.extend(tools);
+                    continue;
+                }
+                messages.push(SessionMessage {
+                    role: SessionRole::Agent,
+                    text,
+                    tool: None,
+                });
+                messages.extend(tools);
+            }
+            // `!`-commands are recorded as a single `bashExecution` message
+            // carrying the call and its result: emit the call, anchored to
+            // the completion pre-scan.
+            Some("bashExecution") => {
+                let Some(command) = message.get("command").and_then(Value::as_str) else {
+                    continue;
+                };
+                let call_id = value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToolCallId::from)
+                    .unwrap_or_default();
+                // The record's fields are the call's arguments: the single
+                // `command` field flows through the same single-argument
+                // rendering path as any other tool call.
+                let args = compact_args(&serde_json::json!({ "command": command }));
+                messages.push(tool_message(
+                    "bash".to_owned(),
+                    call_id,
+                    Some(args),
+                    &results,
+                ));
+            }
+            // Tool results and any other non-conversation roles (`custom`
+            // extension messages, branch/compaction summaries, …) never
+            // carry conversation text.
+            _ => {}
+        }
     }
-
-    /// Reads and parses a `pi` transcript file.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`std::io::ErrorKind::NotFound`] when the file is missing.
-    pub fn read_session(path: &Path) -> IoResult<Vec<SessionMessage>> {
-        read_transcript(path, Self::parse_transcript)
-    }
-
-    /// The session's own title from its transcript, when recorded:
-    /// `{"type":"session_info","name":…}` records; the last one wins.
-    #[must_use]
-    pub fn read_title(path: &Path) -> Option<String> {
-        transcript_title(path, &["session_info"], "name")
-    }
-
-    /// The `agent.start` arguments that resume a session: pi resumes by
-    /// session id via `--session`.
-    #[must_use]
-    pub fn resume_args(session: &str) -> Vec<String> {
-        vec!["--session".into(), session.to_owned()]
-    }
+    messages
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         super::{SessionRole, TOOL_TEXT_LIMIT, ToolCallId, ToolState},
-        Pi,
+        parse_pi,
     };
 
     #[test]
@@ -216,7 +181,7 @@ mod tests {
 {"type":"message","id":"a1","parentId":"u1","timestamp":"2026-08-12T09:51:58.780Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Let me start"},{"type":"text","text":"I will inspect the files."}]}}
 {"type":"session_info","id":"i1","parentId":"a1","timestamp":"2026-08-12T09:52:00.000Z","name":"a session title"}
 "#;
-        let messages = Pi::parse_transcript(raw);
+        let messages = parse_pi(raw);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, SessionRole::User);
         assert_eq!(messages[0].text, "create a discord bot");
@@ -229,7 +194,7 @@ mod tests {
         let raw = r#"{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-08-12T09:54:00.240Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Let me read the file"},{"type":"toolCall","id":"call_00_ET_eJKNhqweSfy1LrJfuvtC8152","name":"read","arguments":{"path":"src/session"}}]}}
 {"type":"message","id":"r1","parentId":"a1","timestamp":"2026-08-12T09:54:00.468Z","message":{"role":"toolResult","toolCallId":"call_00_ET_eJKNhqweSfy1LrJfuvtC8152","toolName":"read","content":[{"type":"text","text":"file contents"}],"isError":false}}
 "#;
-        let messages = Pi::parse_transcript(raw);
+        let messages = parse_pi(raw);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, SessionRole::Tool);
         assert_eq!(messages[0].text, r#"read {"path":"src/session"}"#);
@@ -255,7 +220,7 @@ mod tests {
 {{"type":"message","id":"r1","parentId":"a1","timestamp":"2026-08-12T09:54:03.000Z","message":{{"role":"toolResult","toolCallId":"call_0","toolName":"read","content":[{{"type":"text","text":"ok"}}]}}}}
 {{"type":"message","id":"r2","parentId":"a2","timestamp":"2026-08-12T09:54:04.000Z","message":{{"role":"toolResult","toolCallId":"call_1","toolName":"write","isError":true,"content":[{{"type":"text","text":"{blob}"}}]}}}}"#
         );
-        let messages = Pi::parse_transcript(&raw);
+        let messages = parse_pi(&raw);
         assert_eq!(messages.len(), 3);
         // Done: clean toolResult present.
         let call = messages[0].tool.as_ref().unwrap();
@@ -284,7 +249,7 @@ mod tests {
 {"type":"message","id":"r1","parentId":"a1","timestamp":"2026-08-12T09:51:58.817Z","message":{"role":"toolResult","toolCallId":"call_00_185JVHa38Nc7E9ZWUgA45281","toolName":"bash","content":[{"type":"text","text":"On branch main"}]}}
 {"type":"message","id":"r2","parentId":"r1","timestamp":"2026-08-12T09:51:58.817Z","message":{"role":"toolResult","toolCallId":"call_01_J3lL32avnu92jQomS7ey0970","toolName":"read","content":[{"type":"text","text":"TODO contents"}]}}
 "#;
-        let messages = Pi::parse_transcript(raw);
+        let messages = parse_pi(raw);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, SessionRole::Tool);
         assert_eq!(messages[0].text, r#"bash {"command":"git status"}"#);
@@ -303,7 +268,7 @@ mod tests {
         let raw = r#"{"type":"message","id":"b1","parentId":"u1","timestamp":"2026-08-12T09:55:00.000Z","message":{"role":"bashExecution","command":"ls","output":"src\ntests\n","exitCode":0,"cancelled":false,"truncated":false}}
 {"type":"message","id":"b2","parentId":"b1","timestamp":"2026-08-12T09:55:01.000Z","message":{"role":"bashExecution","command":"false","output":"Command exited with code 1","exitCode":1,"cancelled":false,"truncated":false}}
 "#;
-        let messages = Pi::parse_transcript(raw);
+        let messages = parse_pi(raw);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, SessionRole::Tool);
         assert_eq!(messages[0].text, r#"bash {"command":"ls"}"#);
@@ -324,7 +289,7 @@ mod tests {
 {"type":"message","id":"m3","timestamp":"2026-08-12T09:55:02.000Z","message":{"role":"user","content":"plain string form"}}
 {"type":"message","id":"m4","timestamp":"2026-08-12T09:55:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"real reply"}]}}
 "#;
-        let messages = Pi::parse_transcript(raw);
+        let messages = parse_pi(raw);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, SessionRole::User);
         assert_eq!(messages[0].text, "plain string form");
@@ -345,7 +310,7 @@ mod tests {
 {"type":"message","id":"r1","parentId":"l1","timestamp":"2026-08-12T09:52:05.000Z","message":{"role":"toolResult","toolCallId":"call_0","toolName":"read","content":[{"type":"text","text":"orphan result"}]}}
 {"type":"message","id":"m1","parentId":"r1","timestamp":"2026-08-12T09:52:06.000Z","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}
 "#;
-        let messages = Pi::parse_transcript(raw);
+        let messages = parse_pi(raw);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, SessionRole::User);
         assert_eq!(messages[0].text, "hello");
@@ -357,7 +322,7 @@ mod tests {
 {"type":"message","id":"m1","timestamp":"2026-08-12T09:55:00.000Z","message":{"role":"user","content":[{"type":"text","text":"first"}]}}
 { broken json
 {"type":"message","id":"m2","timestamp":"2026-08-12T09:55:02.000Z","message":{"role":"assistant","content":"trunc"#;
-        let messages = Pi::parse_transcript(raw);
+        let messages = parse_pi(raw);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].text, "first");
     }
