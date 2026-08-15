@@ -4,7 +4,7 @@
 
 use std::{
     fmt::{self, Debug, Formatter},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -80,12 +80,23 @@ impl Config {
     }
 
     /// The control command's working directory: `HERDR_CONTROL_CWD` when
-    /// set, else the home directory (falling back to `/tmp`).
+    /// set (a leading `~`/`~/` expands to the home directory), else the
+    /// home directory (falling back to `/tmp`).
     #[must_use]
     pub fn control_cwd(&self) -> PathBuf {
-        self.herdr_control_cwd
-            .clone()
-            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+        let home = dirs::home_dir();
+        let Some(cwd) = self.herdr_control_cwd.clone() else {
+            return home.unwrap_or_else(|| PathBuf::from("/tmp"));
+        };
+        if cwd == Path::new("~") {
+            return home.unwrap_or(cwd);
+        }
+        if let Ok(rest) = cwd.strip_prefix("~/")
+            && let Some(home) = home
+        {
+            return home.join(rest);
+        }
+        cwd
     }
 
     /// How long one control command may run: `HERDR_CONTROL_TIMEOUT` when
@@ -193,5 +204,12 @@ mod tests {
         let cwd = PathBuf::from("/some/control/dir");
         let config = control_config(None, Some(cwd.clone()), None);
         assert_eq!(config.control_cwd(), cwd);
+    }
+
+    #[test]
+    fn control_cwd_expands_a_leading_tilde() {
+        let config = control_config(None, Some(PathBuf::from("~/Projects")), None);
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        assert_eq!(config.control_cwd(), home.join("Projects"));
     }
 }

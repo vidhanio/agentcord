@@ -353,7 +353,8 @@ wire it into git with `prek install`.
   whitespace-split, opt-in: unset registers no `/herdr`; the recommended
   lean payload is `pi -p --no-session --tools bash --no-skills
   --no-context-files --no-extensions --no-themes
-  --no-prompt-templates`), `HERDR_CONTROL_CWD` (default: home dir) and
+  --no-prompt-templates`), `HERDR_CONTROL_CWD` (default: home dir; a
+  leading `~`/`~/` expands to home) and
   `HERDR_CONTROL_TIMEOUT` (seconds, default 300);
   `RUST_LOG` default `warn,herdcord=trace`. Everything else (timeouts,
   harness, sync interval, state dir, socket path) is a sane default
