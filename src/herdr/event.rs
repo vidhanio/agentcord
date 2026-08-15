@@ -278,5 +278,21 @@ mod tests {
             closed.workspace_id().as_ref().map(|id| id.as_str()),
             Some("w9")
         );
+
+        // `workspace.created` carries the full workspace record; the id is
+        // read out of it (herdr 0.8 wire shape).
+        let created: Event = serde_json::from_value(json!({
+            "event": "workspace_created",
+            "data": {
+                "type": "workspace_created",
+                "workspace": { "workspace_id": "w5", "label": "api", "number": 3 },
+            },
+        }))
+        .unwrap();
+        assert_eq!(created.kind(), Some(EventKind::WorkspaceCreated));
+        assert_eq!(
+            created.workspace_id().as_ref().map(|id| id.as_str()),
+            Some("w5")
+        );
     }
 }

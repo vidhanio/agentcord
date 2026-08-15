@@ -323,6 +323,7 @@ impl Forum {
     /// plus a pane-scoped status subscription for every agent pane.
     fn subscriptions(agents: &[AgentRecord]) -> Vec<Subscription> {
         let mut subscriptions = vec![
+            Subscription::new(EventKind::WorkspaceCreated),
             Subscription::new(EventKind::WorkspaceUpdated),
             Subscription::new(EventKind::WorkspaceRenamed),
             Subscription::new(EventKind::WorkspaceClosed),
@@ -439,7 +440,13 @@ impl Forum {
                 }
                 false
             }
-            Some(EventKind::WorkspaceUpdated | EventKind::WorkspaceRenamed) => {
+            // A created workspace gets its forum right away; updated and
+            // renamed re-sync the forum to the current label.
+            Some(
+                EventKind::WorkspaceCreated
+                | EventKind::WorkspaceUpdated
+                | EventKind::WorkspaceRenamed,
+            ) => {
                 let Some(workspace_id) = event.workspace_id() else {
                     return false;
                 };

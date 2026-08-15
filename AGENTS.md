@@ -188,6 +188,10 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
               │             workspace dropdown, prompt input)
               │     submit ──► launch_from_modal: spawn → bind session post →
               │                relay the prompt → ephemeral thread link
+              │  /workspace ──► folder-path arg w/ filesystem autocomplete
+              │     (tilde expansion for home; dirs only, trailing slash)
+              │     ──► resolve+validate path → herdr workspace.create
+              │         (label = dir name; duplicate labels rejected)
               │
               ├─ poll task (2s tick, src/forum/poll.rs)
               │    syncs every live session's transcript (cursor no-ops)
@@ -195,7 +199,9 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
               │
               └─ event loop (long-lived events.subscribe stream, src/forum/events.rs)
                    pane.agent_status_changed (per agent pane) ──► typing + instant tags/title
-                   pane.agent_detected / pane.closed / pane.exited / workspace.updated / workspace.renamed
+                   pane.agent_detected / pane.closed / pane.exited
+                   workspace.created ──► forum created right away
+                   workspace.updated / workspace.renamed
                    │ re-subscribe on stream drop or new agent
                    └─ periodic reconcile (SYNC_INTERVAL 600s) as drift backstop
                         + prunes dead panes/sessions from the in-memory maps
@@ -232,7 +238,9 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
   mirror (cursor sync, tool embeds, user echoes, starter-message
   refresh); `events.rs` the `events.subscribe` loop, `reconcile`, and
   pane lifecycle handling (`workspace.closed` inactivates the workspace's
-  sessions instantly — herdr emits no per-pane events for it); `poll.rs`
+  sessions instantly — herdr emits no per-pane events for it;
+  `workspace.created` gets its forum created immediately via the same
+  sync path as updated/renamed); `poll.rs`
   the 2s transcript poll + rotation adoption; `titles.rs` the post-title
   selection and the one-line starter message (`` `pane` · cwd `…` ·
   session `…` ``, the pane part reading `inactive` once the agent is
@@ -246,8 +254,16 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
   derive only knows text inputs — sends it as the command's initial
   response, awaits the submit through serenity's modal collector, defers
   the submit, and launches via the forum's spawn/bind/relay helpers,
-  editing the deferred response with the thread link. The `allowed` check
-  gates the command on `ALLOWED_USER_ID`.
+  editing the deferred response with the thread link. `/workspace` takes
+  one folder-path argument with filesystem autocomplete (`complete_path`:
+  directories only, trailing slashes, `~`/`~/` expand to home for browsing
+  and stay in tilde form in suggestions, `~user` unsupported, hidden
+  entries skipped unless the basename starts with a dot, 25-suggestion
+  cap) and creates a herdr workspace — `resolve_folder` validates the
+  path (tilde expansion, existence, directory-ness, canonicalization),
+  the label is the directory's name, and an already-used label is
+  rejected so label-keyed rows/forums never collide. The `allowed` check
+  gates every command on `ALLOWED_USER_ID`.
 - `src/relay.rs` — per-agent conversation workers (keyed by pane id —
   agents are unnamed; the `RelayJob` carries the session path): one `mpsc`
   channel per agent (shared `Arc<Mutex<HashMap>>` of senders with
@@ -272,7 +288,7 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
 
 | Path | Purpose |
 |---|---|
-|`src/`|Bot core: `lib.rs` (Bot + event-handler dispatch), `config.rs`, `error.rs`, `db.rs`, `relay.rs`, `commands.rs` (poise slash command: the `/agent` modal), `utils.rs`|
+|`src/`|Bot core: `lib.rs` (Bot + event-handler dispatch), `config.rs`, `error.rs`, `db.rs`, `relay.rs`, `commands.rs` (poise slash commands: the `/agent` modal, the `/workspace` path command), `utils.rs`|
 |`src/forum/`|Forum-side state: `mod.rs` (struct + lifecycle), `sync.rs` (transcript mirror), `events.rs` (event loop + reconcile), `poll.rs` (2s transcript poll + rotations), `titles.rs` (titles + starter message)|
 | `src/herdr/` | herdr Unix-socket client: `mod.rs` (client + models + errors), `event.rs` (subscription machinery), `wire.rs` (envelope + result payloads) |
 | `src/session/` | Transcript normalization: `mod.rs` (models + the `Agent` harness union), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs`/`pi.rs` (file-backed harness types), `opencode.rs` (opencode SQLite store reader) |

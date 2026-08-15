@@ -1,4 +1,4 @@
-//! Slash commands (via poise): `/agent`.
+//! Slash commands (via poise): `/agent` and `/workspace`.
 //!
 //! `/agent` opens a native modal — an agent-harness dropdown (defaulted to
 //! the configured default kind), a workspace dropdown, and a prompt input —
@@ -10,15 +10,23 @@
 //! directly on the command interaction, the submit is awaited through
 //! serenity's modal collector, and the launch result edits the submit's
 //! deferred response (see the note in [`agent`]).
+//!
+//! `/workspace` creates a herdr workspace for a folder path. Its argument
+//! autocompletes directory paths, expanding `~` to the home directory for
+//! both completion and resolution.
 
-use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use poise::{CreateReply, FrameworkError, serenity_prelude as serenity};
 use serenity::{
-    CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateLabel,
-    CreateModal, CreateModalComponent, CreateSelectMenu, CreateSelectMenuKind,
-    CreateSelectMenuOption, EditInteractionResponse, InputTextStyle, LabelComponent,
-    ModalComponent, ModalInteraction, ModalInteractionData, collector::ModalInteractionCollector,
+    AutocompleteChoice, CreateAutocompleteResponse, CreateInputText, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateLabel, CreateModal, CreateModalComponent,
+    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, EditInteractionResponse,
+    InputTextStyle, LabelComponent, ModalComponent, ModalInteraction, ModalInteractionData,
+    collector::ModalInteractionCollector,
 };
 use tracing::{info, warn};
 
@@ -52,7 +60,7 @@ pub struct BotFramework {
 pub fn framework(bot: &Bot) -> BotFramework {
     let poise_framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![agent()],
+            commands: vec![agent(), workspace()],
             on_error,
             ..Default::default()
         })
@@ -240,6 +248,205 @@ async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), 
     Ok(())
 }
 
+/// create a herdr workspace for a folder.
+#[poise::command(slash_command, check = "allowed")]
+async fn workspace(
+    ctx: poise::ApplicationContext<'_, Bot, BotError>,
+    #[description = "folder path, e.g. `~/code/project`"]
+    #[autocomplete = "autocomplete_path"]
+    path: String,
+) -> Result<(), BotError> {
+    let bot = ctx.data().clone();
+
+    let home = dirs::home_dir()
+        .ok_or_else(|| BotError::Other("couldn't resolve your home directory".into()))?;
+    let cwd = resolve_folder(&path, &home).map_err(BotError::Other)?;
+    let cwd = cwd.to_string_lossy().into_owned();
+    let label = Path::new(&cwd)
+        .file_name()
+        .map_or_else(|| cwd.clone(), |name| name.to_string_lossy().into_owned());
+
+    // The bot keys workspace rows and forums by label, so a duplicate
+    // label would collide: reject it up front.
+    let workspaces = bot
+        .herdr
+        .list_workspaces()
+        .await
+        .map_err(|error| BotError::Other(format!("couldn't reach herdr: {error}")))?;
+    if let Some(existing) = workspaces
+        .into_iter()
+        .find(|workspace| workspace.label == label)
+    {
+        return Err(BotError::Other(format!(
+            "a workspace named `{label}` already exists (`{}`)",
+            existing.workspace_id
+        )));
+    }
+
+    let created = bot
+        .herdr
+        .create_workspace_with_pane(&label, &cwd)
+        .await
+        .map_err(|error| BotError::Other(format!("couldn't create the workspace: {error}")))?;
+    info!(workspace = %label, %cwd, "/workspace creates herdr workspace");
+
+    ctx.send(
+        CreateReply::new()
+            .content(format!(
+                "created workspace `{label}` ({}) at `{cwd}`",
+                created.workspace.workspace_id
+            ))
+            .ephemeral(true),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Autocompletes the `/workspace` path argument with directory
+/// suggestions, keeping the `~` form when the input uses one.
+// The `async` is required: poise's autocomplete callback type wraps the
+// function in a BoxFuture.
+#[allow(clippy::unused_async)]
+async fn autocomplete_path<'a>(
+    _ctx: poise::ApplicationContext<'a, Bot, BotError>,
+    partial: &'a str,
+) -> CreateAutocompleteResponse<'a> {
+    let suggestions = dirs::home_dir()
+        .map(|home| complete_path(partial, &home))
+        .unwrap_or_default();
+    CreateAutocompleteResponse::new().set_choices(
+        suggestions
+            .into_iter()
+            .map(AutocompleteChoice::from)
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// How many directory suggestions the `/workspace` autocomplete may show
+/// (Discord's autocomplete limit).
+const MAX_PATH_SUGGESTIONS: usize = 25;
+
+/// Resolves `input` to an absolute directory path: expands a leading `~`
+/// to `home` (via [`expand_home`]), canonicalizes (resolving symlinks),
+/// and rejects anything that is not a directory. Returns a user-facing
+/// error message on failure.
+fn resolve_folder(input: &str, home: &Path) -> Result<PathBuf, String> {
+    let Some(expanded) = expand_home(input, home) else {
+        return Err("only `~` expands to your home directory (`~user` is not supported)".into());
+    };
+    let metadata = std::fs::metadata(&expanded)
+        .map_err(|error| format!("`{input}` doesn't exist: {error}"))?;
+    if !metadata.is_dir() {
+        return Err(format!("`{input}` is not a directory"));
+    }
+    std::fs::canonicalize(&expanded).map_err(|error| format!("couldn't resolve `{input}`: {error}"))
+}
+
+/// Expands a leading `~` or `~/` to `home`; the empty input and other
+/// `~user` forms return `None`. Relative and absolute paths pass through
+/// unchanged.
+fn expand_home(input: &str, home: &Path) -> Option<PathBuf> {
+    if input.is_empty() {
+        return None;
+    }
+    if input == "~" {
+        return Some(home.to_path_buf());
+    }
+    if let Some(rest) = input.strip_prefix("~/") {
+        return Some(home.join(rest));
+    }
+    if input.starts_with('~') {
+        return None;
+    }
+    Some(PathBuf::from(input))
+}
+
+/// Directory completions for `input` as a folder path: every directory
+/// under the input's parent whose name starts with the input's basename,
+/// each with a trailing slash so the user can keep typing deeper. `~` and
+/// `~/…` browse from `home` and keep the `~` form in the suggestions;
+/// `~user` is not supported and yields nothing. Hidden entries are
+/// skipped unless the input's basename starts with a dot. Sorted
+/// case-insensitively, capped at [`MAX_PATH_SUGGESTIONS`].
+fn complete_path(input: &str, home: &Path) -> Vec<String> {
+    if input.is_empty() {
+        // One obvious entry point: the home directory.
+        return vec!["~/".to_owned()];
+    }
+
+    let (search_root, prefix, basename) = if let Some(rest) = input.strip_prefix("~/") {
+        let (parent, basename) = split_path(Path::new(rest));
+        let rel = with_slash(&parent);
+        let prefix = if rel.is_empty() {
+            "~/".to_owned()
+        } else {
+            format!("~{rel}")
+        };
+        (home.join(parent), prefix, basename)
+    } else if input == "~" {
+        (home.to_path_buf(), "~/".to_owned(), String::new())
+    } else if input.starts_with('~') {
+        return Vec::new();
+    } else {
+        let (parent, basename) = split_path(Path::new(input));
+        let root = if parent.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            parent.clone()
+        };
+        (root, with_slash(&parent), basename)
+    };
+
+    let show_hidden = basename.starts_with('.');
+    let mut suggestions = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&search_root) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') && !show_hidden {
+            continue;
+        }
+        if !name.starts_with(&basename) {
+            continue;
+        }
+        // `is_dir` on the full path follows symlinks, so linked
+        // directories complete too.
+        if entry.path().is_dir() {
+            suggestions.push(format!("{prefix}{name}/"));
+        }
+    }
+    suggestions.sort_by_key(|s| s.to_lowercase());
+    suggestions.truncate(MAX_PATH_SUGGESTIONS);
+    suggestions
+}
+
+/// The parent and file-name parts of `path`: a trailing slash (or `..`)
+/// makes the whole path the parent, so its children are listed, and a
+/// bare relative name has an empty parent.
+fn split_path(path: &Path) -> (PathBuf, String) {
+    let text = path.as_os_str().to_str().unwrap_or_default();
+    if text.ends_with('/') || text.ends_with("..") {
+        return (path.to_path_buf(), String::new());
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+    let basename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    (parent, basename)
+}
+
+/// `path` as a display string with a trailing slash; empty stays empty.
+fn with_slash(path: &Path) -> String {
+    let text = path.display().to_string();
+    if text.is_empty() || text.ends_with('/') {
+        text
+    } else {
+        format!("{text}/")
+    }
+}
+
 /// The agent modal: the harness dropdown (the configured default kind
 /// preselected), the workspace dropdown (preselected when the command ran
 /// in a managed forum), and the prompt input.
@@ -414,10 +621,38 @@ fn parse_agent_modal(data: &ModalInteractionData) -> AgentSelection {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use poise::serenity_prelude::ModalInteractionData;
 
-    use super::{AgentSelection, parse_agent_modal};
+    use super::{AgentSelection, complete_path, expand_home, parse_agent_modal, resolve_folder};
     use crate::session::AgentKind;
+
+    /// A throwaway directory for path tests, removed on drop. Each test
+    /// uses its own name, so parallel tests never collide.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "herdcord-workspace-tests-{name}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("temp dir");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     /// A submitted modal payload in Discord's wire shape (Component V2:
     /// labels wrapping the select menus and the input). Raw string JSON —
@@ -514,5 +749,117 @@ mod tests {
             .map(|option| option["value"].as_str().expect("option value"))
             .collect::<Vec<_>>();
         assert_eq!(defaults, vec!["omp"]);
+    }
+
+    #[test]
+    fn expand_home_expands_tilde_forms() {
+        let home = Path::new("/home/test-user");
+        assert_eq!(expand_home("~", home), Some(home.to_path_buf()));
+        assert_eq!(expand_home("~/a/b", home), Some(home.join("a/b")));
+        assert_eq!(expand_home("/abs/path", home), Some("/abs/path".into()));
+        assert_eq!(expand_home("rel/path", home), Some("rel/path".into()));
+        assert_eq!(expand_home("", home), None);
+        assert_eq!(expand_home("~user", home), None);
+        assert_eq!(expand_home("~user/thing", home), None);
+    }
+
+    #[test]
+    fn resolve_folder_expands_and_validates() {
+        let tmp = TempDir::new("resolve");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let file = tmp.path().join("notes.txt");
+        std::fs::write(&file, "x").expect("file");
+
+        let resolved =
+            resolve_folder(project.to_str().expect("utf8"), tmp.path()).expect("resolves");
+        assert_eq!(resolved, project);
+        let resolved = resolve_folder("~/project", tmp.path()).expect("resolves");
+        assert_eq!(resolved, project);
+
+        let missing = tmp.path().join("missing");
+        let error =
+            resolve_folder(missing.to_str().expect("utf8"), tmp.path()).expect_err("missing path");
+        assert!(error.contains("doesn't exist"), "{error}");
+        let error = resolve_folder(file.to_str().expect("utf8"), tmp.path())
+            .expect_err("file is not a directory");
+        assert!(error.contains("not a directory"), "{error}");
+        let error = resolve_folder("~other/project", tmp.path()).expect_err("~user");
+        assert!(error.contains("only `~`"), "{error}");
+    }
+
+    #[test]
+    fn complete_path_lists_matching_directories() {
+        let tmp = TempDir::new("complete");
+        std::fs::create_dir_all(tmp.path().join("foo/bar")).expect("foo/bar");
+        std::fs::create_dir_all(tmp.path().join("foobar")).expect("foobar");
+        std::fs::create_dir_all(tmp.path().join("alpha")).expect("alpha");
+        std::fs::create_dir_all(tmp.path().join(".hidden")).expect(".hidden");
+        std::fs::write(tmp.path().join("file.txt"), "x").expect("file");
+        let root = tmp.path().to_str().expect("utf8");
+
+        assert_eq!(
+            complete_path(&format!("{root}/fo"), tmp.path()),
+            vec![format!("{root}/foo/"), format!("{root}/foobar/")]
+        );
+        // The input's own basename is listed only under the parent's
+        // children (trailing slash), never as a duplicate of the input.
+        assert_eq!(
+            complete_path(&format!("{root}/foo/"), tmp.path()),
+            vec![format!("{root}/foo/bar/")]
+        );
+        // Files never complete; hidden entries appear once the basename
+        // starts with a dot.
+        assert_eq!(
+            complete_path(&format!("{root}/.h"), tmp.path()),
+            vec![format!("{root}/.hidden/")]
+        );
+        assert_eq!(
+            complete_path(&format!("{root}/file"), tmp.path()),
+            Vec::<String>::new()
+        );
+        // A nonexistent parent yields nothing.
+        assert_eq!(
+            complete_path(&format!("{root}/missing/"), tmp.path()),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn complete_path_keeps_tilde_form() {
+        let tmp = TempDir::new("tilde");
+        std::fs::create_dir_all(tmp.path().join("foo")).expect("foo");
+        std::fs::create_dir_all(tmp.path().join("foobar")).expect("foobar");
+        std::fs::create_dir_all(tmp.path().join("alpha")).expect("alpha");
+        std::fs::create_dir_all(tmp.path().join(".hidden")).expect(".hidden");
+        std::fs::write(tmp.path().join("file.txt"), "x").expect("file");
+
+        assert_eq!(
+            complete_path("~/fo", tmp.path()),
+            vec!["~/foo/".to_owned(), "~/foobar/".to_owned()]
+        );
+        assert_eq!(
+            complete_path("~", tmp.path()),
+            vec![
+                "~/alpha/".to_owned(),
+                "~/foo/".to_owned(),
+                "~/foobar/".to_owned()
+            ]
+        );
+        // The empty input suggests the home directory as the entry point.
+        assert_eq!(complete_path("", tmp.path()), vec!["~/".to_owned()]);
+        // `~user` is unsupported: no suggestions.
+        assert_eq!(complete_path("~user", tmp.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn complete_path_caps_at_discord_limit() {
+        let tmp = TempDir::new("cap");
+        for index in 0..30 {
+            std::fs::create_dir_all(tmp.path().join(format!("d{index}"))).expect("dir");
+        }
+        let suggestions = complete_path(&format!("{}/", tmp.path().display()), tmp.path());
+        assert_eq!(suggestions.len(), 25);
+        assert!(suggestions.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 }
