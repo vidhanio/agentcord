@@ -474,9 +474,11 @@ impl Forum {
     /// Posts a user turn as an echo unless the user already typed it into
     /// the thread. Echoes go through the forum's user webhook (named and
     /// avatared after the allowed user) so transcript turns look like the
-    /// user's own messages; falls back to a plain bot message when no
-    /// webhook is available. Returns the posted message id, or `None` when
-    /// the echo was skipped.
+    /// user's own messages; falls back to plain bot messages when no
+    /// webhook is available. Text longer than Discord's limit is split at
+    /// line boundaries like agent messages — an overlong echo must never
+    /// wedge the sync cursor on a `TooLarge` error. Returns the last
+    /// posted message id, or `None` when the echo was skipped.
     async fn post_user_echo(
         &self,
         ctx: &Context,
@@ -497,31 +499,45 @@ impl Forum {
             return Ok(None);
         }
 
+        let chunks = split_lines(text, serenity::constants::MESSAGE_CODE_LIMIT);
+
+        // Echo the chunks through the user webhook; whatever the webhook
+        // did not post (unavailable, or a failure part-way) falls back to
+        // plain bot messages, so a long turn can never wedge the cursor.
+        let mut posted: Vec<MessageId> = Vec::new();
         if let Some(profile) = self.user_profile(ctx).await
             && let Some(webhook) = self.user_webhook(ctx, forum).await
         {
-            let mut builder = ExecuteWebhook::new()
-                .content(text)
-                .in_thread(ThreadId::new(post.get()))
-                .username(&profile.username);
-            if let Some(avatar_url) = &profile.avatar_url {
-                builder = builder.avatar_url(avatar_url.clone());
-            }
-            match webhook.execute(&ctx.http, true, builder).await {
-                Ok(Some(message)) => return Ok(Some(message.id)),
-                Ok(None) => warn!("user webhook returned no message, falling back to bot echo"),
-                Err(error) => {
-                    warn!(?error, "user webhook echo failed, falling back to bot echo");
+            for chunk in &chunks {
+                let mut builder = ExecuteWebhook::new()
+                    .content(chunk)
+                    .in_thread(ThreadId::new(post.get()))
+                    .username(&profile.username);
+                if let Some(avatar_url) = &profile.avatar_url {
+                    builder = builder.avatar_url(avatar_url.clone());
+                }
+                match webhook.execute(&ctx.http, true, builder).await {
+                    Ok(Some(message)) => posted.push(message.id),
+                    Ok(None) => {
+                        warn!("user webhook returned no message, falling back to bot echo");
+                        break;
+                    }
+                    Err(error) => {
+                        warn!(?error, "user webhook echo failed, falling back to bot echo");
+                        break;
+                    }
                 }
             }
         }
-
-        let id = post
-            .widen()
-            .send_message(&ctx.http, CreateMessage::new().content(text))
-            .await?
-            .id;
-        Ok(Some(id))
+        for chunk in chunks.iter().skip(posted.len()) {
+            posted.push(
+                post.widen()
+                    .send_message(&ctx.http, CreateMessage::new().content(chunk))
+                    .await?
+                    .id,
+            );
+        }
+        Ok(posted.last().copied())
     }
 
     /// The allowed user's webhook persona (guild nickname or display name,
