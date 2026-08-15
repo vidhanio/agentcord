@@ -28,9 +28,9 @@ use self::{
     pi::parse_pi,
 };
 
-/// The supported agent harnesses (strict enum — no free strings).
+/// The supported harnesses (strict enum — no free strings).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AgentKind {
+pub enum Harness {
     /// The `oh-my-pi` (`omp`) harness.
     Omp,
     /// Anthropic's Claude Code CLI.
@@ -43,8 +43,8 @@ pub enum AgentKind {
     Opencode,
 }
 
-impl AgentKind {
-    /// All supported agent kinds, in canonical order.
+impl Harness {
+    /// All supported harnesses, in canonical order.
     pub const ALL: [Self; 5] = [
         Self::Omp,
         Self::ClaudeCode,
@@ -65,10 +65,10 @@ impl AgentKind {
         }
     }
 
-    /// Parses a kind from a string, case-insensitively.
+    /// Parses a harness from a string, case-insensitively.
     ///
     /// In addition to the canonical identifiers, `claude` and `claude_code`
-    /// are accepted as aliases for [`AgentKind::ClaudeCode`]. `pi` and
+    /// are accepted as aliases for [`Harness::ClaudeCode`]. `pi` and
     /// `opencode` take no aliases.
     #[must_use]
     pub const fn parse(s: &str) -> Option<Self> {
@@ -210,14 +210,14 @@ pub struct SessionMessage {
 /// `Opencode` sessions live in a SQLite store rather than a transcript file,
 /// so this returns [`std::io::ErrorKind::Unsupported`] for them — use
 /// [`read_session_messages`] instead.
-pub fn read_session(kind: AgentKind, path: &Path) -> IoResult<Vec<SessionMessage>> {
+pub fn read_session(harness: Harness, path: &Path) -> IoResult<Vec<SessionMessage>> {
     let raw = std::fs::read_to_string(path)?;
-    Ok(match kind {
-        AgentKind::Omp => parse_omp(&raw),
-        AgentKind::ClaudeCode => parse_claude_code(&raw),
-        AgentKind::Codex => parse_codex(&raw),
-        AgentKind::Pi => parse_pi(&raw),
-        AgentKind::Opencode => {
+    Ok(match harness {
+        Harness::Omp => parse_omp(&raw),
+        Harness::ClaudeCode => parse_claude_code(&raw),
+        Harness::Codex => parse_codex(&raw),
+        Harness::Pi => parse_pi(&raw),
+        Harness::Opencode => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "opencode sessions are store-backed",
@@ -226,18 +226,18 @@ pub fn read_session(kind: AgentKind, path: &Path) -> IoResult<Vec<SessionMessage
     })
 }
 
-/// Reads a session's messages by kind.
+/// Reads a session's messages by harness.
 ///
 /// `Opencode` sessions come from their SQLite store, keyed by session id
-/// (`path_or_id` is the store's session id); every other kind comes from
+/// (`path_or_id` is the store's session id); every other harness comes from
 /// its transcript file (`path_or_id` is the file path), with the same
 /// semantics as [`read_session`].
-pub fn read_session_messages(kind: AgentKind, path_or_id: &str) -> IoResult<Vec<SessionMessage>> {
-    if kind == AgentKind::Opencode {
+pub fn read_session_messages(harness: Harness, path_or_id: &str) -> IoResult<Vec<SessionMessage>> {
+    if harness == Harness::Opencode {
         return opencode::open_opencode_db()
             .and_then(|conn| opencode::read_opencode_session(&conn, path_or_id));
     }
-    read_session(kind, Path::new(path_or_id))
+    read_session(harness, Path::new(path_or_id))
 }
 
 /// Reads the session's own title from its transcript, when the harness
@@ -255,11 +255,11 @@ pub fn read_session_messages(kind: AgentKind, path_or_id: &str) -> IoResult<Vec<
 ///
 /// `None` when the source is missing or no usable title exists yet.
 #[must_use]
-pub fn read_session_title(kind: AgentKind, path: &Path) -> Option<String> {
-    if kind == AgentKind::Codex {
+pub fn read_session_title(harness: Harness, path: &Path) -> Option<String> {
+    if harness == Harness::Codex {
         return None;
     }
-    if kind == AgentKind::Opencode {
+    if harness == Harness::Opencode {
         let session_id = path.to_string_lossy();
         return opencode::open_opencode_db()
             .ok()
@@ -273,29 +273,29 @@ pub fn read_session_title(kind: AgentKind, path: &Path) -> Option<String> {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        match (kind, value.get("type").and_then(Value::as_str)) {
-            (AgentKind::Omp, Some("title" | "title_change")) => {
+        match (harness, value.get("type").and_then(Value::as_str)) {
+            (Harness::Omp, Some("title" | "title_change")) => {
                 title = value
                     .get("title")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
             }
-            (AgentKind::Pi, Some("session_info")) => {
+            (Harness::Pi, Some("session_info")) => {
                 title = value.get("name").and_then(Value::as_str).map(str::to_owned);
             }
-            (AgentKind::ClaudeCode, Some("custom-title")) => {
+            (Harness::ClaudeCode, Some("custom-title")) => {
                 custom = value
                     .get("customTitle")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
             }
-            (AgentKind::ClaudeCode, Some("ai-title")) => {
+            (Harness::ClaudeCode, Some("ai-title")) => {
                 ai = value
                     .get("aiTitle")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
             }
-            (AgentKind::ClaudeCode, Some("summary")) => {
+            (Harness::ClaudeCode, Some("summary")) => {
                 title = value
                     .get("summary")
                     .and_then(Value::as_str)
@@ -304,8 +304,8 @@ pub fn read_session_title(kind: AgentKind, path: &Path) -> Option<String> {
             _ => {}
         }
     }
-    let chosen = match kind {
-        AgentKind::ClaudeCode => custom.or(ai).or(title),
+    let chosen = match harness {
+        Harness::ClaudeCode => custom.or(ai).or(title),
         _ => title,
     };
     chosen
@@ -316,45 +316,45 @@ pub fn read_session_title(kind: AgentKind, path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentKind, SessionRole, TOOL_TEXT_LIMIT, ToolCallId, ToolState, claude::parse_claude_code,
+        Harness, SessionRole, TOOL_TEXT_LIMIT, ToolCallId, ToolState, claude::parse_claude_code,
         codex::parse_codex, omp::parse_omp, read_session, read_session_title,
     };
 
     #[test]
-    fn agent_kind_parse_round_trips() {
-        for kind in AgentKind::ALL {
-            assert_eq!(AgentKind::parse(kind.as_str()), Some(kind));
+    fn harness_parse_round_trips() {
+        for harness in Harness::ALL {
+            assert_eq!(Harness::parse(harness.as_str()), Some(harness));
         }
-        assert_eq!(AgentKind::Omp.as_str(), "omp");
-        assert_eq!(AgentKind::ClaudeCode.as_str(), "claude-code");
-        assert_eq!(AgentKind::Codex.as_str(), "codex");
-        assert_eq!(AgentKind::Pi.as_str(), "pi");
-        assert_eq!(AgentKind::Opencode.as_str(), "opencode");
-        assert_eq!(AgentKind::Omp.label(), "Omp");
-        assert_eq!(AgentKind::ClaudeCode.label(), "Claude Code");
-        assert_eq!(AgentKind::Codex.label(), "Codex");
-        assert_eq!(AgentKind::Pi.label(), "Pi");
-        assert_eq!(AgentKind::Opencode.label(), "OpenCode");
-        assert_eq!(AgentKind::ALL.len(), 5);
+        assert_eq!(Harness::Omp.as_str(), "omp");
+        assert_eq!(Harness::ClaudeCode.as_str(), "claude-code");
+        assert_eq!(Harness::Codex.as_str(), "codex");
+        assert_eq!(Harness::Pi.as_str(), "pi");
+        assert_eq!(Harness::Opencode.as_str(), "opencode");
+        assert_eq!(Harness::Omp.label(), "Omp");
+        assert_eq!(Harness::ClaudeCode.label(), "Claude Code");
+        assert_eq!(Harness::Codex.label(), "Codex");
+        assert_eq!(Harness::Pi.label(), "Pi");
+        assert_eq!(Harness::Opencode.label(), "OpenCode");
+        assert_eq!(Harness::ALL.len(), 5);
 
-        assert_eq!(AgentKind::parse("OMP"), Some(AgentKind::Omp));
-        assert_eq!(AgentKind::parse("OmP"), Some(AgentKind::Omp));
-        assert_eq!(AgentKind::parse("CLAUDE-CODE"), Some(AgentKind::ClaudeCode));
-        assert_eq!(AgentKind::parse("claude"), Some(AgentKind::ClaudeCode));
-        assert_eq!(AgentKind::parse("claude_code"), Some(AgentKind::ClaudeCode));
-        assert_eq!(AgentKind::parse("Claude_Code"), Some(AgentKind::ClaudeCode));
-        assert_eq!(AgentKind::parse("CODEX"), Some(AgentKind::Codex));
-        assert_eq!(AgentKind::parse("pi"), Some(AgentKind::Pi));
-        assert_eq!(AgentKind::parse("PI"), Some(AgentKind::Pi));
-        assert_eq!(AgentKind::parse("Pi"), Some(AgentKind::Pi));
-        assert_eq!(AgentKind::parse("opencode"), Some(AgentKind::Opencode));
-        assert_eq!(AgentKind::parse("OPENCODE"), Some(AgentKind::Opencode));
-        assert_eq!(AgentKind::parse("OpenCode"), Some(AgentKind::Opencode));
+        assert_eq!(Harness::parse("OMP"), Some(Harness::Omp));
+        assert_eq!(Harness::parse("OmP"), Some(Harness::Omp));
+        assert_eq!(Harness::parse("CLAUDE-CODE"), Some(Harness::ClaudeCode));
+        assert_eq!(Harness::parse("claude"), Some(Harness::ClaudeCode));
+        assert_eq!(Harness::parse("claude_code"), Some(Harness::ClaudeCode));
+        assert_eq!(Harness::parse("Claude_Code"), Some(Harness::ClaudeCode));
+        assert_eq!(Harness::parse("CODEX"), Some(Harness::Codex));
+        assert_eq!(Harness::parse("pi"), Some(Harness::Pi));
+        assert_eq!(Harness::parse("PI"), Some(Harness::Pi));
+        assert_eq!(Harness::parse("Pi"), Some(Harness::Pi));
+        assert_eq!(Harness::parse("opencode"), Some(Harness::Opencode));
+        assert_eq!(Harness::parse("OPENCODE"), Some(Harness::Opencode));
+        assert_eq!(Harness::parse("OpenCode"), Some(Harness::Opencode));
 
-        assert_eq!(AgentKind::parse(""), None);
-        assert_eq!(AgentKind::parse("gpt"), None);
-        assert_eq!(AgentKind::parse(" claude-code "), None);
-        assert_eq!(AgentKind::parse("open_code"), None);
+        assert_eq!(Harness::parse(""), None);
+        assert_eq!(Harness::parse("gpt"), None);
+        assert_eq!(Harness::parse(" claude-code "), None);
+        assert_eq!(Harness::parse("open_code"), None);
     }
 
     #[test]
@@ -575,7 +575,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read_session_title(AgentKind::Omp, &path).as_deref(),
+            read_session_title(Harness::Omp, &path).as_deref(),
             Some("Second task")
         );
         std::fs::remove_file(&path).ok();
@@ -594,7 +594,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read_session_title(AgentKind::ClaudeCode, &path).as_deref(),
+            read_session_title(Harness::ClaudeCode, &path).as_deref(),
             Some("My Title")
         );
         std::fs::remove_file(&path).ok();
@@ -612,12 +612,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read_session_title(AgentKind::ClaudeCode, &path).as_deref(),
+            read_session_title(Harness::ClaudeCode, &path).as_deref(),
             Some("Auto title")
         );
         std::fs::write(&path, r#"{"type":"summary","summary":"A summary title"}"#).unwrap();
         assert_eq!(
-            read_session_title(AgentKind::ClaudeCode, &path).as_deref(),
+            read_session_title(Harness::ClaudeCode, &path).as_deref(),
             Some("A summary title")
         );
         std::fs::remove_file(&path).ok();
@@ -632,11 +632,11 @@ mod tests {
             r#"{"type":"response_item","payload":{"type":"message"}}"#,
         )
         .unwrap();
-        assert_eq!(read_session_title(AgentKind::Codex, &path), None);
+        assert_eq!(read_session_title(Harness::Codex, &path), None);
         std::fs::remove_file(&path).ok();
         let missing =
             std::env::temp_dir().join(format!("herdcord-title-missing-{}", std::process::id()));
-        assert_eq!(read_session_title(AgentKind::Omp, &missing), None);
+        assert_eq!(read_session_title(Harness::Omp, &missing), None);
     }
 
     #[test]
@@ -756,12 +756,12 @@ not json at all
 "#,
         )
         .unwrap();
-        let messages = read_session(AgentKind::Omp, &path).unwrap();
+        let messages = read_session(Harness::Omp, &path).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].text, "hello");
 
         let missing = std::env::temp_dir().join("herdcord-session-does-not-exist.jsonl");
-        assert!(read_session(AgentKind::Omp, &missing).is_err());
+        assert!(read_session(Harness::Omp, &missing).is_err());
     }
 }

@@ -18,7 +18,7 @@ use tokio::{
     sync::broadcast,
 };
 
-use crate::session::AgentKind;
+use crate::session::Harness;
 
 mod event;
 mod wire;
@@ -159,10 +159,10 @@ pub struct SessionPath(String);
 /// A herdr agent and the pane, tab, and workspace it runs in.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Agent {
-    /// Agent kind, e.g. [`AgentKind::Omp`]; absent while the agent is
-    /// still launching or the harness is unknown.
-    #[serde(default, rename = "agent", deserialize_with = "de_agent_kind")]
-    pub kind: Option<AgentKind>,
+    /// The harness the agent runs, e.g. [`Harness::Omp`]; absent while
+    /// the agent is still launching or the harness is unknown.
+    #[serde(default, rename = "agent", deserialize_with = "de_harness")]
+    pub harness: Option<Harness>,
     /// Raw status string as reported by herdr; prefer [`Agent::status`].
     pub agent_status: String,
     /// Unique agent name; absent while the agent is unnamed.
@@ -196,9 +196,9 @@ pub struct Agent {
 /// A herdr agent's persistent session reference.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentSession {
-    /// Agent harness, e.g. [`AgentKind::Omp`]; absent when unknown.
-    #[serde(default, rename = "agent", deserialize_with = "de_agent_kind")]
-    pub harness: Option<AgentKind>,
+    /// Agent harness, e.g. [`Harness::Omp`]; absent when unknown.
+    #[serde(default, rename = "agent", deserialize_with = "de_harness")]
+    pub harness: Option<Harness>,
     /// Session kind, e.g. `"jsonl"`.
     #[serde(default)]
     pub kind: String,
@@ -219,15 +219,15 @@ impl Agent {
     }
 }
 
-/// Deserializes herdr's optional agent-kind label (`"omp"`, `"claude-code"`,
+/// Deserializes herdr's optional harness label (`"omp"`, `"claude-code"`,
 /// …): unknown labels map to `None` rather than failing the record — an
 /// agent of an unknown harness simply gets no session post.
-fn de_agent_kind<'de, D>(deserializer: D) -> Result<Option<AgentKind>, D::Error>
+fn de_harness<'de, D>(deserializer: D) -> Result<Option<Harness>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     Option::<String>::deserialize(deserializer)
-        .map(|kind| kind.as_deref().and_then(AgentKind::parse))
+        .map(|harness| harness.as_deref().and_then(Harness::parse))
 }
 
 /// A herdr workspace.
@@ -488,8 +488,8 @@ impl Herdr {
         Ok(info.agent)
     }
 
-    /// Starts an agent of `kind` in `pane_id` under unique `name`, passing
-    /// `agent_args` through to the agent.
+    /// Starts an agent of `harness` in `pane_id` under unique `name`,
+    /// passing `agent_args` through to the agent.
     ///
     /// # Errors
     ///
@@ -498,7 +498,7 @@ impl Herdr {
     pub async fn start_agent(
         &self,
         name: &str,
-        kind: AgentKind,
+        harness: Harness,
         pane_id: &PaneId,
         agent_args: &[String],
     ) -> Result<Agent, Error> {
@@ -507,7 +507,7 @@ impl Herdr {
                 "agent.start",
                 json!({
                     "name": name,
-                    "kind": kind.as_str(),
+                    "kind": harness.as_str(),
                     "pane_id": pane_id,
                     "args": agent_args,
                 }),

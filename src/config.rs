@@ -11,11 +11,11 @@ use std::{
 use serde::Deserialize;
 use serenity::all::{GuildId, UserId};
 
-use crate::session::AgentKind;
+use crate::session::Harness;
 
-/// Default agent kind for agents launched from forum posts without a kind
+/// Default harness for agents launched from forum posts without a harness
 /// tag.
-pub const DEFAULT_AGENT_KIND: AgentKind = AgentKind::Omp;
+pub const DEFAULT_HARNESS: Harness = Harness::Pi;
 
 /// How long one settle-wait call waits in a single request before the
 /// relay continues waiting silently.

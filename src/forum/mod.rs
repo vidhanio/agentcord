@@ -23,7 +23,7 @@ use crate::{
     error::BotError,
     forum::titles::forum_channel_name,
     herdr::{Agent, AgentStatus, Herdr, PaneId, SessionPath, Workspace, WorkspaceId},
-    session::{AgentKind, ToolCallId, ToolState},
+    session::{Harness, ToolCallId, ToolState},
 };
 
 mod events;
@@ -31,11 +31,11 @@ mod poll;
 mod sync;
 mod titles;
 
-/// Emoji for agent-kind tags.
-const KIND_EMOJI: &str = "🤖";
+/// Emoji for harness tags.
+const HARNESS_EMOJI: &str = "🤖";
 
 /// Discord allows at most 20 tags per forum channel; the bot manages 5
-/// status tags plus one tag per agent kind, well under the cap.
+/// status tags plus one tag per harness, well under the cap.
 const TAG_STATUSES: [(AgentStatus, &str); 5] = [
     (AgentStatus::Idle, "⚪"),
     (AgentStatus::Working, "🟡"),
@@ -127,12 +127,12 @@ impl Forum {
         }
     }
 
-    /// Returns the id of every status and kind tag on `channel_id`, creating
+    /// Returns the id of every status and harness tag on `channel_id`, creating
     /// missing tags on demand: lifecycle-status tags get their canonical
-    /// emoji, the agent-kind tag gets the kind emoji. Stateless: the forum's
+    /// emoji, the harness tag gets the harness emoji. Stateless: the forum's
     /// tag list is fetched fresh on each call.
     /// Returns the id of every managed tag on `channel_id`: the lifecycle
-    /// statuses and every agent kind, with their canonical emojis. The
+    /// statuses and every harness, with their canonical emojis. The
     /// forum's tag list is replaced when it differs — missing tags are
     /// created and any tag this bot does not manage is dropped, so a
     /// forum's tags are exactly the bot's (Discord caps tags at 20 per
@@ -149,9 +149,9 @@ impl Forum {
             .iter()
             .map(|(status, emoji)| (status.as_str(), *emoji))
             .chain(
-                AgentKind::ALL
+                Harness::ALL
                     .iter()
-                    .map(|kind| (kind.as_str(), KIND_EMOJI)),
+                    .map(|harness| (harness.as_str(), HARNESS_EMOJI)),
             )
             .collect::<Vec<_>>();
         let managed = desired
@@ -189,7 +189,7 @@ impl Forum {
             .collect())
     }
 
-    /// Applies `kind` + `status` tags and the post title to a session post
+    /// Applies `harness` + `status` tags and the post title to a session post
     /// and reopens it: a live agent's post is always open, so an archived
     /// thread (closed on session death, or auto-archived) is unarchived.
     /// Tags are applied unconditionally — herdr is the truth, Discord
@@ -204,15 +204,15 @@ impl Forum {
         ctx: &Context,
         forum: ChannelId,
         post: ChannelId,
-        kind: Option<AgentKind>,
+        harness: Option<Harness>,
         status: AgentStatus,
         title: Option<&str>,
     ) -> BotResult<()> {
         let ids = self.tag_ids(ctx, forum).await?;
 
         let mut applied = Vec::new();
-        if let Some(kind) = kind
-            && let Some(id) = ids.get(kind.as_str())
+        if let Some(harness) = harness
+            && let Some(id) = ids.get(harness.as_str())
         {
             applied.push(*id);
         }
@@ -360,14 +360,14 @@ impl Forum {
     /// Ensures the agent's session has a forum post, creating it (and its
     /// database row) on first sight, and records the pane→session mapping
     /// so a `pane.closed` event can mark the post dead instantly. Agents
-    /// without a session reference or with an unknown kind get no post.
+    /// without a session reference or with an unknown harness get no post.
     pub async fn ensure_session_post(&self, ctx: &Context, agent: &Agent) -> BotResult<()> {
         let Some(session_path) = agent.agent_session.as_ref().map(|session| &session.value) else {
             return Ok(());
         };
 
-        let Some(kind) = agent.kind else {
-            warn!(agent = ?agent.kind, %session_path, "unknown agent kind, skipping session post");
+        let Some(harness) = agent.harness else {
+            warn!(harness = ?agent.harness, %session_path, "unknown harness, skipping session post");
             return Ok(());
         };
 
@@ -395,7 +395,7 @@ impl Forum {
                 .await?
             else {
                 return self
-                    .create_session_post(ctx, agent, kind, session_path)
+                    .create_session_post(ctx, agent, harness, session_path)
                     .await;
             };
             // Re-map the pane to the adopted row's key so the poll and lock
@@ -415,7 +415,9 @@ impl Forum {
         let row_key = SessionPath::from(session.session_path.clone());
 
         let Some(post_id) = session.post_channel_id else {
-            return self.create_session_post(ctx, agent, kind, &row_key).await;
+            return self
+                .create_session_post(ctx, agent, harness, &row_key)
+                .await;
         };
 
         // The bound post may have been deleted on Discord (the thread or its
@@ -424,7 +426,9 @@ impl Forum {
         let post = from_i64(post_id)?;
         if !self.channel_exists(ctx, post).await? {
             warn!(%session_path, ?post, "session post deleted, re-creating");
-            return self.create_session_post(ctx, agent, kind, &row_key).await;
+            return self
+                .create_session_post(ctx, agent, harness, &row_key)
+                .await;
         }
         Ok(())
     }
@@ -448,16 +452,16 @@ impl Forum {
 
         let post_id = to_i64(thread.id)?;
         if let Some(session) = self.db.session_by_post(post_id).await? {
-            // Already bound to a session: catch up its transcript. The kind
+            // Already bound to a session: catch up its transcript. The harness
             // comes from the live agent when there is one, else omp.
-            let kind = self
-                .live_agent_kind(&session)
+            let harness = self
+                .live_agent_harness(&session)
                 .await
-                .unwrap_or(AgentKind::Omp);
+                .unwrap_or(Harness::Omp);
             let forum = self
                 .forum_for_post(ctx, ChannelId::new(thread.id.get()))
                 .await?;
-            self.sync_session(ctx, &session, kind, forum).await?;
+            self.sync_session(ctx, &session, harness, forum).await?;
             return Ok(());
         }
 
@@ -488,9 +492,9 @@ impl Forum {
         Ok(())
     }
 
-    /// The agent kind of the first agent-kind tag applied to `post`, if
-    /// any — the kind a dead session's thread keeps carrying.
-    async fn applied_kind(&self, ctx: &Context, post: ChannelId) -> BotResult<Option<AgentKind>> {
+    /// The harness of the first harness tag applied to `post`, if
+    /// any — the harness a dead session's thread keeps carrying.
+    async fn applied_harness(&self, ctx: &Context, post: ChannelId) -> BotResult<Option<Harness>> {
         let forum = self.forum_for_post(ctx, post).await?;
         let forum = self.forum_channel(ctx, forum).await?;
         let names = tag_names(&forum);
@@ -499,7 +503,7 @@ impl Forum {
             .applied_tags
             .iter()
             .filter_map(|tag_id| names.get(tag_id).copied())
-            .find_map(AgentKind::parse))
+            .find_map(Harness::parse))
     }
 
     /// A unique name for a fresh agent: the [`agent_name_stamp`] with a
@@ -592,18 +596,18 @@ impl Forum {
             ))
         })?;
         let post = from_i64(post_id)?;
-        let kind = self
-            .applied_kind(ctx, post)
+        let harness = self
+            .applied_harness(ctx, post)
             .await?
-            .unwrap_or(crate::config::DEFAULT_AGENT_KIND);
-        let args = resume_args(kind, session);
+            .unwrap_or(crate::config::DEFAULT_HARNESS);
+        let args = resume_args(harness, session);
         let workspace = self.workspace_by_label(&session.workspace_label).await?;
         let name = self.fresh_agent_name().await?;
 
         info!(
             session = %session.session_path,
             %name,
-            kind = kind.as_str(),
+            harness = harness.as_str(),
             "resuming session in a new agent"
         );
 
@@ -614,11 +618,11 @@ impl Forum {
             .map_or_else(|| name.clone(), |workspace| workspace.label.clone());
         let started = match workspace {
             Some(workspace) => {
-                self.spawn_in_workspace(&workspace, &name, kind, &session.cwd, &args)
+                self.spawn_in_workspace(&workspace, &name, harness, &session.cwd, &args)
                     .await?
             }
             None => {
-                self.spawn_in_new_workspace(&name, &name, kind, &session.cwd, &args)
+                self.spawn_in_new_workspace(&name, &name, harness, &session.cwd, &args)
                     .await?
             }
         };
@@ -641,7 +645,7 @@ impl Forum {
         Ok(started)
     }
 
-    /// Applies only the agent-kind tag to a dead session's post: the status
+    /// Applies only the harness tag to a dead session's post: the status
     /// tag is dropped; the thread itself is closed (archived — a message
     /// still unarchives it and resumes the session).
     async fn dead_post_tags(
@@ -651,11 +655,11 @@ impl Forum {
         post: ChannelId,
     ) -> BotResult<()> {
         let ids = self.tag_ids(ctx, forum).await?;
-        let kind_id = self
-            .applied_kind(ctx, post)
+        let harness_id = self
+            .applied_harness(ctx, post)
             .await?
-            .and_then(|kind| ids.get(kind.as_str()).copied());
-        let applied = kind_id.into_iter().collect::<Vec<_>>();
+            .and_then(|harness| ids.get(harness.as_str()).copied());
+        let applied = harness_id.into_iter().collect::<Vec<_>>();
         ThreadId::new(post.get())
             .edit(&ctx.http, EditThread::new().applied_tags(applied))
             .await?;
@@ -669,7 +673,7 @@ impl Forum {
         &self,
         workspace: &Workspace,
         name: &str,
-        kind: AgentKind,
+        harness: Harness,
         cwd: &str,
         args: &[String],
     ) -> BotResult<Agent> {
@@ -682,7 +686,11 @@ impl Forum {
             Err(error) => return Err(error.into()),
         };
 
-        match self.herdr.start_agent(name, kind, &tab.pane_id, args).await {
+        match self
+            .herdr
+            .start_agent(name, harness, &tab.pane_id, args)
+            .await
+        {
             Ok(agent) => {
                 info!(?agent, "started agent");
                 Ok(agent)
@@ -706,7 +714,7 @@ impl Forum {
         &self,
         label: &str,
         name: &str,
-        kind: AgentKind,
+        harness: Harness,
         cwd: &str,
         args: &[String],
     ) -> BotResult<Agent> {
@@ -714,7 +722,7 @@ impl Forum {
 
         match self
             .herdr
-            .start_agent(name, kind, &created.pane_id, args)
+            .start_agent(name, harness, &created.pane_id, args)
             .await
         {
             Ok(agent) => {
@@ -874,12 +882,12 @@ fn tag_names(forum: &GuildChannel) -> HashMap<ForumTagId, &str> {
 /// session id (the row key — herdr's reported session reference), pi and
 /// opencode by session id via `--session`.
 #[must_use]
-fn resume_args(kind: AgentKind, session: &SessionRow) -> Vec<String> {
-    match kind {
-        AgentKind::Omp => vec![format!("--resume={}", session.transcript_path)],
-        AgentKind::ClaudeCode => vec!["--resume".into(), session.session_path.clone()],
-        AgentKind::Codex => vec!["resume".into(), session.session_path.clone()],
-        AgentKind::Pi | AgentKind::Opencode => {
+fn resume_args(harness: Harness, session: &SessionRow) -> Vec<String> {
+    match harness {
+        Harness::Omp => vec![format!("--resume={}", session.transcript_path)],
+        Harness::ClaudeCode => vec!["--resume".into(), session.session_path.clone()],
+        Harness::Codex => vec!["resume".into(), session.session_path.clone()],
+        Harness::Pi | Harness::Opencode => {
             vec!["--session".into(), session.session_path.clone()]
         }
     }
@@ -909,7 +917,7 @@ mod tests {
     use crate::{
         db::SessionRow,
         herdr::{Agent, PaneId, SessionPath, TabId, WorkspaceId},
-        session::AgentKind,
+        session::Harness,
     };
 
     #[test]
@@ -946,27 +954,27 @@ mod tests {
     fn post_title_uses_stripped_terminal_title() {
         let mut agent = agent_fixture();
         agent.terminal_title_stripped = Some("  omp — my project   ".to_owned());
-        assert_eq!(post_title(&agent, AgentKind::Omp), "omp — my project");
+        assert_eq!(post_title(&agent, Harness::Omp), "omp — my project");
     }
 
     #[test]
-    fn post_title_falls_back_to_kind_label() {
+    fn post_title_falls_back_to_harness_label() {
         let mut agent = agent_fixture();
         agent.terminal_title_stripped = Some("   ".to_owned());
-        assert_eq!(post_title(&agent, AgentKind::Omp), "omp session");
+        assert_eq!(post_title(&agent, Harness::Omp), "omp session");
         agent.terminal_title_stripped = None;
-        assert_eq!(post_title(&agent, AgentKind::Codex), "codex session");
+        assert_eq!(post_title(&agent, Harness::Codex), "codex session");
     }
 
     #[test]
     fn post_title_truncates() {
         let mut agent = agent_fixture();
         agent.terminal_title_stripped = Some("a".repeat(500));
-        assert_eq!(post_title(&agent, AgentKind::Omp).chars().count(), 100);
+        assert_eq!(post_title(&agent, Harness::Omp).chars().count(), 100);
     }
 
     #[test]
-    fn resume_args_resume_by_kind() {
+    fn resume_args_resume_by_harness() {
         let session = SessionRow {
             session_path: "s1".to_owned(),
             workspace_label: "w1".to_owned(),
@@ -978,23 +986,17 @@ mod tests {
             starter_message_id: None,
         };
         assert_eq!(
-            resume_args(AgentKind::Omp, &session),
+            resume_args(Harness::Omp, &session),
             vec!["--resume=/tmp/s1.jsonl"]
         );
         assert_eq!(
-            resume_args(AgentKind::ClaudeCode, &session),
+            resume_args(Harness::ClaudeCode, &session),
             vec!["--resume", "s1"]
         );
+        assert_eq!(resume_args(Harness::Codex, &session), vec!["resume", "s1"]);
+        assert_eq!(resume_args(Harness::Pi, &session), vec!["--session", "s1"]);
         assert_eq!(
-            resume_args(AgentKind::Codex, &session),
-            vec!["resume", "s1"]
-        );
-        assert_eq!(
-            resume_args(AgentKind::Pi, &session),
-            vec!["--session", "s1"]
-        );
-        assert_eq!(
-            resume_args(AgentKind::Opencode, &session),
+            resume_args(Harness::Opencode, &session),
             vec!["--session", "s1"]
         );
     }
@@ -1042,7 +1044,7 @@ mod tests {
 
     fn agent_fixture() -> Agent {
         Agent {
-            kind: Some(AgentKind::Omp),
+            harness: Some(Harness::Omp),
             agent_status: "idle".to_owned(),
             name: Some("agent".to_owned()),
             pane_id: PaneId::from("w1:p1"),

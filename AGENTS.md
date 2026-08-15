@@ -38,7 +38,7 @@ agents.
   is unchanged: renaming posts a channel-name-change system message into
   the thread, so identical renames would spam it. The post's **starter
   message** is a one-line plain-text intro —
-  `` `pane` · worktree `…` · cwd `…` · session `…` `` (kind/status are
+  `` `pane` · worktree `…` · cwd `…` · session `…` `` (harness/status are
   already on the tags; the worktree segment only appears when the agent
   runs in a git worktree) — rewritten to `inactive · cwd …` and the post
   closed when the session dies.
@@ -52,7 +52,7 @@ agents.
   recovery) uses `SessionRow::hosts`, which accepts the row key or the
   adopted transcript.
 - **Two sources of truth, nothing cached.** herdr is the truth for live
-  state: workspace labels, agent kinds, statuses, and titles are queried
+  state: workspace labels, harnesses, statuses, and titles are queried
   fresh on every event and mirrored onto Discord posts. Discord is the
   mirror — tags and post titles live there. The database holds
   only what neither side knows: the workspace↔forum and session↔post
@@ -65,9 +65,9 @@ agents.
   (posted message id + shown state per tool call). The first two are
   pruned when their session dies; the tool map is pruned when a session
   dies.
-- **Dead posts are closed and keep only their kind tag.** A dead
+- **Dead posts are closed and keep only their harness tag.** A dead
   session's post is closed (archived, never locked): the status tag is
-  dropped, the agent-kind tag stays, and the starter message's pane part
+  dropped, the harness tag stays, and the starter message's pane part
   flips to `inactive`. Users can keep typing in the thread — Discord
   auto-unarchives it on the next message, which re-launches the agent
   **resuming the same conversation** (native harness resume:
@@ -86,7 +86,7 @@ agents.
   the thread.
 - **Agents launch through slash commands; manual forum posts are deleted.**
   `/agent` (global guild command) opens a Discord native modal — an
-  agent-harness dropdown (preselected to the configured default kind), a
+  harness dropdown (preselected to the configured default harness), a
   workspace dropdown (live herdr workspaces; the workspace of the forum
   the command ran in is preselected), and a multiline prompt input — and
   launches the agent with the same spawn/bind/relay flow the forum
@@ -94,13 +94,13 @@ agents.
   relay the prompt, reply ephemerally with the thread link. Any manual
   post in a managed forum is deleted silently, and the bot's own posts
   get their transcript caught up; the host-user launch path is gone.
-- **Forum tags describe the session**: the agent kind (`omp`, `claude-code`,
+- **Forum tags describe the session**: the harness (`omp`, `claude-code`,
   `codex`, … 🤖) and the lifecycle status (`idle`/`working`/`blocked`/`done`/
   `unknown`). The bot owns a forum's tags outright: every tag write replaces
-  the list with the managed set (the 5 statuses + one tag per agent kind),
+  the list with the managed set (the 5 statuses + one tag per harness),
   so tags this bot does not manage are dropped. Stateless — the forum's tag
-  list is fetched fresh on each write. A dead thread's kind tag is the
-  resume kind; on death the applied tags are pruned to just the kind tag.
+  list is fetched fresh on each write. A dead thread's harness tag is the
+  resume harness; on death the applied tags are pruned to just the harness tag.
 - **Deleted forums and posts are re-created.** A workspace always gets its
   forum channel (`ensure_workspace_forum` re-creates a deleted one and
   re-binds the mapping) and a live agent always gets its post
@@ -184,7 +184,7 @@ Discord ──► Bot event handler (src/lib.rs, serenity EventHandler::dispatch
               │     manual posts: deleted silently (agents launch via /agent)
               │
 Discord ──► poise framework (src/commands.rs, serenity Framework)
-              │  /agent ──► native modal (harness dropdown w/ default kind,
+              │  /agent ──► native modal (harness dropdown w/ default harness,
               │             workspace dropdown, prompt input)
               │     submit ──► launch_from_modal: spawn → bind session post →
               │                relay the prompt → ephemeral thread link
@@ -216,7 +216,7 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
   wire `EventLine`; `wire.rs` holds the response envelope + per-method
   result payloads, each pinned by a fixture test
   (`tests/fixtures/api/*.json` via `include_str!`).
-- `src/session/` — normalized transcripts: `mod.rs` defines `AgentKind`,
+- `src/session/` — normalized transcripts: `mod.rs` defines `Harness`,
   `SessionRole`, `ToolState`, `ToolCall`, `SessionMessage`, `read_session`,
   and `read_session_title` (transcript-sourced titles per harness);
   `common.rs` is the shared parsing skeleton (text extraction, caps,
@@ -243,7 +243,7 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
   previous session row, else the home directory.
 - `src/commands.rs` — the poise framework (registered as serenity's
   `Framework`, guild-only commands): `/agent` builds a native modal (kind
-  dropdown defaulted to `DEFAULT_AGENT_KIND`, workspace dropdown with the
+  dropdown defaulted to `DEFAULT_HARNESS`, workspace dropdown with the
   invocation forum's workspace preselected, prompt input) by hand — poise's
   derive only knows text inputs — sends it as the command's initial
   response, awaits the submit through serenity's modal collector, defers
@@ -329,7 +329,7 @@ wire it into git with `prek install`.
   `GUILD_ID` required; `ALLOWED_USER_ID` optional (when set, only that
   Discord user may talk to agents and launch them via forum posts);
   `RUST_LOG` default `warn,herdcord=trace`. Everything else (timeouts,
-  agent kind, sync interval, state dir, socket path) is a sane default
+  harness, sync interval, state dir, socket path) is a sane default
   const in `src/config.rs`.
 
 ## Commits
@@ -358,8 +358,8 @@ wire it into git with `prek install`.
   function (watch `too_many_lines`/`too_many_arguments`).
 - **No stringly-typed APIs where a closed enum fits**: lifecycle statuses are
   `AgentStatus` (`src/herdr/mod.rs`) with `as_str()` only at the wire
-  boundary; agent harnesses are the closed `AgentKind` enum
-  (`src/session/mod.rs`) with `as_str()` only for session paths/kind tags;
+  boundary; agent harnesses are the closed `Harness` enum
+  (`src/session/mod.rs`) with `as_str()` only for session paths/harness tags;
   herdr error actions use a private `HerdrAction` enum.
 - **Errors**: `BotError` (`src/error.rs`) with thiserror; `serenity::Error` is
   boxed (`Box<serenity::Error>`) to keep the variant small (clippy
@@ -380,8 +380,9 @@ wire it into git with `prek install`.
   reference (`agent_session.value`): a transcript path for omp, a session
   id for claude-code and codex — unique per launch, and exactly what the
   harness resumes with. Session transcripts are read with
-  `read_session(AgentKind::parse(&kind), Path::new(&session.transcript_path))`
-  — never scraped from terminal output.
+  `read_session(harness, Path::new(&session.transcript_path))` — the
+  harness comes typed on the wire record (`Agent::harness`), never
+  scraped from terminal output.
 - **herdr socket discipline**: dial a fresh connection per request — the
   server answers the first request and FINs the stream, so a second request
   on the same connection is never answered; `events.subscribe` is the one
@@ -424,8 +425,8 @@ wire it into git with `prek install`.
   Directories).
 - `src/relay.rs` — conversation workers and the session-file sync delta.
 - `src/config.rs` — minimal env config: `DISCORD_BOT_TOKEN`, `GUILD_ID`,
-  `ALLOWED_USER_ID`. Sane defaults as consts: `DEFAULT_AGENT_KIND`
-  (`AgentKind::Omp`, the modal's preselected harness), `PROMPT_TIMEOUT`
+  `ALLOWED_USER_ID`. Sane defaults as consts: `DEFAULT_HARNESS`
+  (`Harness::Pi`, the modal's preselected harness), `PROMPT_TIMEOUT`
   (300s),
   `OPERATION_TIMEOUT` (30s),
   `SYNC_INTERVAL` (600s), `MESSAGE_POLL_INTERVAL` (2s),
@@ -468,7 +469,7 @@ wire it into git with `prek install`.
   malformed/truncated lines, titles) and `read_session`, `src/db.rs` tests
   workspace/session upserts and lookups on an in-memory database,
   `src/forum/` tests the agent-name timestamp, the title selection, the
-  modal construction, and the per-kind resume args, `src/config.rs`
+  modal construction, and the per-harness resume args, `src/config.rs`
   tests state-dir resolution.
 - **Live tests** (`tests/herdr_live.rs`): gated behind `HERDR_LIVE_TESTS=1`
   (no-ops otherwise, so plain `cargo test`/nextest needs no herdr). Spawns

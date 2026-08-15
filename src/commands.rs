@@ -1,7 +1,7 @@
 //! Slash commands (via poise): `/agent` and `/workspace`.
 //!
-//! `/agent` opens a native modal — an agent-harness dropdown (defaulted to
-//! the configured default kind), a workspace dropdown, and a prompt input —
+//! `/agent` opens a native modal — a harness dropdown (defaulted to
+//! the configured default harness), a workspace dropdown, and a prompt input —
 //! and launches the agent with the same spawn/bind/relay flow the forum
 //! launch used.
 //!
@@ -29,8 +29,8 @@ use serenity::{
 use tracing::{info, warn};
 
 use crate::{
-    Bot, BotResult, config::DEFAULT_AGENT_KIND, error::BotError, forum, herdr::SessionPath,
-    relay::RelayJob, session::AgentKind,
+    Bot, BotResult, config::DEFAULT_HARNESS, error::BotError, forum, herdr::SessionPath,
+    relay::RelayJob, session::Harness,
 };
 
 /// How long the `/agent` modal waits for the user to submit it.
@@ -41,7 +41,7 @@ const MODAL_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_WORKSPACE_OPTIONS: usize = 25;
 
 /// Component custom ids inside the agent modal.
-const KIND_SELECT_ID: &str = "kind";
+const HARNESS_SELECT_ID: &str = "harness";
 const WORKSPACE_SELECT_ID: &str = "workspace";
 const PROMPT_INPUT_ID: &str = "prompt";
 
@@ -206,7 +206,7 @@ async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), 
     };
 
     let selection = parse_agent_modal(&submit.data);
-    let kind = selection.kind.unwrap_or(DEFAULT_AGENT_KIND);
+    let harness = selection.harness.unwrap_or(DEFAULT_HARNESS);
     let Some(workspace_label) = selection.workspace else {
         reply_to_submit(&submit, ctx.http(), "no workspace selected.").await?;
         return Ok(());
@@ -224,11 +224,11 @@ async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), 
     let submit = submit.clone();
     let context = ctx.serenity_context().clone();
     tokio::spawn(async move {
-        let outcome = launch_from_modal(&bot, &context, kind, &workspace_label, &prompt).await;
+        let outcome = launch_from_modal(&bot, &context, harness, &workspace_label, &prompt).await;
         let message = match outcome {
             Ok(link) => format!(
                 "launched a **{}** agent in workspace `{workspace_label}` — {link}",
-                kind.as_str()
+                harness.as_str()
             ),
             Err(error) => format!("couldn't launch the agent: {error}"),
         };
@@ -333,7 +333,7 @@ fn expand_home(input: &str, home: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(input))
 }
 
-/// The agent modal: the harness dropdown (the configured default kind
+/// The agent modal: the harness dropdown (the configured default harness
 /// preselected), the workspace dropdown (preselected when the command ran
 /// in a managed forum), and the prompt input.
 fn build_agent_modal<'a>(
@@ -341,14 +341,14 @@ fn build_agent_modal<'a>(
     workspace_labels: &'a [String],
     default_workspace: Option<&str>,
 ) -> CreateModal<'a> {
-    let kind_menu = CreateSelectMenu::new(
-        KIND_SELECT_ID,
+    let harness_menu = CreateSelectMenu::new(
+        HARNESS_SELECT_ID,
         CreateSelectMenuKind::String {
-            options: AgentKind::ALL
+            options: Harness::ALL
                 .iter()
-                .map(|kind| {
-                    CreateSelectMenuOption::new(kind.as_str(), kind.as_str())
-                        .default_selection(*kind == DEFAULT_AGENT_KIND)
+                .map(|harness| {
+                    CreateSelectMenuOption::new(harness.as_str(), harness.as_str())
+                        .default_selection(*harness == DEFAULT_HARNESS)
                 })
                 .collect(),
         },
@@ -369,7 +369,7 @@ fn build_agent_modal<'a>(
         .placeholder("what should the agent do?");
 
     CreateModal::new(custom_id, "launch an agent").components(vec![
-        CreateModalComponent::Label(CreateLabel::select_menu("agent harness", kind_menu)),
+        CreateModalComponent::Label(CreateLabel::select_menu("harness", harness_menu)),
         CreateModalComponent::Label(CreateLabel::select_menu("workspace", workspace_menu)),
         CreateModalComponent::Label(CreateLabel::input_text("prompt", prompt)),
     ])
@@ -381,7 +381,7 @@ fn build_agent_modal<'a>(
 async fn launch_from_modal(
     bot: &Bot,
     ctx: &serenity::Context,
-    kind: AgentKind,
+    harness: Harness,
     workspace_label: &str,
     prompt: &str,
 ) -> BotResult<String> {
@@ -394,11 +394,11 @@ async fn launch_from_modal(
     let name = bot.forum.fresh_agent_name().await?;
     let cwd = bot.forum.launch_cwd(workspace_label).await;
 
-    info!(%name, kind = kind.as_str(), %workspace_label, "/agent launches agent");
+    info!(%name, harness = harness.as_str(), %workspace_label, "/agent launches agent");
 
     let started = bot
         .forum
-        .spawn_in_workspace(&workspace, &name, kind, &cwd, &[])
+        .spawn_in_workspace(&workspace, &name, harness, &cwd, &[])
         .await?;
     if let Err(error) = bot.forum.ensure_session_post(ctx, &started).await {
         warn!(?error, %name, "failed to bind /agent session to a post");
@@ -462,16 +462,16 @@ async fn reply_to_submit(
 #[derive(Debug, PartialEq, Eq)]
 struct AgentSelection {
     /// The selected harness, when the dropdown value parsed.
-    kind: Option<AgentKind>,
+    harness: Option<Harness>,
     /// The selected workspace label.
     workspace: Option<String>,
     /// The prompt text.
     prompt: Option<String>,
 }
 
-/// Extracts the kind, workspace, and prompt from a submitted modal.
+/// Extracts the harness, workspace, and prompt from a submitted modal.
 fn parse_agent_modal(data: &ModalInteractionData) -> AgentSelection {
-    let mut kind = None;
+    let mut harness = None;
     let mut workspace = None;
     let mut prompt = None;
     for component in &data.components {
@@ -480,12 +480,12 @@ fn parse_agent_modal(data: &ModalInteractionData) -> AgentSelection {
         };
         match &label.component {
             LabelComponent::SelectMenu(select) => match select.custom_id.as_str() {
-                KIND_SELECT_ID => {
-                    kind = select
+                HARNESS_SELECT_ID => {
+                    harness = select
                         .values
                         .as_slice()
                         .first()
-                        .and_then(|v| AgentKind::parse(v));
+                        .and_then(|v| Harness::parse(v));
                 }
                 WORKSPACE_SELECT_ID => {
                     workspace = select.values.as_slice().first().cloned();
@@ -499,7 +499,7 @@ fn parse_agent_modal(data: &ModalInteractionData) -> AgentSelection {
         }
     }
     AgentSelection {
-        kind,
+        harness,
         workspace,
         prompt,
     }
@@ -512,7 +512,7 @@ mod tests {
     use poise::serenity_prelude::ModalInteractionData;
 
     use super::{AgentSelection, expand_home, parse_agent_modal, resolve_folder};
-    use crate::session::AgentKind;
+    use crate::{config::DEFAULT_HARNESS, session::Harness};
 
     /// A throwaway directory for path tests, removed on drop. Each test
     /// uses its own name, so parallel tests never collide.
@@ -544,11 +544,11 @@ mod tests {
     /// labels wrapping the select menus and the input). Raw string JSON —
     /// the modal model peeks `RawValue`, which `serde_json::from_value`
     /// cannot provide.
-    fn modal_data(kind: &str, workspace: &str, prompt: &str) -> ModalInteractionData {
+    fn modal_data(harness: &str, workspace: &str, prompt: &str) -> ModalInteractionData {
         let raw = serde_json::json!({
             "custom_id": "herdcord.agent",
             "components": [
-                {"type": 18, "component": {"type": 3, "custom_id": "kind", "values": [kind]}},
+                {"type": 18, "component": {"type": 3, "custom_id": "harness", "values": [harness]}},
                 {"type": 18, "component": {"type": 3, "custom_id": "workspace", "values": [workspace]}},
                 {"type": 18, "component": {"type": 4, "custom_id": "prompt", "value": prompt}}
             ]
@@ -558,19 +558,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_agent_modal_extracts_kind_workspace_and_prompt() {
+    fn parse_agent_modal_extracts_harness_workspace_and_prompt() {
         let data = modal_data("claude-code", "my-workspace", "fix the bug");
         let selection = parse_agent_modal(&data);
-        assert_eq!(selection.kind, Some(AgentKind::ClaudeCode));
+        assert_eq!(selection.harness, Some(Harness::ClaudeCode));
         assert_eq!(selection.workspace.as_deref(), Some("my-workspace"));
         assert_eq!(selection.prompt.as_deref(), Some("fix the bug"));
     }
 
     #[test]
-    fn parse_agent_modal_falls_back_on_unknown_kind() {
+    fn parse_agent_modal_falls_back_on_unknown_harness() {
         let data = modal_data("bogus", "my-workspace", "hi");
         let selection = parse_agent_modal(&data);
-        assert_eq!(selection.kind, None);
+        assert_eq!(selection.harness, None);
         assert_eq!(selection.workspace.as_deref(), Some("my-workspace"));
         assert_eq!(selection.prompt.as_deref(), Some("hi"));
     }
@@ -583,7 +583,7 @@ mod tests {
         assert_eq!(
             parse_agent_modal(&data),
             AgentSelection {
-                kind: None,
+                harness: None,
                 workspace: None,
                 prompt: None,
             }
@@ -615,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_modal_defaults_only_the_kind_without_a_channel_workspace() {
+    fn agent_modal_defaults_only_the_harness_without_a_channel_workspace() {
         use super::build_agent_modal;
 
         let labels = ["alpha".to_owned()];
@@ -634,7 +634,7 @@ mod tests {
             .filter(|option| option["default"].as_bool() == Some(true))
             .map(|option| option["value"].as_str().expect("option value"))
             .collect::<Vec<_>>();
-        assert_eq!(defaults, vec!["omp"]);
+        assert_eq!(defaults, vec![DEFAULT_HARNESS.as_str()]);
     }
 
     #[test]

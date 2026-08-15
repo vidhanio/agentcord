@@ -17,7 +17,7 @@ use crate::{
 
 impl Forum {
     /// Marks a session's post inactive: the status tag is dropped (the
-    /// agent-kind tag stays), the starter message's pane part flips to the
+    /// harness tag stays), the starter message's pane part flips to the
     /// inactive marker, and the thread is closed — archived, never locked,
     /// so a message still auto-unarchives it and resumes the session. A
     /// live agent's sync reopens it. Idempotent: an already-archived post
@@ -83,7 +83,7 @@ impl Forum {
     /// Reconciles the forums with herdr: ensures (and renames) a forum per
     /// workspace, ensures and syncs a post per agent session, drops the
     /// status tags and closes the posts of sessions with no live agent
-    /// (the kind tag stays; a message still unarchives the thread and
+    /// (the harness tag stays; a message still unarchives the thread and
     /// resumes the session), prunes stale
     /// workspace/session rows whose Discord channels are gone, and prunes
     /// the pane→session map of panes herdr no longer reports. herdr is the
@@ -352,7 +352,7 @@ impl Forum {
                 };
 
                 // The event carries only the new status; fetch the agent
-                // fresh so the post's title/kind reflect the current state.
+                // fresh so the post's title/harness reflect the current state.
                 let mut agent = match self.herdr.get_agent(&pane_id).await {
                     Ok(agent) => agent,
                     Err(error) => {

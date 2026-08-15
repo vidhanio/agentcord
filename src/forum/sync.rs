@@ -21,7 +21,7 @@ use crate::{
         to_i64,
     },
     herdr::{Agent, SessionPath},
-    session::{AgentKind, SessionMessage, SessionRole, ToolCall, read_session_messages},
+    session::{Harness, SessionMessage, SessionRole, ToolCall, read_session_messages},
     utils::split_lines,
 };
 
@@ -51,7 +51,7 @@ impl Forum {
         &self,
         ctx: &Context,
         session: &SessionRow,
-        kind: AgentKind,
+        harness: Harness,
         forum: ChannelId,
     ) -> BotResult<()> {
         // Syncs from the poll and the event loop can race on the cursor:
@@ -69,7 +69,7 @@ impl Forum {
         };
         let post = from_i64(post_id)?;
 
-        let messages = match read_session_messages(kind, &session.transcript_path) {
+        let messages = match read_session_messages(harness, &session.transcript_path) {
             Ok(messages) => messages,
             // The source may be missing: the transcript can be mid-rotation
             // (omp rewrites it via a delete+recreate dance), or the opencode
@@ -212,9 +212,9 @@ impl Forum {
             .sync_session(
                 ctx,
                 &session,
-                self.live_agent_kind(&session)
+                self.live_agent_harness(&session)
                     .await
-                    .unwrap_or(AgentKind::Omp),
+                    .unwrap_or(Harness::Omp),
                 forum,
             )
             .await
@@ -259,9 +259,11 @@ impl Forum {
         self.hosting_agents(session).await.into_iter().next()
     }
 
-    /// The agent kind of the live agent hosting `session`, if any.
-    pub(crate) async fn live_agent_kind(&self, session: &SessionRow) -> Option<AgentKind> {
-        self.live_agent(session).await.and_then(|agent| agent.kind)
+    /// The harness of the live agent hosting `session`, if any.
+    pub(crate) async fn live_agent_harness(&self, session: &SessionRow) -> Option<Harness> {
+        self.live_agent(session)
+            .await
+            .and_then(|agent| agent.harness)
     }
 
     /// Creates a forum post for a brand-new session and inserts its
@@ -270,7 +272,7 @@ impl Forum {
         &self,
         ctx: &Context,
         agent: &Agent,
-        kind: AgentKind,
+        harness: Harness,
         session_path: &SessionPath,
     ) -> BotResult<()> {
         let Some(workspace) = self.workspace_by_id(&agent.workspace_id).await? else {
@@ -297,7 +299,7 @@ impl Forum {
             &agent.cwd,
             Some(intro_path),
         );
-        let title = session_title(agent, kind, Path::new(&transcript));
+        let title = session_title(agent, harness, Path::new(&transcript));
         let created = forum
             .create_forum_post(
                 &ctx.http,
@@ -339,7 +341,7 @@ impl Forum {
     }
 
     /// Syncs a live agent into its post: ensures the post + row, re-applies
-    /// kind/status tags and the transcript-sourced post title, and mirrors
+    /// harness/status tags and the transcript-sourced post title, and mirrors
     /// the transcript.
     pub(crate) async fn sync_agent_session(&self, ctx: &Context, agent: &Agent) {
         if let Err(error) = self.ensure_session_post(ctx, agent).await {
@@ -350,7 +352,7 @@ impl Forum {
             return;
         };
 
-        let kind = agent.kind.unwrap_or(AgentKind::Omp);
+        let harness = agent.harness.unwrap_or(Harness::Omp);
         let Some(post_id) = session.post_channel_id else {
             return;
         };
@@ -365,9 +367,16 @@ impl Forum {
             warn!(pane = %agent.pane_id, "failed to resolve post forum");
             return;
         };
-        let title = session_title(agent, kind, Path::new(&session.transcript_path));
+        let title = session_title(agent, harness, Path::new(&session.transcript_path));
         if let Err(error) = self
-            .update_post_metadata(ctx, forum, post, Some(kind), agent.status(), Some(&title))
+            .update_post_metadata(
+                ctx,
+                forum,
+                post,
+                Some(harness),
+                agent.status(),
+                Some(&title),
+            )
             .await
         {
             warn!(?error, pane = %agent.pane_id, "failed to update post metadata");
@@ -379,7 +388,7 @@ impl Forum {
             warn!(?error, pane = %agent.pane_id, "failed to refresh session intro");
         }
 
-        if let Err(error) = self.sync_session(ctx, &session, kind, forum).await {
+        if let Err(error) = self.sync_session(ctx, &session, harness, forum).await {
             warn!(?error, pane = %agent.pane_id, "failed to sync session");
         }
     }

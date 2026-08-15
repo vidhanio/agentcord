@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::{
     herdr::{Agent, SessionPath},
-    session::AgentKind,
+    session::Harness,
 };
 
 /// The post title for a session: the transcript's own title when the
@@ -13,21 +13,21 @@ use crate::{
 /// thread-name limit. The agent name is deliberately not used — the
 /// transcript/terminal titles describe the work.
 #[must_use]
-pub fn session_title(agent: &Agent, kind: AgentKind, path: &Path) -> String {
-    crate::session::read_session_title(kind, path).map_or_else(
-        || post_title(agent, kind),
+pub fn session_title(agent: &Agent, harness: Harness, path: &Path) -> String {
+    crate::session::read_session_title(harness, path).map_or_else(
+        || post_title(agent, harness),
         |title| title.chars().take(100).collect(),
     )
 }
 
 /// The title for a session's forum post: herdr's stripped terminal title
-/// when usable, otherwise the kind label plus `" session"`. Truncated to
+/// when usable, otherwise the harness label plus `" session"`. Truncated to
 /// Discord's 100-character thread-name limit. herdr has already removed
 /// ANSI escapes and the leading activity glyph, so the title only changes
 /// when its text does.
 #[must_use]
-pub fn post_title(agent: &Agent, kind: AgentKind) -> String {
-    let fallback = format!("{} session", kind.as_str());
+pub fn post_title(agent: &Agent, harness: Harness) -> String {
+    let fallback = format!("{} session", harness.as_str());
     let Some(title) = agent.terminal_title_stripped.as_deref() else {
         return fallback;
     };
@@ -63,7 +63,7 @@ pub fn forum_channel_name(label: &str) -> String {
 
 /// The session post's starter message: the pane, cwd, and session file as
 /// plain text, plus the checked-out branch when the agent runs in a git
-/// worktree. The kind and status are already on the post's tags, so the
+/// worktree. The harness and status are already on the post's tags, so the
 /// message stays on one line for the channel preview. For a dead session
 /// (no live agent) the pane part is the literal `inactive`.
 #[must_use]
