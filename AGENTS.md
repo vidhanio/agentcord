@@ -203,9 +203,6 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
               │             workspace dropdown, prompt input)
               │     submit ──► launch_from_modal: spawn → bind session post →
               │                relay the prompt → ephemeral thread link
-              │  /workspace ──► folder-path arg (tilde expansion for home)
-              │     ──► resolve+validate path → herdr workspace.create
-              │         (label = dir name; duplicate labels rejected)
               │  /herdr (when HERDR_CONTROL_COMMAND is set)
               │     ──► control_prompt + stdin pipe ──► one-shot external
               │         command (process group, timeout) ──► truncated
@@ -267,13 +264,7 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
   derive only knows text inputs — sends it as the command's initial
   response, awaits the submit through serenity's modal collector, defers
   the submit, and launches via the forum's spawn/bind/relay helpers,
-  editing the deferred response with the thread link. `/workspace` takes
-  one folder-path argument and creates a herdr workspace —
-  `resolve_folder` expands a leading `~`/`~/` to the home directory
-  (`~user` unsupported) and validates the path (existence,
-  directory-ness, canonicalization), the label is the directory's name,
-  and an already-used label is rejected so label-keyed rows/forums never
-  collide. `/herdr` runs the configured `HERDR_CONTROL_COMMAND`
+  editing the deferred response with the thread link. `/herdr` runs the configured `HERDR_CONTROL_COMMAND`
   (`build_commands` registers it only when configured) — the prompt
   (preamble-prefixed via `control::control_prompt`) is piped to the
   command's stdin, `HERDR_ENV=1` + the bot's resolved socket are
@@ -309,7 +300,7 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
 
 | Path | Purpose |
 |---|---|
-|`src/`|Bot core: `lib.rs` (Bot + event-handler dispatch), `config.rs`, `error.rs`, `db.rs`, `relay.rs`, `commands.rs` (poise slash commands: the `/agent` modal, the `/workspace` path command, the `/herdr` control command), `control.rs` (the `/herdr` process runner), `utils.rs`|
+|`src/`|Bot core: `lib.rs` (Bot + event-handler dispatch), `config.rs`, `error.rs`, `db.rs`, `relay.rs`, `commands.rs` (poise slash commands: the `/agent` modal, the `/herdr` control command), `control.rs` (the `/herdr` process runner), `utils.rs`|
 |`src/forum/`|Forum-side state: `mod.rs` (struct + lifecycle), `sync.rs` (transcript mirror), `events.rs` (event loop + reconcile), `poll.rs` (2s transcript poll + rotations), `titles.rs` (titles + starter message)|
 | `src/herdr/` | herdr Unix-socket client: `mod.rs` (client + models + errors), `event.rs` (subscription machinery), `wire.rs` (envelope + result payloads) |
 | `src/session/` | Transcript normalization: `mod.rs` (models + read_session), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs`/`pi.rs` (per-harness file parsers), `opencode.rs` (opencode SQLite store reader) |

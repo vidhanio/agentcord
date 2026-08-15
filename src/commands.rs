@@ -1,4 +1,4 @@
-//! Slash commands (via poise): `/agent` and `/workspace`.
+//! Slash commands (via poise): `/agent` (and `/herdr` when configured).
 //!
 //! `/agent` opens a native modal — a harness dropdown (defaulted to
 //! the configured default harness), a workspace dropdown, and a prompt input —
@@ -10,14 +10,8 @@
 //! directly on the command interaction, the submit is awaited through
 //! serenity's modal collector, and the launch result edits the submit's
 //! deferred response (see the note in [`agent`]).
-//!
-//! `/workspace` creates a herdr workspace for a folder path, expanding a
-//! leading `~` to the home directory.
 
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::time::Duration;
 
 use poise::{CreateReply, FrameworkError, serenity_prelude as serenity};
 use serenity::{
@@ -73,7 +67,7 @@ pub fn framework(bot: &Bot) -> BotFramework {
 /// when a control command is configured (`HERDR_CONTROL_COMMAND`) — the
 /// bot stays inert without one.
 fn build_commands(config: &crate::config::Config) -> Vec<poise::Command<Bot, BotError>> {
-    let mut commands = vec![agent(), workspace()];
+    let mut commands = vec![agent()];
     if config.herdr_control_command.is_some() {
         commands.push(herdr());
     }
@@ -325,93 +319,6 @@ async fn herdr(
     Ok(())
 }
 
-/// create a herdr workspace for a folder.
-#[poise::command(slash_command, check = "allowed")]
-async fn workspace(
-    ctx: poise::ApplicationContext<'_, Bot, BotError>,
-    #[description = "folder path, e.g. `~/code/project`"] path: String,
-) -> Result<(), BotError> {
-    let bot = ctx.data().clone();
-
-    let home = dirs::home_dir()
-        .ok_or_else(|| BotError::Other("couldn't resolve your home directory".into()))?;
-    let cwd = resolve_folder(&path, &home).map_err(BotError::Other)?;
-    let cwd = cwd.to_string_lossy().into_owned();
-    let label = Path::new(&cwd)
-        .file_name()
-        .map_or_else(|| cwd.clone(), |name| name.to_string_lossy().into_owned());
-
-    // The bot keys workspace rows and forums by label, so a duplicate
-    // label would collide: reject it up front.
-    let workspaces = bot
-        .herdr
-        .list_workspaces()
-        .await
-        .map_err(|error| BotError::Other(format!("couldn't reach herdr: {error}")))?;
-    if let Some(existing) = workspaces
-        .into_iter()
-        .find(|workspace| workspace.label == label)
-    {
-        return Err(BotError::Other(format!(
-            "a workspace named `{label}` already exists (`{}`)",
-            existing.workspace_id
-        )));
-    }
-
-    let created = bot
-        .herdr
-        .create_workspace_with_pane(&label, &cwd)
-        .await
-        .map_err(|error| BotError::Other(format!("couldn't create the workspace: {error}")))?;
-    info!(workspace = %label, %cwd, "/workspace creates herdr workspace");
-
-    ctx.send(
-        CreateReply::new()
-            .content(format!(
-                "created workspace `{label}` ({}) at `{cwd}`",
-                created.workspace.workspace_id
-            ))
-            .ephemeral(true),
-    )
-    .await?;
-    Ok(())
-}
-
-/// Resolves `input` to an absolute directory path: expands a leading `~`
-/// to `home` (via [`expand_home`]), canonicalizes (resolving symlinks),
-/// and rejects anything that is not a directory. Returns a user-facing
-/// error message on failure.
-fn resolve_folder(input: &str, home: &Path) -> Result<PathBuf, String> {
-    let Some(expanded) = expand_home(input, home) else {
-        return Err("only `~` expands to your home directory (`~user` is not supported)".into());
-    };
-    let metadata = std::fs::metadata(&expanded)
-        .map_err(|error| format!("`{input}` doesn't exist: {error}"))?;
-    if !metadata.is_dir() {
-        return Err(format!("`{input}` is not a directory"));
-    }
-    std::fs::canonicalize(&expanded).map_err(|error| format!("couldn't resolve `{input}`: {error}"))
-}
-
-/// Expands a leading `~` or `~/` to `home`; the empty input and other
-/// `~user` forms return `None`. Relative and absolute paths pass through
-/// unchanged.
-fn expand_home(input: &str, home: &Path) -> Option<PathBuf> {
-    if input.is_empty() {
-        return None;
-    }
-    if input == "~" {
-        return Some(home.to_path_buf());
-    }
-    if let Some(rest) = input.strip_prefix("~/") {
-        return Some(home.join(rest));
-    }
-    if input.starts_with('~') {
-        return None;
-    }
-    Some(PathBuf::from(input))
-}
-
 /// The agent modal: the harness dropdown (the configured default harness
 /// preselected), the workspace dropdown (preselected when the command ran
 /// in a managed forum), and the prompt input.
@@ -586,11 +493,9 @@ fn parse_agent_modal(data: &ModalInteractionData) -> AgentSelection {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-
     use poise::serenity_prelude::ModalInteractionData;
 
-    use super::{AgentSelection, build_commands, expand_home, parse_agent_modal, resolve_folder};
+    use super::{AgentSelection, build_commands, parse_agent_modal};
     use crate::{config::DEFAULT_HARNESS, session::Harness, test_util::control_config};
 
     #[test]
@@ -601,7 +506,7 @@ mod tests {
             .into_iter()
             .map(|command| command.name.into_owned())
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["agent", "workspace"]);
+        assert_eq!(names, vec!["agent"]);
     }
 
     #[test]
@@ -612,33 +517,7 @@ mod tests {
             .into_iter()
             .map(|command| command.name.into_owned())
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["agent", "workspace", "herdr"]);
-    }
-
-    /// A throwaway directory for path tests, removed on drop. Each test
-    /// uses its own name, so parallel tests never collide.
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "herdcord-workspace-tests-{name}-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).expect("temp dir");
-            Self(path)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+        assert_eq!(names, vec!["agent", "herdr"]);
     }
 
     /// A submitted modal payload in Discord's wire shape (Component V2:
@@ -736,42 +615,5 @@ mod tests {
             .map(|option| option["value"].as_str().expect("option value"))
             .collect::<Vec<_>>();
         assert_eq!(defaults, vec![DEFAULT_HARNESS.as_str()]);
-    }
-
-    #[test]
-    fn expand_home_expands_tilde_forms() {
-        let home = Path::new("/home/test-user");
-        assert_eq!(expand_home("~", home), Some(home.to_path_buf()));
-        assert_eq!(expand_home("~/a/b", home), Some(home.join("a/b")));
-        assert_eq!(expand_home("/abs/path", home), Some("/abs/path".into()));
-        assert_eq!(expand_home("rel/path", home), Some("rel/path".into()));
-        assert_eq!(expand_home("", home), None);
-        assert_eq!(expand_home("~user", home), None);
-        assert_eq!(expand_home("~user/thing", home), None);
-    }
-
-    #[test]
-    fn resolve_folder_expands_and_validates() {
-        let tmp = TempDir::new("resolve");
-        let project = tmp.path().join("project");
-        std::fs::create_dir_all(&project).expect("project dir");
-        let file = tmp.path().join("notes.txt");
-        std::fs::write(&file, "x").expect("file");
-
-        let resolved =
-            resolve_folder(project.to_str().expect("utf8"), tmp.path()).expect("resolves");
-        assert_eq!(resolved, project);
-        let resolved = resolve_folder("~/project", tmp.path()).expect("resolves");
-        assert_eq!(resolved, project);
-
-        let missing = tmp.path().join("missing");
-        let error =
-            resolve_folder(missing.to_str().expect("utf8"), tmp.path()).expect_err("missing path");
-        assert!(error.contains("doesn't exist"), "{error}");
-        let error = resolve_folder(file.to_str().expect("utf8"), tmp.path())
-            .expect_err("file is not a directory");
-        assert!(error.contains("not a directory"), "{error}");
-        let error = resolve_folder("~other/project", tmp.path()).expect_err("~user");
-        assert!(error.contains("only `~`"), "{error}");
     }
 }
