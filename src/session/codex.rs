@@ -107,3 +107,63 @@ pub fn parse_codex(raw: &str) -> Vec<SessionMessage> {
     }
     messages
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_codex;
+    use crate::session::{SessionRole, ToolCallId, ToolState};
+
+    #[test]
+    fn codex_messages_parsed() {
+        let raw = r#"{"timestamp":"2026-06-28T10:00:00.000Z","type":"session_meta","payload":{"id":"sess_1"}}
+{"timestamp":"2026-06-28T10:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"please inspect the files"}}
+{"timestamp":"2026-06-28T10:00:02.000Z","type":"response_item","payload":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"I will inspect the files."}]}}
+{"timestamp":"2026-06-28T10:00:03.000Z","type":"response_item","payload":{"type":"function_call","call_id":"call_1","name":"read","arguments":"{\"path\":\"src\"}"}}
+{"timestamp":"2026-06-28T10:00:04.000Z","type":"token_count","payload":{"input_tokens":100,"output_tokens":10}}
+{"timestamp":"2026-06-28T10:00:05.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"encrypted"}]}}
+"#;
+        let messages = parse_codex(raw);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, SessionRole::User);
+        assert_eq!(messages[0].text, "please inspect the files");
+        assert_eq!(messages[1].role, SessionRole::Agent);
+        assert_eq!(messages[1].text, "I will inspect the files.");
+        assert_eq!(messages[2].role, SessionRole::Tool);
+        assert_eq!(messages[2].text, "read {\"path\":\"src\"}");
+        let call = messages[2].tool.as_ref().unwrap();
+        assert_eq!(call.call_id, ToolCallId::from("call_1"));
+        assert_eq!(call.args.as_deref(), Some(r#"{"path":"src"}"#));
+        // No completion record in the file: still running.
+        assert_eq!(call.state, ToolState::Running);
+        assert_eq!(call.error, None);
+    }
+
+    #[test]
+    fn codex_tool_calls_anchor_to_results() {
+        let raw = r#"{"timestamp":"2026-06-28T10:00:03.000Z","type":"response_item","payload":{"type":"function_call","call_id":"call_1","name":"read","arguments":"{\"path\":\"src\"}"}}
+{"timestamp":"2026-06-28T10:00:04.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_2","name":"ask","arguments":"{\"question\":\"ok?\"}"}}
+{"timestamp":"2026-06-28T10:00:05.000Z","type":"response_item","payload":{"type":"function_call","call_id":"call_3","name":"write","arguments":"{\"path\":\"out\"}"}}
+{"timestamp":"2026-06-28T10:00:06.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"file contents"}}
+{"timestamp":"2026-06-28T10:00:07.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_2","output":"user declined","is_error":true}}
+"#;
+        let messages = parse_codex(raw);
+        assert_eq!(messages.len(), 3);
+        // Done: clean output present.
+        let call = messages[0].tool.as_ref().unwrap();
+        assert_eq!(call.call_id, ToolCallId::from("call_1"));
+        assert_eq!(call.args.as_deref(), Some(r#"{"path":"src"}"#));
+        assert_eq!(call.state, ToolState::Done);
+        assert_eq!(call.error, None);
+        assert_eq!(messages[0].text, "read {\"path\":\"src\"}");
+        // Failed: output with is_error.
+        let call = messages[1].tool.as_ref().unwrap();
+        assert_eq!(call.call_id, ToolCallId::from("call_2"));
+        assert_eq!(call.state, ToolState::Failed);
+        assert_eq!(call.error.as_deref(), Some("user declined"));
+        // Running: no output record.
+        let call = messages[2].tool.as_ref().unwrap();
+        assert_eq!(call.call_id, ToolCallId::from("call_3"));
+        assert_eq!(call.state, ToolState::Running);
+        assert_eq!(call.error, None);
+    }
+}

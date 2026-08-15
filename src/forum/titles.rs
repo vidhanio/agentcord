@@ -90,3 +90,104 @@ pub fn session_intro(
         },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::{forum_channel_name, post_title, session_intro};
+    use crate::{
+        herdr::{Agent, PaneId, SessionPath, TabId, WorkspaceId},
+        session::Harness,
+    };
+
+    #[test]
+    fn forum_channel_name_sanitizes() {
+        assert_eq!(forum_channel_name("My Workspace"), "my-workspace");
+        assert_eq!(forum_channel_name("UPPER  Case!!"), "upper-case");
+        assert_eq!(forum_channel_name("💥"), "agents");
+        let long = forum_channel_name(&"a".repeat(200));
+        assert_eq!(long.len(), 100);
+        assert!(long.ends_with('a'));
+    }
+
+    #[test]
+    fn post_title_uses_stripped_terminal_title() {
+        let mut agent = agent_fixture();
+        agent.terminal_title_stripped = Some("  omp — my project   ".to_owned());
+        assert_eq!(post_title(&agent, Harness::Omp), "omp — my project");
+    }
+
+    #[test]
+    fn post_title_falls_back_to_harness_label() {
+        let mut agent = agent_fixture();
+        agent.terminal_title_stripped = Some("   ".to_owned());
+        assert_eq!(post_title(&agent, Harness::Omp), "omp session");
+        agent.terminal_title_stripped = None;
+        assert_eq!(post_title(&agent, Harness::Codex), "codex session");
+    }
+
+    #[test]
+    fn post_title_truncates() {
+        let mut agent = agent_fixture();
+        agent.terminal_title_stripped = Some("a".repeat(500));
+        assert_eq!(post_title(&agent, Harness::Omp).chars().count(), 100);
+    }
+
+    #[test]
+    fn session_intro_shows_live_pane() {
+        let agent = agent_fixture();
+        assert_eq!(
+            session_intro(
+                Some(&agent),
+                None,
+                Path::new("/home/me"),
+                Some(&SessionPath::from("s1"))
+            ),
+            "`w1:p1` · cwd `/home/me` · session `s1`"
+        );
+    }
+
+    #[test]
+    fn session_intro_marks_inactive_and_skips_missing_session() {
+        let agent = agent_fixture();
+        assert_eq!(
+            session_intro(None, None, Path::new("/home/me"), None),
+            "inactive · cwd `/home/me`"
+        );
+        assert_eq!(
+            session_intro(Some(&agent), None, Path::new("/home/me"), None),
+            "`w1:p1` · cwd `/home/me`"
+        );
+    }
+
+    #[test]
+    fn session_intro_shows_worktree_after_pane() {
+        let agent = agent_fixture();
+        assert_eq!(
+            session_intro(
+                Some(&agent),
+                Some("feature-x"),
+                Path::new("/home/me"),
+                Some(&SessionPath::from("s1"))
+            ),
+            "`w1:p1` · worktree `feature-x` · cwd `/home/me` · session `s1`"
+        );
+    }
+
+    fn agent_fixture() -> Agent {
+        Agent {
+            harness: Some(Harness::Omp),
+            agent_status: "idle".to_owned(),
+            name: Some("agent".to_owned()),
+            pane_id: PaneId::from("w1:p1"),
+            tab_id: TabId::from("w1:t1"),
+            workspace_id: WorkspaceId::from("w1"),
+            cwd: PathBuf::from("/home/me"),
+            focused: false,
+            launch_pending: false,
+            terminal_title_stripped: None,
+            agent_session: None,
+        }
+    }
+}

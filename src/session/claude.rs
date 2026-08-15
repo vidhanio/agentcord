@@ -105,3 +105,77 @@ pub fn parse_claude_code(raw: &str) -> Vec<SessionMessage> {
     }
     messages
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_claude_code;
+    use crate::session::{SessionRole, ToolCallId, ToolState};
+
+    #[test]
+    fn claude_messages_parsed() {
+        let raw = r#"{"type":"summary","timestamp":"2025-12-01T09:00:00Z","summary":"This is a summary of prior turns."}
+{"type":"user","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Hello Claude"}}
+{"type":"assistant","timestamp":"2025-12-01T10:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"Hello! How can I help?"},{"type":"tool_use","id":"tu_1","name":"Read","input":{"file_path":"src/main.ts","offset":10}}]}}
+{"type":"file-history-snapshot","timestamp":"2025-12-01T10:00:02Z","fileHistory":[]}
+{"type":"user","timestamp":"2025-12-01T10:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"ls output"}]}}
+"#;
+        let messages = parse_claude_code(raw);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, SessionRole::User);
+        assert_eq!(messages[0].text, "Hello Claude");
+        assert_eq!(messages[1].role, SessionRole::Agent);
+        assert_eq!(messages[1].text, "Hello! How can I help?");
+        assert_eq!(messages[2].role, SessionRole::Tool);
+        assert_eq!(
+            messages[2].text,
+            "Read {\"file_path\":\"src/main.ts\",\"offset\":10}"
+        );
+        let call = messages[2].tool.as_ref().unwrap();
+        assert_eq!(call.call_id, ToolCallId::from("tu_1"));
+        assert_eq!(
+            call.args.as_deref(),
+            Some(r#"{"file_path":"src/main.ts","offset":10}"#)
+        );
+        // The transcript carries a clean `tool_result` for this call.
+        assert_eq!(call.state, ToolState::Done);
+        assert_eq!(call.error, None);
+    }
+
+    #[test]
+    fn claude_tool_calls_anchor_to_results() {
+        let raw = r#"{"type":"assistant","timestamp":"2025-12-01T10:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Read","input":{"file_path":"src/main.ts"}}]}}
+{"type":"assistant","timestamp":"2025-12-01T10:00:02Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_2","name":"Edit","input":{"file_path":"src/main.ts","old_string":"a","new_string":"b"}}]}}
+{"type":"assistant","timestamp":"2025-12-01T10:00:03Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_3","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","timestamp":"2025-12-01T10:00:04Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"ls output"}]}}
+{"type":"user","timestamp":"2025-12-01T10:00:05Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_3","is_error":true,"content":[{"type":"text","text":"command failed"}]}]}}
+"#;
+        let messages = parse_claude_code(raw);
+        // Only the three tool calls: results carry no conversation text.
+        assert_eq!(messages.len(), 3);
+        // Done: clean tool_result present.
+        let call = messages[0].tool.as_ref().unwrap();
+        assert_eq!(call.call_id, ToolCallId::from("tu_1"));
+        assert_eq!(call.state, ToolState::Done);
+        assert_eq!(call.error, None);
+        assert_eq!(messages[0].text, "Read {\"file_path\":\"src/main.ts\"}");
+        // Running: no tool_result for this call.
+        let call = messages[1].tool.as_ref().unwrap();
+        assert_eq!(call.call_id, ToolCallId::from("tu_2"));
+        assert_eq!(call.state, ToolState::Running);
+        assert_eq!(call.error, None);
+        // Failed: tool_result with is_error.
+        let call = messages[2].tool.as_ref().unwrap();
+        assert_eq!(call.call_id, ToolCallId::from("tu_3"));
+        assert_eq!(call.state, ToolState::Failed);
+        assert_eq!(call.error.as_deref(), Some("command failed"));
+    }
+
+    #[test]
+    fn claude_top_level_content_fallback() {
+        let raw = r#"{"type":"user","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user"},"content":"hello from top level"}
+"#;
+        let messages = parse_claude_code(raw);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "hello from top level");
+    }
+}

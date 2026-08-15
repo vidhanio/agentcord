@@ -1,19 +1,51 @@
 //! Event-driven sync: the long-lived herdr events.subscribe loop, the
-//! reconcile drift backstop, and pane lifecycle handling.
+//! reconcile drift backstop, and pane lifecycle handling (typing
+//! indicators, post inactivation on death).
 
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
-use serenity::all::{ChannelId, Context, EditThread, ThreadId};
+use serenity::all::{ChannelId, Context, EditThread, ThreadId, Typing as TypingHandle};
 use tracing::{info, warn};
 
 use crate::{
     BotResult,
-    forum::{Forum, RESUBSCRIBE_DELAY, Typing, from_i64, titles::session_intro},
+    db::SessionRow,
+    forum::{Forum, from_i64, titles::session_intro},
     herdr::{
         Agent, AgentStatus, Event, EventKind, EventStream, PaneId, SessionPath, Subscription,
-        Workspace, WorkspaceId,
+        WorkspaceId,
     },
 };
+
+/// Delay between attempts to (re)establish the herdr event subscription.
+const RESUBSCRIBE_DELAY: Duration = Duration::from_secs(5);
+
+/// A typing indicator on session posts, owned by the event loop: started
+/// when an agent starts working, stopped when the entry is dropped. One
+/// task per pane, no shared state.
+#[derive(Default)]
+struct Typing {
+    tasks: HashMap<PaneId, TypingHandle>,
+}
+
+impl Typing {
+    /// Starts the typing indicator for `post` if one is not already
+    /// running for this pane.
+    fn start(&mut self, ctx: &Context, pane_id: &PaneId, post: ChannelId) {
+        if self.tasks.contains_key(pane_id) {
+            return;
+        }
+        self.tasks.insert(
+            pane_id.clone(),
+            TypingHandle::start(Arc::clone(&ctx.http), post.widen()),
+        );
+    }
+}
 
 impl Forum {
     /// Marks a session's post inactive: the status tag is dropped (the
@@ -24,7 +56,7 @@ impl Forum {
     /// (a previous inactivation, or a manual/Discord archive) is only
     /// re-tagged — Discord rejects message edits in archived threads, so
     /// the starter refresh and the close are skipped for it.
-    async fn inactivate_post(&self, ctx: &Context, session: &crate::db::SessionRow) {
+    async fn inactivate_post(&self, ctx: &Context, session: &SessionRow) {
         let Some(post_id) = session.post_channel_id else {
             return;
         };
@@ -143,56 +175,6 @@ impl Forum {
         self.prune_stale_sessions(ctx, &live_paths).await;
 
         Ok(())
-    }
-
-    /// Deletes workspace rows whose forum was deleted and whose workspace
-    /// no longer exists in herdr. A live workspace keeps its row even when
-    /// its forum was deleted — `ensure_workspace_forum` re-creates it.
-    async fn prune_stale_workspaces(&self, ctx: &Context, workspaces: &[Workspace]) {
-        let live_labels = workspaces
-            .iter()
-            .map(|workspace| workspace.label.as_str())
-            .collect::<HashSet<_>>();
-        for row in self
-            .db
-            .all_workspaces()
-            .await
-            .inspect_err(|error| warn!(?error, "failed to list workspaces for pruning"))
-            .unwrap_or_default()
-        {
-            if live_labels.contains(row.label.as_str()) {
-                continue;
-            }
-            let Some(forum_id) = row.forum_channel_id else {
-                continue;
-            };
-            let Ok(forum) = from_i64(forum_id) else {
-                continue;
-            };
-            match self.channel_exists(ctx, forum).await {
-                Ok(false) => {
-                    info!(
-                        workspace = %row.label,
-                        %forum,
-                        "pruning stale workspace row (forum deleted)"
-                    );
-                    if let Err(error) = self.db.delete_workspace(&row.label).await {
-                        warn!(
-                            workspace = %row.label,
-                            ?error,
-                            "failed to prune stale workspace row"
-                        );
-                    }
-                }
-                // Transient failure: leave the row for the next reconcile.
-                Err(error) => warn!(
-                    ?error,
-                    workspace = %row.label,
-                    "failed to check workspace forum existence"
-                ),
-                Ok(true) => {}
-            }
-        }
     }
 
     /// Deletes session rows whose post was deleted and whose agent is gone:

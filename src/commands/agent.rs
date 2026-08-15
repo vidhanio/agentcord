@@ -1,9 +1,7 @@
-//! Slash commands (via poise): `/agent` (and `/herdr` when configured).
-//!
-//! `/agent` opens a native modal — a harness dropdown (defaulted to
-//! the configured default harness), a workspace dropdown, and a prompt input —
-//! and launches the agent with the same spawn/bind/relay flow the forum
-//! launch used.
+//! The `/agent` command: a native modal (harness dropdown defaulted to the
+//! configured default harness, workspace dropdown, prompt input) that
+//! launches an agent with the same spawn/bind/relay flow the forum launch
+//! used.
 //!
 //! Poise's derive-based modal support only knows text inputs; the `/agent`
 //! modal carries select menus, so it is built by hand: the modal is sent
@@ -13,7 +11,7 @@
 
 use std::time::Duration;
 
-use poise::{CreateReply, FrameworkError, serenity_prelude as serenity};
+use poise::serenity_prelude as serenity;
 use serenity::{
     CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateLabel,
     CreateModal, CreateModalComponent, CreateSelectMenu, CreateSelectMenuKind,
@@ -23,7 +21,7 @@ use serenity::{
 use tracing::{info, warn};
 
 use crate::{
-    Bot, BotResult, config::DEFAULT_HARNESS, control, error::BotError, forum, herdr::SessionPath,
+    Bot, BotResult, config::DEFAULT_HARNESS, error::BotError, forum, herdr::SessionPath,
     relay::RelayJob, session::Harness,
 };
 
@@ -39,110 +37,9 @@ const HARNESS_SELECT_ID: &str = "harness";
 const WORKSPACE_SELECT_ID: &str = "workspace";
 const PROMPT_INPUT_ID: &str = "prompt";
 
-/// The poise framework for the bot: registers the guild commands and
-/// dispatches interactions to them, while the bot's own event handler
-/// keeps handling messages, threads, and the lifecycle.
-pub struct BotFramework {
-    poise: poise::Framework<Bot, BotError>,
-    guild_id: serenity::GuildId,
-}
-
-/// Builds the framework over `bot`. The guild id is captured for
-/// guild-only command registration (no user install needed).
-pub fn framework(bot: &Bot) -> BotFramework {
-    let poise_framework = poise::Framework::builder()
-        .options(poise::FrameworkOptions {
-            commands: build_commands(&bot.config),
-            on_error,
-            ..Default::default()
-        })
-        .build();
-    BotFramework {
-        poise: poise_framework,
-        guild_id: bot.config.guild_id,
-    }
-}
-
-/// The guild commands to register, in order. `/herdr` is only registered
-/// when a control command is configured (`HERDR_CONTROL_COMMAND`) — the
-/// bot stays inert without one.
-fn build_commands(config: &crate::config::Config) -> Vec<poise::Command<Bot, BotError>> {
-    let mut commands = vec![agent()];
-    if config.herdr_control_command.is_some() {
-        commands.push(herdr());
-    }
-    commands
-}
-
-#[serenity::async_trait]
-impl serenity::Framework for BotFramework {
-    async fn init(&mut self, client: &serenity::Client) {
-        self.poise.init(client).await;
-    }
-
-    async fn dispatch(&self, ctx: &serenity::Context, event: &serenity::FullEvent) {
-        // Command registration needs the application id on the HTTP
-        // client; the Ready payload is the first reliable source for it,
-        // so the (idempotent) guild registration happens here instead of
-        // `init`.
-        if let serenity::FullEvent::Ready { data_about_bot, .. } = event {
-            ctx.http.set_application_id(data_about_bot.application.id);
-            if let Err(error) = poise::builtins::register_in_guild(
-                &ctx.http,
-                &self.poise.options().commands,
-                self.guild_id,
-            )
-            .await
-            {
-                warn!(?error, "failed to register slash commands");
-            }
-        }
-        self.poise.dispatch(ctx, event).await;
-    }
-}
-
-/// The allowed-user gate for every command: everyone when no allowed user
-/// is configured, otherwise only that user.
-// The `async` is required: poise wraps check fns into a BoxFuture.
-#[allow(clippy::unused_async)]
-async fn allowed(ctx: poise::Context<'_, Bot, BotError>) -> Result<bool, BotError> {
-    Ok(ctx.data().is_allowed(ctx.author().id))
-}
-
-/// Reports command failures and the allowed-user gate to the user.
-fn on_error(error: FrameworkError<'_, Bot, BotError>) -> poise::BoxFuture<'_, ()> {
-    Box::pin(async move {
-        match error {
-            FrameworkError::Command { error, ctx, .. } => {
-                let _ = ctx
-                    .send(
-                        CreateReply::new()
-                            .content(format!("command failed: {error}"))
-                            .ephemeral(true),
-                    )
-                    .await;
-            }
-            FrameworkError::CommandCheckFailed { ctx, .. } => {
-                let _ = ctx
-                    .send(
-                        CreateReply::new()
-                            .content("you're not allowed to use this bot.")
-                            .ephemeral(true),
-                    )
-                    .await;
-            }
-            other => {
-                if let Err(error) = poise::builtins::on_error(other).await {
-                    warn!(?error, "error while handling framework error");
-                }
-            }
-        }
-    })
-}
-
 /// launch an agent in a herdr workspace via a modal.
-#[poise::command(slash_command, check = "allowed")]
-async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), BotError> {
+#[poise::command(slash_command, check = "super::allowed")]
+pub async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), BotError> {
     let bot = ctx.data().clone();
 
     let workspaces = bot
@@ -152,7 +49,7 @@ async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), 
         .map_err(|error| BotError::Other(format!("couldn't reach herdr: {error}")))?;
     if workspaces.is_empty() {
         ctx.send(
-            CreateReply::new()
+            poise::CreateReply::new()
                 .content("there are no herdr workspaces to launch into.")
                 .ephemeral(true),
         )
@@ -248,74 +145,6 @@ async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), 
         }
     });
 
-    Ok(())
-}
-
-/// run a one-shot control command against the main herdr session.
-///
-/// The command is the configured `HERDR_CONTROL_COMMAND` (e.g. a lean
-/// `pi -p`); the prompt, prefixed with a control-plane preamble, is piped
-/// to its stdin, and its output is relayed back, truncated to Discord's
-/// message cap. The command runs with `HERDR_ENV=1` and the bot's
-/// resolved herdr socket injected, so it acts on the main session — the
-/// one the forums mirror.
-#[poise::command(slash_command, check = "allowed")]
-async fn herdr(
-    ctx: poise::ApplicationContext<'_, Bot, BotError>,
-    #[description = "what the control command should do"] prompt: String,
-) -> Result<(), BotError> {
-    let bot = ctx.data().clone();
-    // `build_commands` registers `/herdr` only when `HERDR_CONTROL_COMMAND`
-    // is set, but a failed `register_in_guild` at startup can leave a
-    // stale `/herdr` in the guild after the config changed — so the guard
-    // below is reachable in practice, not just defensive.
-    let Some(command) = bot.config.herdr_control_command.clone() else {
-        ctx.send(
-            CreateReply::new()
-                .content("the control command is not configured.")
-                .ephemeral(true),
-        )
-        .await?;
-        return Ok(());
-    };
-    if prompt.trim().is_empty() {
-        ctx.send(
-            CreateReply::new()
-                .content("the prompt is empty.")
-                .ephemeral(true),
-        )
-        .await?;
-        return Ok(());
-    }
-
-    // The command may run for the whole control timeout; defer so the
-    // interaction's 3-second response window is never missed, then edit
-    // the deferred response with the outcome.
-    ctx.defer_ephemeral().await?;
-
-    let socket = crate::config::socket_path();
-    let extra_env = [
-        ("HERDR_ENV", "1".to_owned()),
-        ("HERDR_SOCKET_PATH", socket.to_string_lossy().into_owned()),
-    ];
-    let prompt = control::control_prompt(&prompt);
-    let cwd = bot.config.control_cwd();
-    let timeout = bot.config.control_timeout();
-    let outcome = control::run_control_command(&command, &cwd, timeout, &prompt, &extra_env).await;
-    let reply = match outcome {
-        Ok(output) => {
-            let reply = control::truncate_reply(&output, crate::config::CONTROL_REPLY_LIMIT);
-            if reply.trim().is_empty() {
-                "the control command produced no output.".to_owned()
-            } else {
-                reply
-            }
-        }
-        Err(error) => format!("control command failed: {error}"),
-    };
-    ctx.interaction
-        .edit_response(ctx.http(), EditInteractionResponse::new().content(reply))
-        .await?;
     Ok(())
 }
 
@@ -495,30 +324,8 @@ fn parse_agent_modal(data: &ModalInteractionData) -> AgentSelection {
 mod tests {
     use poise::serenity_prelude::ModalInteractionData;
 
-    use super::{AgentSelection, build_commands, parse_agent_modal};
-    use crate::{config::DEFAULT_HARNESS, session::Harness, test_util::control_config};
-
-    #[test]
-    fn build_commands_omits_herdr_without_a_control_command() {
-        let config = control_config(None, None, None);
-        let commands = build_commands(&config);
-        let names = commands
-            .into_iter()
-            .map(|command| command.name.into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec!["agent"]);
-    }
-
-    #[test]
-    fn build_commands_registers_herdr_with_a_control_command() {
-        let config = control_config(Some("cat"), None, None);
-        let commands = build_commands(&config);
-        let names = commands
-            .into_iter()
-            .map(|command| command.name.into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec!["agent", "herdr"]);
-    }
+    use super::{AgentSelection, parse_agent_modal};
+    use crate::config::DEFAULT_HARNESS;
 
     /// A submitted modal payload in Discord's wire shape (Component V2:
     /// labels wrapping the select menus and the input). Raw string JSON —
@@ -541,7 +348,7 @@ mod tests {
     fn parse_agent_modal_extracts_harness_workspace_and_prompt() {
         let data = modal_data("claude-code", "my-workspace", "fix the bug");
         let selection = parse_agent_modal(&data);
-        assert_eq!(selection.harness, Some(Harness::ClaudeCode));
+        assert_eq!(selection.harness, Some(crate::session::Harness::ClaudeCode));
         assert_eq!(selection.workspace.as_deref(), Some("my-workspace"));
         assert_eq!(selection.prompt.as_deref(), Some("fix the bug"));
     }

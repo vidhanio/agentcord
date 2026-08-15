@@ -9,7 +9,6 @@ mod relay;
 mod session;
 #[cfg(test)]
 mod test_util;
-mod utils;
 
 use std::{
     fmt::{self, Debug, Formatter},

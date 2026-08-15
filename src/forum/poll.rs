@@ -4,18 +4,17 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use serenity::all::Context;
 use tracing::{info, warn};
 
-use crate::{
-    BotResult,
-    db::SessionRow,
-    forum::{Forum, SESSION_STALE_GRACE},
-    herdr::SessionPath,
-};
+use crate::{BotResult, db::SessionRow, forum::Forum, herdr::SessionPath};
+
+/// How long a tracked transcript must stay unchanged before the poll
+/// suspects the session rotated to a new file.
+const SESSION_STALE_GRACE: Duration = Duration::from_secs(300);
 
 impl Forum {
     /// Mirrors live sessions' transcripts into their posts on a fixed

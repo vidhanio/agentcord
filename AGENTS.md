@@ -198,7 +198,7 @@ Discord ──► Bot event handler (src/lib.rs, serenity EventHandler::dispatch
               │     bot's own posts: transcript caught up
               │     manual posts: deleted silently (agents launch via /agent)
               │
-Discord ──► poise framework (src/commands.rs, serenity Framework)
+Discord ──► poise framework (src/commands/, serenity Framework)
               │  /agent ──► native modal (harness dropdown w/ default harness,
               │             workspace dropdown, prompt input)
               │     submit ──► launch_from_modal: spawn → bind session post →
@@ -232,21 +232,27 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
   wire `EventLine`; `wire.rs` holds the response envelope + per-method
   result payloads, each pinned by a fixture test
   (`tests/fixtures/api/*.json` via `include_str!`).
-- `src/session/` — normalized transcripts: `mod.rs` defines `Harness`,
-  `SessionRole`, `ToolState`, `ToolCall`, `SessionMessage`, `read_session`,
-  and `read_session_title` (transcript-sourced titles per harness);
-  `common.rs` is the shared parsing skeleton (text extraction, caps,
+- `src/session/` — normalized transcripts: `mod.rs` defines `Harness` and
+  the `read_session`/`read_session_messages` dispatch; `model.rs` the
+  conversation model (`SessionRole`, `ToolState`, `ToolCall`,
+  `SessionMessage`); `title.rs` `read_session_title`
+  (transcript-sourced titles per harness);
+  `common.rs` the shared parsing skeleton (text extraction, caps,
   completion pre-scan, tool-message builder); `omp.rs`/`claude.rs`/
-  `codex.rs`/`pi.rs` are the per-harness file parsers and `opencode.rs`
-  reads the opencode SQLite store. Malformed/empty lines are
+  `codex.rs`/`pi.rs` the per-harness file parsers (each with its parser
+  tests) and `opencode.rs` reads the opencode SQLite store. Malformed/empty lines are
   skipped; truncated final lines are tolerated. Line timestamps are not
   parsed (nothing consumes them).
-- `src/forum/` — forum↔herdr reconciliation. `mod.rs` holds the `Forum`
-  struct and the workspace-forum/session-post lifecycle (ensure/rename
-  forums, ensure posts, tag application, manual-post deletion, dead-thread
-  tag pruning, session resume, spawn helpers); `sync.rs` the transcript
-  mirror (cursor sync, tool embeds, user echoes, starter-message
-  refresh); `events.rs` the `events.subscribe` loop, `reconcile`, and
+- `src/forum/` — forum↔herdr reconciliation, split by feature: `mod.rs`
+  holds the `Forum` struct and its shared state; `workspace.rs` the
+  workspace-forum lifecycle (ensure/rename forums, worktree resolution,
+  stale-row pruning); `post.rs` the session-post binding lifecycle
+  (ensure/create posts, tag-application support, manual-post deletion);
+  `tags.rs` the status/harness tag application; `spawn.rs`/`resume.rs`
+  the spawn and dead-session resume helpers; `sync.rs`
+  the transcript mirror (cursor sync, tool embeds, starter-message
+  refresh) with user echoes in `echo.rs` and tool-call/message rendering
+  in `render.rs`; `events.rs` the `events.subscribe` loop, `reconcile`, and
   pane lifecycle handling (`workspace.closed` inactivates the workspace's
   sessions instantly — herdr emits no per-pane events for it;
   `workspace.created` gets its forum created immediately via the same
@@ -257,14 +263,14 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
   gone). Agents are spawned with an explicitly declared workspace + cwd:
   `/agent` resolves the cwd from a live agent in the workspace, else a
   previous session row, else the home directory.
-- `src/commands.rs` — the poise framework (registered as serenity's
-  `Framework`, guild-only commands): `/agent` builds a native modal (kind
+- `src/commands/` — the poise framework (registered as serenity's
+  `Framework`, guild-only commands): `/agent` (`agent.rs`) builds a native modal (kind
   dropdown defaulted to `DEFAULT_HARNESS`, workspace dropdown with the
   invocation forum's workspace preselected, prompt input) by hand — poise's
   derive only knows text inputs — sends it as the command's initial
   response, awaits the submit through serenity's modal collector, defers
   the submit, and launches via the forum's spawn/bind/relay helpers,
-  editing the deferred response with the thread link. `/herdr` runs the configured `HERDR_CONTROL_COMMAND`
+  editing the deferred response with the thread link. `/herdr` (`herdr.rs`) runs the configured `HERDR_CONTROL_COMMAND`
   (`build_commands` registers it only when configured) — the prompt
   (preamble-prefixed via `control::control_prompt`) is piped to the
   command's stdin, `HERDR_ENV=1` + the bot's resolved socket are
@@ -300,10 +306,12 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
 
 | Path | Purpose |
 |---|---|
-|`src/`|Bot core: `lib.rs` (Bot + event-handler dispatch), `config.rs`, `error.rs`, `db.rs`, `relay.rs`, `commands.rs` (poise slash commands: the `/agent` modal, the `/herdr` control command), `control.rs` (the `/herdr` process runner), `utils.rs`|
-|`src/forum/`|Forum-side state: `mod.rs` (struct + lifecycle), `sync.rs` (transcript mirror), `events.rs` (event loop + reconcile), `poll.rs` (2s transcript poll + rotations), `titles.rs` (titles + starter message)|
-| `src/herdr/` | herdr Unix-socket client: `mod.rs` (client + models + errors), `event.rs` (subscription machinery), `wire.rs` (envelope + result payloads) |
-| `src/session/` | Transcript normalization: `mod.rs` (models + read_session), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs`/`pi.rs` (per-harness file parsers), `opencode.rs` (opencode SQLite store reader) |
+|`src/`|Bot core: `lib.rs` (Bot + event-handler dispatch), `config.rs`, `error.rs`, `relay.rs`, `control.rs` (the `/herdr` process runner), `test_util.rs` (shared test fixtures)|
+|`src/forum/`|Forum-side state, split by feature: `mod.rs` (struct + shared state), `tags.rs` (status/harness tag management), `workspace.rs` (workspace↔forum lifecycle, worktree resolution, stale-row pruning), `post.rs` (session↔post binding lifecycle, thread handling), `spawn.rs` (agent spawn + naming + cwd), `resume.rs` (dead-session resume), `lookup.rs` (Discord channel resolution), `sync.rs` (transcript mirror), `echo.rs` (user webhook echoes), `render.rs` (tool-call rendering + message splitting), `events.rs` (event loop + reconcile + pane lifecycle), `poll.rs` (2s transcript poll + rotations), `titles.rs` (titles + starter message)|
+| `src/herdr/` | herdr Unix-socket client, split by concern: `mod.rs` (re-exports), `model.rs` (agent/workspace records + status + ids), `error.rs` (error type), `client.rs` (the socket client + API methods), `event.rs` (subscription machinery), `wire.rs` (envelope + result payloads) |
+| `src/session/` | Transcript normalization: `mod.rs` (Harness + read_session dispatch), `model.rs` (conversation model), `title.rs` (transcript-sourced titles), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs`/`pi.rs` (per-harness file parsers, each with its parser tests), `opencode.rs` (opencode SQLite store reader) |
+| `src/db/` | SQLite state: `mod.rs` (Db wrapper + queries), `model.rs` (row types), `migrate.rs` (schema push + legacy migrations) |
+| `src/commands/` | Slash commands: `mod.rs` (poise framework wiring), `agent.rs` (the `/agent` modal + launch), `herdr.rs` (the `/herdr` control command) |
 | `tests/` | `herdr_live.rs` (live integration, gated) and `fixtures/api/` (captured herdr API JSON, embedded via `include_str!`) |
 | `.github/workflows/` | CI — `ci-cd.yaml` (test, test-docs, check/clippy, check-docs, check-format via the flake's treefmt check; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs, nix for formatting) and `security-audit.yaml` (daily + on manifest changes, cargo-deny) |
 
@@ -385,7 +393,7 @@ wire it into git with `prek install`.
   warnings — **do not add `#[allow]` attributes**; fix the lint or split the
   function (watch `too_many_lines`/`too_many_arguments`).
 - **No stringly-typed APIs where a closed enum fits**: lifecycle statuses are
-  `AgentStatus` (`src/herdr/mod.rs`) with `as_str()` only at the wire
+  `AgentStatus` (`src/herdr/model.rs`) with `as_str()` only at the wire
   boundary; agent harnesses are the closed `Harness` enum
   (`src/session/mod.rs`) with `as_str()` only for session paths/harness tags;
   herdr error actions use a private `HerdrAction` enum.
@@ -432,22 +440,27 @@ wire it into git with `prek install`.
   `ClientBuilder` with the bot's `EventHandler` and the poise framework),
   the `dispatch`-based `EventHandler` (message relay + dead-thread resume,
   thread handling, lifecycle spawn), the poll task + event loop spawn.
-- `src/herdr/mod.rs` — the herdr Unix-socket client (NDJSON, one request
-  per connection); nutype newtypes `WorkspaceId`/`PaneId`/`TabId`/
-  `SessionPath`; the JSON envelope protocol; the public methods (new,
-  list_workspaces, create_workspace_with_pane, close_workspace, create_tab,
-  close_tab, list_agents, get_agent, start_agent, send_prompt, prompt_agent,
-  wait_agent, session_snapshot → `Vec<Agent>`, subscribe) plus `AgentStatus` and
-  `Error` with `is_timeout`/`is_stalled`. Fixture tests pin the wire
-  format.
-- `src/db.rs` — toasty SQLite state: `WorkspaceRow`/`SessionRow` models and
-  the `Db` wrapper (workspace/session lookups and upserts; schema pushed
-  from the registered models on startup; rows are label-keyed and re-keyed
-  when a workspace or session is renamed).
-- `src/forum/mod.rs` — per-workspace forum channels, session posts, tags,
+- `src/herdr/` — the herdr Unix-socket client (NDJSON, one request
+  per connection): `client.rs` holds the client and its public methods
+  (new, list_workspaces, create_workspace_with_pane, close_workspace,
+  create_tab, close_tab, list_agents, get_agent, start_agent, send_prompt,
+  prompt_agent, wait_agent, session_snapshot → `Vec<Agent>`, subscribe);
+  `model.rs` the nutype newtypes `WorkspaceId`/`PaneId`/`TabId`/
+  `SessionPath` and the `Agent`/`Workspace` records plus `AgentStatus`;
+  `error.rs` the `Error` type with `is_timeout`/`is_stalled`. Fixture
+  tests pin the wire format.
+- `src/db/` — toasty SQLite state: `WorkspaceRow`/`SessionRow` in
+  `model.rs` and the `Db` wrapper in `mod.rs` (workspace/session lookups
+  and upserts; schema pushed from the registered models on startup; rows
+  are label-keyed and re-keyed when a workspace or session is renamed);
+  schema push and the legacy migrations in `migrate.rs`.
+- `src/forum/` — per-workspace forum channels, session posts, tags,
   manual-post deletion, dead-thread tag pruning, session resume, spawn
-  helpers; submodules for sync, events, poll, and titles (see Key
-  Directories).
+  helpers, the transcript mirror, and the event loop, split by feature
+  (see Key Directories).
+- `src/commands/` — the poise framework in `mod.rs` plus the `/agent`
+  modal command in `agent.rs` and the `/herdr` control command in
+  `herdr.rs`.
 - `src/relay.rs` — conversation workers and the session-file sync delta.
 - `src/config.rs` — minimal env config: `DISCORD_BOT_TOKEN`, `GUILD_ID`,
   `ALLOWED_USER_ID`, `HERDR_CONTROL_COMMAND`/`HERDR_CONTROL_CWD`/
@@ -497,7 +510,7 @@ wire it into git with `prek install`.
   fixtures are the contract for herdr's wire format — regenerate them
   from a live server, not by hand), `src/session/` tests the transcript
   parsers (`parse_omp`/`parse_claude_code`/`parse_codex`,
-  malformed/truncated lines, titles) and `read_session`, `src/db.rs` tests
+  malformed/truncated lines, titles) and `read_session`, `src/db/` tests
   workspace/session upserts and lookups on an in-memory database,
   `src/forum/` tests the agent-name timestamp, the title selection, the
   modal construction, and the per-harness resume args, `src/config.rs`
@@ -505,7 +518,7 @@ wire it into git with `prek install`.
   `control_timeout` defaults and overrides), `src/control.rs` runs real
   `cat`/`sh`/`sleep` processes (stdin pipe, stderr concatenation, env
   injection, nonzero exit, process-group kill on timeout), and
-  `src/commands.rs` tests `build_commands` registration gating.
+  `src/commands/` tests `build_commands` registration gating.
 - **Live tests** (`tests/herdr_live.rs`): gated behind `HERDR_LIVE_TESTS=1`
   (no-ops otherwise, so plain `cargo test`/nextest needs no herdr). Spawns
   real agents in `herdcord-live-{pid}`/`herdcord-events-{pid}`/

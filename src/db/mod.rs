@@ -2,9 +2,10 @@
 //! inside them.
 //!
 //! Backed by [toasty] 0.10 with the `sqlite` driver. The [`Db`] wrapper is
-//! the module's public API; `WorkspaceRow` and `SessionRow` are the flat
-//! row types it persists. The row fields mirror the herdr wire format, so
-//! they stay plain strings rather than enums.
+//! the module's public API; the flat row types it persists live in
+//! `model` (the row fields mirror the herdr wire format, so they stay
+//! plain strings rather than enums), and schema setup plus the legacy
+//! re-keying migrations live in `migrate`.
 //!
 //! [toasty]: https://docs.rs/toasty
 
@@ -12,101 +13,10 @@ use std::path::Path;
 
 use crate::herdr::SessionPath;
 
-/// A herdr workspace and its persistent forum channel.
-#[derive(Debug, Clone, toasty::Model)]
-pub(crate) struct WorkspaceRow {
-    /// The workspace label — the stable identity the bot keys on.
-    #[key]
-    pub label: String,
+pub mod migrate;
+pub mod model;
 
-    /// herdr's positional workspace id (e.g. `"w3"`), kept so a rename can
-    /// re-key the row to the new label; empty for rows that predate id
-    /// tracking until the first reconcile re-keys them.
-    pub workspace_id: String,
-
-    /// Discord snowflake of the forum channel, if configured.
-    pub forum_channel_id: Option<i64>,
-}
-
-/// A session (agent launch) bound to a forum post.
-///
-/// Stores only what neither herdr nor Discord can tell us: the session↔post
-/// binding and the transcript sync cursors. Live session state lives in
-/// herdr; posted messages live in Discord.
-#[derive(Debug, Clone, toasty::Model)]
-pub(crate) struct SessionRow {
-    /// `agent_session.value`, unique per launch.
-    #[key]
-    pub session_path: String,
-
-    /// Forum post thread id, if the session is attached to one.
-    pub post_channel_id: Option<i64>,
-
-    /// The label of the herdr workspace the agent ran in, for instant post
-    /// inactivation on `workspace.closed` and resume spawn.
-    pub workspace_label: String,
-
-    /// Working directory of the agent's pane, for the starter message once
-    /// the agent is gone.
-    pub cwd: String,
-
-    /// The transcript file synced into the post. Starts equal to
-    /// `session_path`; when omp rotates the transcript of a session
-    /// replaced in the same pane (and herdr keeps reporting the old path),
-    /// the poll re-binds this to the new file.
-    pub transcript_path: String,
-
-    /// Conversation messages already posted to Discord.
-    pub synced_messages: i64,
-
-    /// Discord id of the last message posted for this session.
-    pub last_discord_message_id: Option<i64>,
-
-    /// Discord id of the post's starter message (its first message, the
-    /// session intro), captured at post creation so the intro can be
-    /// refreshed as post metadata.
-    pub starter_message_id: Option<i64>,
-}
-
-impl SessionRow {
-    /// Whether a live agent's reported session value belongs to this row:
-    /// the row's own key, or the transcript it adopted after a rotation.
-    #[must_use]
-    pub fn hosts(&self, session_value: &str) -> bool {
-        session_value == self.session_path || session_value == self.transcript_path
-    }
-}
-
-/// The toasty schema push is not idempotent: this checks whether the session
-/// table already exists so reopening an existing database skips it.
-async fn tables_exist(db: &toasty::Db) -> toasty::Result<bool> {
-    let mut conn = db.connection().await?;
-    let rows = toasty::sql::query(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_rows' LIMIT 1",
-    )
-    .exec(&mut conn)
-    .await?;
-    Ok(!rows.is_empty())
-}
-
-/// Migrates databases created before the workspace identity became the
-/// label: `workspace_rows.workspace_id` becomes the `label` key (with a new
-/// `workspace_id` column added), and `session_rows.workspace_id` becomes
-/// `workspace_label`. Each statement is a no-op on schemas that already
-/// have the new shape, so the SQLite errors they raise are expected.
-async fn migrate_legacy_columns(db: &toasty::Db) -> toasty::Result<()> {
-    let mut conn = db.connection().await?;
-    for statement in [
-        "ALTER TABLE workspace_rows RENAME COLUMN workspace_id TO label",
-        "ALTER TABLE workspace_rows ADD COLUMN workspace_id TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE session_rows RENAME COLUMN workspace_id TO workspace_label",
-    ] {
-        if let Err(error) = toasty::sql::statement(statement).exec(&mut conn).await {
-            tracing::debug!(?error, "legacy schema migration not applicable");
-        }
-    }
-    Ok(())
-}
+pub(crate) use self::model::{SessionRow, WorkspaceRow};
 
 /// SQLite-backed store for workspaces and sessions.
 ///
@@ -117,32 +27,21 @@ pub struct Db {
 }
 
 impl Db {
-    /// Connects to the SQLite database at `url` and pushes the schema
-    /// derived from the registered models when the tables are missing, so
-    /// reopening an existing database is a no-op.
-    async fn open_connected(url: &str) -> toasty::Result<Self> {
-        let db = toasty::Db::builder()
-            .models(toasty::models!(crate::*))
-            .connect(url)
-            .await?;
-        if tables_exist(&db).await? {
-            migrate_legacy_columns(&db).await?;
-        } else {
-            db.push_schema().await?;
-        }
-        Ok(Self { db })
+    /// Wraps an already-connected and schema-migrated toasty database.
+    pub(crate) const fn from_inner(db: toasty::Db) -> Self {
+        Self { db }
     }
 
     /// Opens (creating on first use) the SQLite database at `path`.
     pub async fn open(path: &Path) -> toasty::Result<Self> {
-        Self::open_connected(&format!("sqlite:{}", path.display())).await
+        migrate::open_connected(&format!("sqlite:{}", path.display())).await
     }
 
     /// Opens an ephemeral in-memory SQLite database and pushes the schema.
     ///
     /// Intended for tests; each call produces a fresh, empty database.
     pub async fn open_in_memory() -> toasty::Result<Self> {
-        Self::open_connected("sqlite::memory:").await
+        migrate::open_connected("sqlite::memory:").await
     }
 
     /// Returns the workspace with the given label, if any.
@@ -177,67 +76,6 @@ impl Db {
             .forum_channel_id(row.forum_channel_id)
             .exec(&mut conn)
             .await?;
-        Ok(())
-    }
-
-    /// Re-keys the live workspace rows from the old positional-id identity
-    /// to labels: rows keyed by (or storing) a herdr id get re-keyed to the
-    /// workspace's label, with the id recorded. Idempotent.
-    pub(crate) async fn migrate_workspace_ids(
-        &self,
-        workspaces: &[crate::herdr::Workspace],
-    ) -> toasty::Result<()> {
-        for row in self.all_workspaces().await? {
-            let Some(workspace) = workspaces.iter().find(|workspace| {
-                workspace.workspace_id.as_str() == row.label
-                    || workspace.workspace_id.as_str() == row.workspace_id
-            }) else {
-                continue;
-            };
-            if row.label == workspace.label && row.workspace_id == workspace.workspace_id.as_str() {
-                continue;
-            }
-            self.delete_workspace(&row.label).await?;
-            self.upsert_workspace(&WorkspaceRow {
-                label: workspace.label.clone(),
-                workspace_id: workspace.workspace_id.to_string(),
-                forum_channel_id: row.forum_channel_id,
-            })
-            .await?;
-        }
-        Ok(())
-    }
-
-    /// Re-keys session rows from the old positional-id identity to labels:
-    /// sessions whose workspace id matches a live herdr workspace get the
-    /// workspace's label. Idempotent; run after
-    /// [`Db::migrate_workspace_ids`].
-    pub(crate) async fn migrate_session_labels(
-        &self,
-        workspaces: &[crate::herdr::Workspace],
-    ) -> toasty::Result<()> {
-        for session in self.all_sessions().await? {
-            let Some(workspace) = workspaces
-                .iter()
-                .find(|workspace| workspace.workspace_id.as_str() == session.workspace_label)
-            else {
-                continue;
-            };
-            if session.workspace_label == workspace.label {
-                continue;
-            }
-            let updated = SessionRow {
-                session_path: session.session_path.clone(),
-                post_channel_id: session.post_channel_id,
-                workspace_label: workspace.label.clone(),
-                cwd: session.cwd.clone(),
-                transcript_path: session.transcript_path.clone(),
-                synced_messages: session.synced_messages,
-                last_discord_message_id: session.last_discord_message_id,
-                starter_message_id: session.starter_message_id,
-            };
-            self.upsert_session(&updated).await?;
-        }
         Ok(())
     }
 

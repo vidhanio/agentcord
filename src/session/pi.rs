@@ -252,7 +252,7 @@ pub fn parse_pi(raw: &str) -> Vec<SessionMessage> {
 #[cfg(test)]
 mod tests {
     use super::{
-        super::{SessionRole, TOOL_TEXT_LIMIT, ToolCallId, ToolState},
+        super::{SessionRole, ToolCallId, ToolState, common::TOOL_TEXT_LIMIT},
         condense_skills, parse_pi,
     };
 

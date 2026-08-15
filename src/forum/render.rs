@@ -1,3 +1,8 @@
+//! Rendering transcript content into Discord messages: tool calls as
+//! single-argument text or stateful embeds (errors baked into the call's
+//! own message), and long text split at line boundaries to fit Discord's
+//! message cap.
+
 use serenity::all::{Colour, CreateEmbed, colours::branding};
 
 use crate::session::{ToolCall, ToolState, cap};
