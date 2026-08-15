@@ -7,6 +7,8 @@
 //! (`session`, `model_change`, `thinking_level_change`, `session_info`, …)
 //! never carry conversation.
 
+use std::fmt::Write;
+
 use serde_json::Value;
 
 use super::{
@@ -61,6 +63,85 @@ fn pi_completions(value: &Value) -> Vec<(ToolCallId, bool, String)> {
     }
 }
 
+/// Condenses inlined `<skill name="…" …>…</skill>` blocks to a short
+/// `/skill:name` marker. Pi inlines a skill's whole `SKILL.md` into the
+/// user turn that invoked it; without this the Discord mirror would echo
+/// hundreds of lines of context per invocation (and can exceed Discord's
+/// message limit). Nested blocks are matched with a depth counter; a block
+/// with no closing tag is left verbatim (transcripts may be truncated).
+#[must_use]
+fn condense_skills(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = find_skill_open(rest) {
+        out.push_str(&rest[..open]);
+        let tag = &rest[open..];
+        let open_end = tag.find('>').expect("`<skill` open tag ends with `>`");
+        let name = skill_name(&tag[..=open_end]);
+        let content = &tag[open_end + 1..];
+        if let Some(close) = find_skill_close(content) {
+            let _ = write!(out, "/skill:{name}");
+            rest = &content[close..];
+        } else {
+            out.push_str(tag);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The byte offset of the next `<skill` opening tag (with a space or `>`
+/// after the name), or `None`.
+fn find_skill_open(text: &str) -> Option<usize> {
+    text.match_indices("<skill").find_map(|(i, _)| {
+        (text
+            .as_bytes()
+            .get(i + 6)
+            .is_some_and(|b| matches!(b, b' ' | b'>')))
+        .then_some(i)
+    })
+}
+
+/// The byte offset just past the `</skill>` closing the block that starts
+/// after the opening tag, counting nested `<skill>` opens; `None` when the
+/// block is unclosed.
+fn find_skill_close(after_open: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut i = 0usize;
+    let bytes = after_open.as_bytes();
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"</skill>") {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i + 8);
+            }
+            i += 8;
+        } else if bytes[i..].starts_with(b"<skill")
+            && bytes.get(i + 6).is_some_and(|b| matches!(b, b' ' | b'>'))
+        {
+            depth += 1;
+            i += 6;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// The `name` attribute of a `<skill …>` opening tag, or `skill` when it
+/// is missing or malformed.
+fn skill_name(open_tag: &str) -> &str {
+    open_tag
+        .find("name=\"")
+        .and_then(|start| {
+            let rest = &open_tag[start + "name=\"".len()..];
+            rest.find('"').map(|end| &rest[..end])
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or("skill")
+}
+
 /// Parses a `pi` session transcript.
 #[must_use]
 pub fn parse_pi(raw: &str) -> Vec<SessionMessage> {
@@ -93,7 +174,10 @@ pub fn parse_pi(raw: &str) -> Vec<SessionMessage> {
                 }
                 messages.push(SessionMessage {
                     role: SessionRole::User,
-                    text,
+                    // Pi inlines invoked skills into the user turn; the
+                    // mirror shows the invocation, not the skill's whole
+                    // `SKILL.md`.
+                    text: condense_skills(&text),
                     tool: None,
                 });
             }
@@ -169,7 +253,7 @@ pub fn parse_pi(raw: &str) -> Vec<SessionMessage> {
 mod tests {
     use super::{
         super::{SessionRole, TOOL_TEXT_LIMIT, ToolCallId, ToolState},
-        parse_pi,
+        condense_skills, parse_pi,
     };
 
     #[test]
@@ -187,6 +271,43 @@ mod tests {
         assert_eq!(messages[0].text, "create a discord bot");
         assert_eq!(messages[1].role, SessionRole::Agent);
         assert_eq!(messages[1].text, "I will inspect the files.");
+    }
+
+    #[test]
+    fn pi_user_skills_condensed() {
+        let raw = r#"{"type":"message","id":"u1","parentId":"t","timestamp":"2026-08-15T13:12:42.782Z","message":{"role":"user","content":[{"type":"text","text":"<skill name=\"setup-matt-pocock-skills\" location=\"/home/vidhanio/.agents/skills/…/SKILL.md\">\n# The skill\n</skill>\n\nrewrite my agents.md"}]}}
+"#;
+        let messages = parse_pi(raw);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, SessionRole::User);
+        assert_eq!(
+            messages[0].text,
+            "/skill:setup-matt-pocock-skills\n\nrewrite my agents.md"
+        );
+    }
+
+    #[test]
+    fn condense_skills_nested_blocks() {
+        let text = "<skill name=\"outer\">\n<skill name=\"inner\">x</skill>\ny\n</skill>\nrest";
+        assert_eq!(condense_skills(text), "/skill:outer\nrest");
+    }
+
+    #[test]
+    fn condense_skills_leaves_unclosed_block() {
+        let text = "<skill name=\"x\">\ncontent";
+        assert_eq!(condense_skills(text), text);
+    }
+
+    #[test]
+    fn condense_skills_passthrough_without_skill_tags() {
+        let text = "plain <skillname> not a skill</skillname> text";
+        assert_eq!(condense_skills(text), text);
+    }
+
+    #[test]
+    fn condense_skills_defaults_missing_name() {
+        let text = "<skill>\ncontent</skill>\nrest";
+        assert_eq!(condense_skills(text), "/skill:skill\nrest");
     }
 
     #[test]

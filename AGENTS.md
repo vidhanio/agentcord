@@ -126,7 +126,11 @@ agents.
   scraping terminal output. `opencode.rs` is the exception: opencode
   persists sessions in a SQLite store
   (`$XDG_DATA_HOME/opencode/opencode-<channel>.db`), so its transcript is
-  read from the store by session id (`read_session_messages`). User/assistant turns are posted as plain messages;
+  read from the store by session id (`read_session_messages`). Pi inlines
+  an invoked skill's whole `SKILL.md` into the user turn; the pi parser
+  condenses those `<skill …>…</skill>` blocks to a `/skill:name` marker so
+  the mirror shows the invocation, not hundreds of lines of context (an
+  overlong echo would exceed Discord's message limit). User/assistant turns are posted as plain messages;
   **tool calls** are parsed out of each harness's tool records — one per
   call, posted once and **edited in place** when the call completes (the
   colour carries running/done/failed; the `tool_messages` map tracks the
