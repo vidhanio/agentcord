@@ -366,8 +366,8 @@ impl Forum {
             return Ok(());
         };
 
-        let Some(kind) = AgentKind::parse(agent.agent.as_deref().unwrap_or("")) else {
-            warn!(agent = ?agent.agent, %session_path, "unknown agent kind, skipping session post");
+        let Some(kind) = agent.kind else {
+            warn!(agent = ?agent.kind, %session_path, "unknown agent kind, skipping session post");
             return Ok(());
         };
 
@@ -682,11 +682,7 @@ impl Forum {
             Err(error) => return Err(error.into()),
         };
 
-        match self
-            .herdr
-            .start_agent(name, kind.as_str(), &tab.pane_id, args)
-            .await
-        {
+        match self.herdr.start_agent(name, kind, &tab.pane_id, args).await {
             Ok(agent) => {
                 info!(?agent, "started agent");
                 Ok(agent)
@@ -718,7 +714,7 @@ impl Forum {
 
         match self
             .herdr
-            .start_agent(name, kind.as_str(), &created.pane_id, args)
+            .start_agent(name, kind, &created.pane_id, args)
             .await
         {
             Ok(agent) => {
@@ -1046,7 +1042,7 @@ mod tests {
 
     fn agent_fixture() -> Agent {
         Agent {
-            agent: Some("omp".to_owned()),
+            kind: Some(AgentKind::Omp),
             agent_status: "idle".to_owned(),
             name: Some("agent".to_owned()),
             pane_id: PaneId::from("w1:p1"),

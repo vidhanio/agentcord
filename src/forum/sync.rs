@@ -261,9 +261,7 @@ impl Forum {
 
     /// The agent kind of the live agent hosting `session`, if any.
     pub(crate) async fn live_agent_kind(&self, session: &SessionRow) -> Option<AgentKind> {
-        self.live_agent(session)
-            .await
-            .and_then(|agent| AgentKind::parse(agent.agent.as_deref().unwrap_or("")))
+        self.live_agent(session).await.and_then(|agent| agent.kind)
     }
 
     /// Creates a forum post for a brand-new session and inserts its
@@ -352,7 +350,7 @@ impl Forum {
             return;
         };
 
-        let kind = AgentKind::parse(agent.agent.as_deref().unwrap_or("")).unwrap_or(AgentKind::Omp);
+        let kind = agent.kind.unwrap_or(AgentKind::Omp);
         let Some(post_id) = session.post_channel_id else {
             return;
         };
