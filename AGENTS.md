@@ -30,18 +30,17 @@ agents.
   by session path. Post titles follow the chain: the **transcript's own
   title record** (`title`/`title_change` for omp; `custom-title` >
   `ai-title` > `summary` for claude-code; `session_info` `name` for pi;
-  the store's `session.title` for opencode; none for codex) — stable, unlike
-  the animated terminal title — else herdr's **stripped terminal title**
-  (`terminal_title_stripped`; herdr has already removed ANSI escapes and
-  the leading activity glyph, so no local stripping exists). The agent
-  name is never used for titles. Thread renames are skipped when the title
-  is unchanged: renaming posts a channel-name-change system message into
-  the thread, so identical renames would spam it. The post's **starter
-  message** is a one-line plain-text intro —
-  `` `pane` · worktree `…` · cwd `…` · session `…` `` (harness/status are
-  already on the tags; the worktree segment only appears when the agent
-  runs in a git worktree) — rewritten to `inactive · cwd …` and the post
-  closed when the session dies.
+  the store's `session.title` for opencode; none for codex) — stable,
+  unlike the animated terminal title — else herdr's **stripped terminal
+  title** (`terminal_title_stripped`; herdr strips ANSI escapes and the
+  leading activity glyph). The agent name is never used for titles. Thread
+  renames are skipped when the title is unchanged: renaming posts a
+  channel-name-change system message into the thread, so identical renames
+  would spam it. The post's **starter message** is a one-line plain-text
+  intro — `` `pane` · worktree `…` · cwd `…` · session `…` `` (harness/
+  status are already on the tags; the worktree segment only appears when
+  the agent runs in a git worktree) — rewritten to `inactive · cwd …` and
+  the post closed when the session dies.
 - **Transcripts can rotate under the session.** When a session is replaced
   in the same pane, omp starts a new transcript file and herdr may keep
   reporting the old path. The session row's `transcript_path` (initially the
@@ -93,7 +92,7 @@ agents.
   launch used: spawn in the workspace, bind the session to a forum post,
   relay the prompt, reply ephemerally with the thread link. Any manual
   post in a managed forum is deleted silently, and the bot's own posts
-  get their transcript caught up; the host-user launch path is gone.
+  get their transcript caught up.
 - **`/herdr` is a configurable escape hatch.** When `HERDR_CONTROL_COMMAND`
   is set, `/herdr` spawns that one-shot external command (e.g. a lean
   `pi -p`) with the user's prompt piped to its stdin — prefixed with a
@@ -164,8 +163,8 @@ agents.
   **state** (status changes) still flow through the socket — only the
   conversation log is read from files.
 - State lives in a SQLite database via [toasty] at
-  `$XDG_STATE_HOME/herdcord`, opened with the schema pushed from the
-  registered models on startup (skipped when the tables already exist).
+  `$XDG_STATE_HOME/herdcord`, with the schema pushed from the registered
+  models on startup (a no-op when the tables already exist).
 
 [toasty]: https://docs.rs/toasty
 
@@ -300,8 +299,7 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
   `dispatch` form (Ready spawns the poll + event loop; ThreadCreate is
   delegated to `handle_thread_create`; Message relays to sessions and
   resumes dead ones), plus the `run()` wiring: `Http` with the default
-  ratelimiter (no custom client — the next-branch ratelimiter no longer
-  wedges), `ClientBuilder` with the bot handler and the poise framework.
+  ratelimiter, `ClientBuilder` with the bot handler and the poise framework.
 
 ## Key Directories
 
@@ -434,12 +432,10 @@ wire it into git with `prek install`.
 - `src/main.rs` — entry: color_eyre, dotenvy, `Config::from_env` (envy),
   tracing init, `herdcord::run(config)`.
 - `src/lib.rs` — `Bot` struct (config, herdr client, forum, relay, state
-  `Db`), `run()` (serenity `Http` with the
-  default ratelimiter — no custom client, the reworked next-branch
-  ratelimiter no longer wedges — `ClientBuilder` with the bot's
-  `EventHandler` and the poise framework), the `dispatch`-based
-  `EventHandler` (message relay + dead-thread resume, thread handling,
-  lifecycle spawn), the poll task + event loop spawn.
+  `Db`), `run()` (serenity `Http` with the default ratelimiter,
+  `ClientBuilder` with the bot's `EventHandler` and the poise framework),
+  the `dispatch`-based `EventHandler` (message relay + dead-thread resume,
+  thread handling, lifecycle spawn), the poll task + event loop spawn.
 - `src/herdr/mod.rs` — the herdr Unix-socket client (NDJSON, one request
   per connection); nutype newtypes `WorkspaceId`/`PaneId`/`TabId`/
   `SessionPath`; the JSON envelope protocol; the public methods (new,
@@ -450,9 +446,8 @@ wire it into git with `prek install`.
   format.
 - `src/db.rs` — toasty SQLite state: `WorkspaceRow`/`SessionRow` models and
   the `Db` wrapper (workspace/session lookups and upserts; schema pushed
-  when the tables are missing, legacy column renames applied when they
-  exist, workspace/session rows re-keyed from positional ids to labels on
-  the first reconcile).
+  from the registered models on startup; rows are label-keyed and re-keyed
+  when a workspace or session is renamed).
 - `src/forum/mod.rs` — per-workspace forum channels, session posts, tags,
   manual-post deletion, dead-thread tag pruning, session resume, spawn
   helpers; submodules for sync, events, poll, and titles (see Key
@@ -544,6 +539,10 @@ wire it into git with `prek install`.
 ### Issue tracker
 
 Issues and specs live as GitHub issues, managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: `needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
