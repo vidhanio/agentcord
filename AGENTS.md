@@ -94,6 +94,18 @@ agents.
   relay the prompt, reply ephemerally with the thread link. Any manual
   post in a managed forum is deleted silently, and the bot's own posts
   get their transcript caught up; the host-user launch path is gone.
+- **`/herdr` is a configurable escape hatch.** When `HERDR_CONTROL_COMMAND`
+  is set, `/herdr` spawns that one-shot external command (e.g. a lean
+  `pi -p`) with the user's prompt piped to its stdin — prefixed with a
+  control-plane preamble telling it to bootstrap the herdr skill via
+  `herdr --skill`, act on the main session, and reply with a short
+  confirmation — and relays the concatenated stdout+stderr back as an
+  ephemeral reply, truncated to Discord's 2000-char cap. The subprocess
+  gets `HERDR_ENV=1` and the bot's resolved socket injected, so it acts
+  on the main herdr session (the forum mirror follows via herdr's event
+  stream — no second write path). When unset, `/herdr` is not registered
+  at all. Runs in parallel — one process per invocation, killed as a
+  process group on the configured timeout.
 - **Forum tags describe the session**: the harness (`omp`, `claude-code`,
   `codex`, … 🤖) and the lifecycle status (`idle`/`working`/`blocked`/`done`/
   `unknown`). The bot owns a forum's tags outright: every tag write replaces
@@ -191,6 +203,10 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
               │  /workspace ──► folder-path arg (tilde expansion for home)
               │     ──► resolve+validate path → herdr workspace.create
               │         (label = dir name; duplicate labels rejected)
+              │  /herdr (when HERDR_CONTROL_COMMAND is set)
+              │     ──► control_prompt + stdin pipe ──► one-shot external
+              │         command (process group, timeout) ──► truncated
+              │         ephemeral reply (HERDR_ENV=1 + socket injected)
               │
               ├─ poll task (2s tick, src/forum/poll.rs)
               │    syncs every live session's transcript (cursor no-ops)
@@ -254,7 +270,19 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
   (`~user` unsupported) and validates the path (existence,
   directory-ness, canonicalization), the label is the directory's name,
   and an already-used label is rejected so label-keyed rows/forums never
-  collide. The `allowed` check gates every command on `ALLOWED_USER_ID`.
+  collide. `/herdr` runs the configured `HERDR_CONTROL_COMMAND`
+  (`build_commands` registers it only when configured) — the prompt
+  (preamble-prefixed via `control::control_prompt`) is piped to the
+  command's stdin, `HERDR_ENV=1` + the bot's resolved socket are
+  injected, and the concatenated output is truncated and edited into the
+  deferred ephemeral response. The `allowed` check gates every command
+  on `ALLOWED_USER_ID`.
+- `src/control.rs` — the `/herdr` process runner: `control_prompt`
+  frames the one-shot session, `run_control_command` spawns the
+  whitespace-split command in its own process group (prompt on stdin,
+  stdout+stderr concatenated, group-killed via `kill -TERM -<pid>` on
+  timeout, `kill_on_drop` backstop), and `truncate_reply` cuts the
+  reply to Discord's cap without splitting a UTF-8 character.
 - `src/relay.rs` — per-agent conversation workers (keyed by pane id —
   agents are unnamed; the `RelayJob` carries the session path): one `mpsc`
   channel per agent (shared `Arc<Mutex<HashMap>>` of senders with
@@ -279,7 +307,7 @@ Discord ──► poise framework (src/commands.rs, serenity Framework)
 
 | Path | Purpose |
 |---|---|
-|`src/`|Bot core: `lib.rs` (Bot + event-handler dispatch), `config.rs`, `error.rs`, `db.rs`, `relay.rs`, `commands.rs` (poise slash commands: the `/agent` modal, the `/workspace` path command), `utils.rs`|
+|`src/`|Bot core: `lib.rs` (Bot + event-handler dispatch), `config.rs`, `error.rs`, `db.rs`, `relay.rs`, `commands.rs` (poise slash commands: the `/agent` modal, the `/workspace` path command, the `/herdr` control command), `control.rs` (the `/herdr` process runner), `utils.rs`|
 |`src/forum/`|Forum-side state: `mod.rs` (struct + lifecycle), `sync.rs` (transcript mirror), `events.rs` (event loop + reconcile), `poll.rs` (2s transcript poll + rotations), `titles.rs` (titles + starter message)|
 | `src/herdr/` | herdr Unix-socket client: `mod.rs` (client + models + errors), `event.rs` (subscription machinery), `wire.rs` (envelope + result payloads) |
 | `src/session/` | Transcript normalization: `mod.rs` (models + read_session), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs`/`pi.rs` (per-harness file parsers), `opencode.rs` (opencode SQLite store reader) |
@@ -328,6 +356,12 @@ wire it into git with `prek install`.
 - Run the bot with env config (see `src/config.rs`): `DISCORD_BOT_TOKEN` and
   `GUILD_ID` required; `ALLOWED_USER_ID` optional (when set, only that
   Discord user may talk to agents and launch them via forum posts);
+  `HERDR_CONTROL_COMMAND` (the `/herdr` one-shot control command —
+  whitespace-split, opt-in: unset registers no `/herdr`; the recommended
+  lean payload is `pi -p --no-session --tools bash --no-skills
+  --no-context-files --no-extensions --no-themes
+  --no-prompt-templates`), `HERDR_CONTROL_CWD` (default: home dir) and
+  `HERDR_CONTROL_TIMEOUT` (seconds, default 300);
   `RUST_LOG` default `warn,herdcord=trace`. Everything else (timeouts,
   harness, sync interval, state dir, socket path) is a sane default
   const in `src/config.rs`.
@@ -425,15 +459,21 @@ wire it into git with `prek install`.
   Directories).
 - `src/relay.rs` — conversation workers and the session-file sync delta.
 - `src/config.rs` — minimal env config: `DISCORD_BOT_TOKEN`, `GUILD_ID`,
-  `ALLOWED_USER_ID`. Sane defaults as consts: `DEFAULT_HARNESS`
+  `ALLOWED_USER_ID`, `HERDR_CONTROL_COMMAND`/`HERDR_CONTROL_CWD`/
+  `HERDR_CONTROL_TIMEOUT` (the `/herdr` control command knobs). Sane
+  defaults as consts: `DEFAULT_HARNESS`
   (`Harness::Pi`, the modal's preselected harness), `PROMPT_TIMEOUT`
   (300s),
   `OPERATION_TIMEOUT` (30s),
   `SYNC_INTERVAL` (600s), `MESSAGE_POLL_INTERVAL` (2s),
-  `MAX_SYNC_MESSAGES` (5), `CATCHUP_BACKLOG` (50). `socket_path()` honors
+  `MAX_SYNC_MESSAGES` (5), `CATCHUP_BACKLOG` (50), `CONTROL_TIMEOUT`
+  (300s) and `CONTROL_REPLY_LIMIT` (2000). `socket_path()` honors
   `HERDR_SOCKET_PATH`/`HERDR_SESSION`; `session_socket_path(name)` resolves
   a named session's socket regardless of env overrides; the state db lives
   under `$XDG_STATE_HOME/herdcord`.
+- `src/control.rs` — the `/herdr` process runner: `control_prompt`,
+  `run_control_command` (spawn + stdin pipe + process-group kill on
+  timeout), `truncate_reply`.
 - `flake.nix` — crane + rust-overlay nightly; `packages.default`; checks
   clippy/doc/fmt/deny/nextest; treefmt (nixfmt, statix, deadnix, rustfmt,
   taplo). The serenity and poise dependencies are git branches, so `nix
@@ -470,7 +510,11 @@ wire it into git with `prek install`.
   workspace/session upserts and lookups on an in-memory database,
   `src/forum/` tests the agent-name timestamp, the title selection, the
   modal construction, and the per-harness resume args, `src/config.rs`
-  tests state-dir resolution.
+  tests state-dir resolution and the control knobs (`control_cwd`/
+  `control_timeout` defaults and overrides), `src/control.rs` runs real
+  `cat`/`sh`/`sleep` processes (stdin pipe, stderr concatenation, env
+  injection, nonzero exit, process-group kill on timeout), and
+  `src/commands.rs` tests `build_commands` registration gating.
 - **Live tests** (`tests/herdr_live.rs`): gated behind `HERDR_LIVE_TESTS=1`
   (no-ops otherwise, so plain `cargo test`/nextest needs no herdr). Spawns
   real agents in `herdcord-live-{pid}`/`herdcord-events-{pid}`/

@@ -29,7 +29,7 @@ use serenity::{
 use tracing::{info, warn};
 
 use crate::{
-    Bot, BotResult, config::DEFAULT_HARNESS, error::BotError, forum, herdr::SessionPath,
+    Bot, BotResult, config::DEFAULT_HARNESS, control, error::BotError, forum, herdr::SessionPath,
     relay::RelayJob, session::Harness,
 };
 
@@ -58,7 +58,7 @@ pub struct BotFramework {
 pub fn framework(bot: &Bot) -> BotFramework {
     let poise_framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![agent(), workspace()],
+            commands: build_commands(&bot.config),
             on_error,
             ..Default::default()
         })
@@ -67,6 +67,17 @@ pub fn framework(bot: &Bot) -> BotFramework {
         poise: poise_framework,
         guild_id: bot.config.guild_id,
     }
+}
+
+/// The guild commands to register, in order. `/herdr` is only registered
+/// when a control command is configured (`HERDR_CONTROL_COMMAND`) — the
+/// bot stays inert without one.
+fn build_commands(config: &crate::config::Config) -> Vec<poise::Command<Bot, BotError>> {
+    let mut commands = vec![agent(), workspace()];
+    if config.herdr_control_command.is_some() {
+        commands.push(herdr());
+    }
+    commands
 }
 
 #[serenity::async_trait]
@@ -243,6 +254,74 @@ async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), 
         }
     });
 
+    Ok(())
+}
+
+/// run a one-shot control command against the main herdr session.
+///
+/// The command is the configured `HERDR_CONTROL_COMMAND` (e.g. a lean
+/// `pi -p`); the prompt, prefixed with a control-plane preamble, is piped
+/// to its stdin, and its output is relayed back, truncated to Discord's
+/// message cap. The command runs with `HERDR_ENV=1` and the bot's
+/// resolved herdr socket injected, so it acts on the main session — the
+/// one the forums mirror.
+#[poise::command(slash_command, check = "allowed")]
+async fn herdr(
+    ctx: poise::ApplicationContext<'_, Bot, BotError>,
+    #[description = "what the control command should do"] prompt: String,
+) -> Result<(), BotError> {
+    let bot = ctx.data().clone();
+    // `build_commands` registers `/herdr` only when `HERDR_CONTROL_COMMAND`
+    // is set, but a failed `register_in_guild` at startup can leave a
+    // stale `/herdr` in the guild after the config changed — so the guard
+    // below is reachable in practice, not just defensive.
+    let Some(command) = bot.config.herdr_control_command.clone() else {
+        ctx.send(
+            CreateReply::new()
+                .content("the control command is not configured.")
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    };
+    if prompt.trim().is_empty() {
+        ctx.send(
+            CreateReply::new()
+                .content("the prompt is empty.")
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // The command may run for the whole control timeout; defer so the
+    // interaction's 3-second response window is never missed, then edit
+    // the deferred response with the outcome.
+    ctx.defer_ephemeral().await?;
+
+    let socket = crate::config::socket_path();
+    let extra_env = [
+        ("HERDR_ENV", "1".to_owned()),
+        ("HERDR_SOCKET_PATH", socket.to_string_lossy().into_owned()),
+    ];
+    let prompt = control::control_prompt(&prompt);
+    let cwd = bot.config.control_cwd();
+    let timeout = bot.config.control_timeout();
+    let outcome = control::run_control_command(&command, &cwd, timeout, &prompt, &extra_env).await;
+    let reply = match outcome {
+        Ok(output) => {
+            let reply = control::truncate_reply(&output, crate::config::CONTROL_REPLY_LIMIT);
+            if reply.trim().is_empty() {
+                "the control command produced no output.".to_owned()
+            } else {
+                reply
+            }
+        }
+        Err(error) => format!("control command failed: {error}"),
+    };
+    ctx.interaction
+        .edit_response(ctx.http(), EditInteractionResponse::new().content(reply))
+        .await?;
     Ok(())
 }
 
@@ -511,8 +590,30 @@ mod tests {
 
     use poise::serenity_prelude::ModalInteractionData;
 
-    use super::{AgentSelection, expand_home, parse_agent_modal, resolve_folder};
-    use crate::{config::DEFAULT_HARNESS, session::Harness};
+    use super::{AgentSelection, build_commands, expand_home, parse_agent_modal, resolve_folder};
+    use crate::{config::DEFAULT_HARNESS, session::Harness, test_util::control_config};
+
+    #[test]
+    fn build_commands_omits_herdr_without_a_control_command() {
+        let config = control_config(None, None, None);
+        let commands = build_commands(&config);
+        let names = commands
+            .into_iter()
+            .map(|command| command.name.into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["agent", "workspace"]);
+    }
+
+    #[test]
+    fn build_commands_registers_herdr_with_a_control_command() {
+        let config = control_config(Some("cat"), None, None);
+        let commands = build_commands(&config);
+        let names = commands
+            .into_iter()
+            .map(|command| command.name.into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["agent", "workspace", "herdr"]);
+    }
 
     /// A throwaway directory for path tests, removed on drop. Each test
     /// uses its own name, so parallel tests never collide.

@@ -56,13 +56,54 @@ pub struct Config {
     /// When unset, everyone can.
     #[serde(default)]
     pub allowed_user_id: Option<UserId>,
+
+    /// The `/herdr` control command: a one-shot external command run with
+    /// the user's prompt piped to its stdin (see [`crate::control`]).
+    /// When unset, `/herdr` is not registered at all.
+    #[serde(default)]
+    pub herdr_control_command: Option<String>,
+
+    /// Working directory for the control command; defaults to the home
+    /// directory.
+    #[serde(default)]
+    pub herdr_control_cwd: Option<PathBuf>,
+
+    /// How long one control command may run, in seconds; defaults to
+    /// [`CONTROL_TIMEOUT`].
+    #[serde(default)]
+    pub herdr_control_timeout: Option<u64>,
 }
 
 impl Config {
     pub fn from_env() -> envy::Result<Self> {
         envy::from_env()
     }
+
+    /// The control command's working directory: `HERDR_CONTROL_CWD` when
+    /// set, else the home directory (falling back to `/tmp`).
+    #[must_use]
+    pub fn control_cwd(&self) -> PathBuf {
+        self.herdr_control_cwd
+            .clone()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+    }
+
+    /// How long one control command may run: `HERDR_CONTROL_TIMEOUT` when
+    /// set, else [`CONTROL_TIMEOUT`].
+    #[must_use]
+    pub fn control_timeout(&self) -> Duration {
+        self.herdr_control_timeout
+            .map_or(CONTROL_TIMEOUT, Duration::from_secs)
+    }
 }
+
+/// How long one `/herdr` control command may run before its process
+/// group is killed and the invocation reported as timed out.
+pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Discord's per-message content cap; the control command's reply is
+/// truncated to this.
+pub const CONTROL_REPLY_LIMIT: usize = 2000;
 
 /// The bot's state database directory: `$XDG_STATE_HOME/herdcord`, else
 /// `~/.local/state/herdcord`.
@@ -117,11 +158,40 @@ impl Debug for Config {
 
 #[cfg(test)]
 mod tests {
-    use super::state_dir;
+    use std::path::PathBuf;
+
+    use super::{CONTROL_TIMEOUT, state_dir};
+    use crate::test_util::control_config;
 
     #[test]
     fn state_dir_resolves_under_a_base_dir() {
         let path = state_dir();
         assert!(path.ends_with("herdcord"));
+    }
+
+    #[test]
+    fn control_timeout_defaults_to_300s() {
+        let config = control_config(None, None, None);
+        assert_eq!(config.control_timeout(), CONTROL_TIMEOUT);
+    }
+
+    #[test]
+    fn control_timeout_honors_the_override() {
+        let config = control_config(None, None, Some(42));
+        assert_eq!(config.control_timeout(), std::time::Duration::from_secs(42));
+    }
+
+    #[test]
+    fn control_cwd_defaults_to_the_home_directory() {
+        let config = control_config(None, None, None);
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        assert_eq!(config.control_cwd(), home);
+    }
+
+    #[test]
+    fn control_cwd_honors_the_override() {
+        let cwd = PathBuf::from("/some/control/dir");
+        let config = control_config(None, Some(cwd.clone()), None);
+        assert_eq!(config.control_cwd(), cwd);
     }
 }

@@ -1,11 +1,14 @@
 mod commands;
 pub mod config;
+mod control;
 pub mod db;
 mod error;
 mod forum;
 pub mod herdr;
 mod relay;
 mod session;
+#[cfg(test)]
+mod test_util;
 mod utils;
 
 use std::{
