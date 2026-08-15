@@ -72,8 +72,10 @@ impl serenity::Framework for BotFramework {
 
 /// The allowed-user gate for every command: everyone when no allowed user
 /// is configured, otherwise only that user.
-// The `async` is required: poise wraps check fns into a BoxFuture.
-#[expect(clippy::unused_async)]
+#[expect(
+    clippy::unused_async,
+    reason = "poise wraps check fns into a BoxFuture, so the async is required"
+)]
 async fn allowed(ctx: poise::Context<'_, Bot, BotError>) -> Result<bool, BotError> {
     Ok(ctx.data().is_allowed(ctx.author().id))
 }

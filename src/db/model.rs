@@ -1,13 +1,9 @@
 //! The persisted row types: a workspace and its forum channel, and a
 //! session bound to a forum post.
-//!
-//! The module-level `#[expect]` is for a rustc false positive: the
-//! `toasty::Model` derive emits a public `*Fields` struct (no `Debug`) at
-//! the model's call-site span, and `missing_debug_implementations` fires on
-//! it — pointed at the model's own line, where an item-level `#[expect]`
-//! cannot reach it. If a toolchain ever fixes the false positive, the
-//! unfulfilled expectation surfaces and this can be removed.
-#![expect(missing_debug_implementations)]
+#![expect(
+    missing_debug_implementations,
+    reason = "rustc false positive: the `toasty::Model` derive emits a public `*Fields` struct at the model's call-site span and the lint fires on it, pointed at the model's own line"
+)]
 
 /// A herdr workspace and its persistent forum channel.
 #[derive(Debug, Clone, toasty::Model)]
