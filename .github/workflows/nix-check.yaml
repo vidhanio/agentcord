@@ -3,8 +3,12 @@ name: nix check
 on:
   workflow_call:
     inputs:
-      check:
-        description: nix check to run
+      name:
+        description: name for the check job
+        required: true
+        type: string
+      command:
+        description: command to run after nix setup
         required: true
         type: string
 
@@ -14,7 +18,7 @@ permissions:
 
 jobs:
   check:
-    name: check ${{ inputs.check }}
+    name: ${{ inputs.name }}
     runs-on: ubuntu-latest
 
     steps:
@@ -33,60 +37,5 @@ jobs:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('**/flake.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
 
-      - name: run flake check
-        if: inputs.check == 'flake'
-        run: nix flake check
-
-      - name: run home manager check
-        if: inputs.check == 'home-manager'
-        run: |
-          nix eval --impure --show-trace --expr '
-          let
-            flake = builtins.getFlake (toString ./.);
-            module = flake.homeManagerModules.default;
-            pkgs = import flake.inputs.nixpkgs {
-              system = "x86_64-linux";
-              overlays = [ flake.inputs.rust-overlay.overlays.default ];
-            };
-            moduleResult = module {
-              inherit pkgs;
-              lib = pkgs.lib;
-              config = {
-                programs.herdcord = {
-                  enable = true;
-                  settings = {
-                    discord = {
-                      bot_token = "token";
-                      guild_id = 1;
-                      allowed_user_id = 2;
-                    };
-                  };
-                };
-              };
-            };
-          in
-          assert
-            moduleResult.options.programs.herdcord.enable.description
-            == "Whether to enable herdcord.";
-          assert
-            moduleResult.options.programs.herdcord.package.default.pname
-            == "herdcord";
-          assert moduleResult.options.programs.herdcord.settings.default == { };
-          assert moduleResult.config.condition;
-          assert builtins.length moduleResult.config.content.home.packages == 1;
-          assert
-            builtins.hasAttr "herdcord/config.toml"
-            moduleResult.config.content.xdg.configFile;
-          true
-          '
-
-      - name: run format check
-        if: inputs.check == 'format'
-        run: nix build .#checks.x86_64-linux.treefmt
-
-      - name: validate check
-        run: |
-          case "${{ inputs.check }}" in
-            flake|home-manager|format) ;;
-            *) echo "unknown nix check: ${{ inputs.check }}" >&2; exit 1 ;;
-          esac
+      - name: run check
+        run: ${{ inputs.command }}

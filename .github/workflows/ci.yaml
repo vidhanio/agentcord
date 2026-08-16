@@ -93,7 +93,8 @@ jobs:
     name: check nix
     uses: ./.github/workflows/nix-check.yaml
     with:
-      check: flake
+      name: check nix
+      command: nix flake check
     permissions:
       actions: write
       contents: read
@@ -102,7 +103,47 @@ jobs:
     name: check home manager
     uses: ./.github/workflows/nix-check.yaml
     with:
-      check: home-manager
+      name: check home manager
+      command: |
+        nix eval --impure --show-trace --expr '
+        let
+          flake = builtins.getFlake (toString ./.);
+          module = flake.homeManagerModules.default;
+          pkgs = import flake.inputs.nixpkgs {
+            system = "x86_64-linux";
+            overlays = [ flake.inputs.rust-overlay.overlays.default ];
+          };
+          moduleResult = module {
+            inherit pkgs;
+            lib = pkgs.lib;
+            config = {
+              programs.herdcord = {
+                enable = true;
+                settings = {
+                  discord = {
+                    bot_token = "token";
+                    guild_id = 1;
+                    allowed_user_id = 2;
+                  };
+                };
+              };
+            };
+          };
+        in
+        assert
+          moduleResult.options.programs.herdcord.enable.description
+          == "Whether to enable herdcord.";
+        assert
+          moduleResult.options.programs.herdcord.package.default.pname
+          == "herdcord";
+        assert moduleResult.options.programs.herdcord.settings.default == { };
+        assert moduleResult.config.condition;
+        assert builtins.length moduleResult.config.content.home.packages == 1;
+        assert
+          builtins.hasAttr "herdcord/config.toml"
+          moduleResult.config.content.xdg.configFile;
+        true
+        '
     permissions:
       actions: write
       contents: read
@@ -111,7 +152,8 @@ jobs:
     name: check format
     uses: ./.github/workflows/nix-check.yaml
     with:
-      check: format
+      name: check format
+      command: nix build .#checks.x86_64-linux.treefmt
     permissions:
       actions: write
       contents: read
