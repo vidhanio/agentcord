@@ -9,12 +9,12 @@ publish = false
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 color-eyre = "0.6"
+config = { version = "0.15", default-features = false, features = ["toml"] }
 dirs = "5"
 humantime = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toasty = { version = "0.10.0", features = ["sqlite"] }
-toml = "1"
 # The serenity `next` branch (0.13 dev line): Component V2, modal select
 # values, reworked ratelimiter.
 serenity = { git = "https://github.com/serenity-rs/serenity", branch = "next", default-features = false, features = [

@@ -31,7 +31,10 @@ guild_id = 1234567890
 allowed_user_id = 1234567890
 ```
 
-see [`config.example.toml`](config.example.toml) for all knobs.
+see [`config.example.toml`](config.example.toml) for all knobs. String
+values support `${NAME}` environment expansion after TOML parsing; values
+containing quotes or other TOML syntax are safe. If `NAME` is unset, the
+`${NAME}` placeholder remains literal.
 
 ## run
 

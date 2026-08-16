@@ -454,6 +454,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "config"
+version = "0.15.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b85f248a4de22d204ceabc6299d89d2c70fbd7f09fea53c06c852369652d8139"
+dependencies = [
+ "pathdiff",
+ "serde_core",
+ "toml",
+ "winnow",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1113,6 +1125,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "color-eyre",
+ "config",
  "dirs",
  "humantime",
  "jiff",
@@ -1125,7 +1138,6 @@ dependencies = [
  "thiserror 2.0.20",
  "toasty",
  "tokio",
- "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1795,6 +1807,12 @@ dependencies = [
  "smallvec",
  "windows-link",
 ]
+
+[[package]]
+name = "pathdiff"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
 name = "pem-rfc7468"

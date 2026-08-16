@@ -6,6 +6,11 @@
 //! environment left is what herdr itself injects
 //! (`HERDR_SOCKET_PATH`/`HERDR_SESSION`), honored as a fallback for the
 //! socket resolution and as a dev override.
+//!
+//! String leaves support `${NAME}` environment-variable expansion. Expansion
+//! happens after the `config` crate parses the file, so an environment value
+//! cannot change the TOML structure or escaping. If `NAME` is not set, its
+//! `${NAME}` placeholder is left unchanged.
 
 use std::{
     fmt::{self, Debug, Formatter},
@@ -13,6 +18,7 @@ use std::{
     time::Duration,
 };
 
+use config::{Config as Settings, File, FileFormat, Value, ValueKind};
 use serde::Deserialize;
 use serenity::all::{GuildId, UserId};
 
@@ -230,36 +236,133 @@ impl Config {
     /// Loads the config from `path`, with a helpful error naming the
     /// path and a sample when the file is missing.
     ///
+    /// The file is loaded through the `config` crate's synchronous builder.
+    /// String leaves are expanded after parsing; see the module-level
+    /// documentation for the supported environment syntax.
+    ///
     /// # Errors
     ///
     /// Returns [`BotError::Other`] when the file cannot be read or is not
-    /// valid TOML.
+    /// valid TOML/configuration.
     pub fn load(path: &Path) -> Result<Self, BotError> {
-        let raw = std::fs::read_to_string(path).map_err(|error| {
-            BotError::Other(format!(
-                "no configuration at {} ({error}); create it with at least a \
-                 `[discord]` table holding `bot_token`, `guild_id`, and \
-                 `allowed_user_id`, e.g.\n{sample}",
-                path.display(),
-                sample = sample_config()
-            ))
-        })?;
-        Self::parse(&raw).map_err(|error| {
-            BotError::Other(format!(
-                "invalid configuration at {}: {error}",
-                path.display()
-            ))
+        Self::from_source(File::from(path).format(FileFormat::Toml)).map_err(|error| {
+            if path.exists() {
+                BotError::Other(format!(
+                    "invalid configuration at {}: {error}",
+                    path.display()
+                ))
+            } else {
+                BotError::Other(format!(
+                    "no configuration at {} ({error}); create it with at least a \
+                     `[discord]` table holding `bot_token`, `guild_id`, and \
+                     `allowed_user_id`, e.g.\n{sample}",
+                    path.display(),
+                    sample = sample_config()
+                ))
+            }
         })
     }
 
-    /// Parses a config from TOML text.
+    /// Parses a config from TOML text through the `config` crate builder.
     ///
     /// # Errors
     ///
-    /// Returns the TOML error when the text is not valid config.
-    pub fn parse(raw: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(raw)
+    /// Returns the `config` crate error when the text is not valid config or
+    /// does not contain the required fields.
+    pub fn parse(raw: &str) -> Result<Self, config::ConfigError> {
+        Self::from_source(File::from_str(raw, FileFormat::Toml))
     }
+
+    fn from_source<S>(source: S) -> Result<Self, config::ConfigError>
+    where
+        S: config::Source + Send + Sync + 'static,
+    {
+        let mut settings = Settings::builder().add_source(source).build()?;
+        expand_environment_values(&mut settings, &|name| std::env::var(name).ok());
+        settings.try_deserialize()
+    }
+}
+
+/// Expands environment placeholders in all string leaves of a parsed
+/// configuration tree. The tree is already parsed by `config`, so replacement
+/// values are data, not TOML source.
+fn expand_environment_values<F>(settings: &mut Settings, lookup: &F)
+where
+    F: Fn(&str) -> Option<String>,
+{
+    expand_value(&mut settings.cache, lookup);
+}
+
+fn expand_value<F>(value: &mut Value, lookup: &F)
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match &mut value.kind {
+        ValueKind::String(text) => *text = expand_string(text, lookup),
+        ValueKind::Table(table) => {
+            for value in table.values_mut() {
+                expand_value(value, lookup);
+            }
+        }
+        ValueKind::Array(values) => {
+            for value in values {
+                expand_value(value, lookup);
+            }
+        }
+        ValueKind::Nil
+        | ValueKind::Boolean(_)
+        | ValueKind::I64(_)
+        | ValueKind::I128(_)
+        | ValueKind::U64(_)
+        | ValueKind::U128(_)
+        | ValueKind::Float(_) => {}
+    }
+}
+
+/// Expands `${NAME}` placeholders in one string. A single pass is
+/// intentional: an environment value containing another placeholder is not
+/// interpreted recursively.
+fn expand_string<F>(value: &str, lookup: &F) -> String
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut expanded = String::with_capacity(value.len());
+    let mut remaining = value;
+
+    while let Some(start) = remaining.find("${") {
+        expanded.push_str(&remaining[..start]);
+        let placeholder = &remaining[start..];
+        let after_open = &placeholder[2..];
+        let Some(end) = after_open.find('}') else {
+            expanded.push_str(placeholder);
+            return expanded;
+        };
+
+        let name = &after_open[..end];
+        let token_len = 2 + end + 1;
+        if is_environment_name(name) {
+            if let Some(replacement) = lookup(name) {
+                expanded.push_str(&replacement);
+            } else {
+                expanded.push_str(&placeholder[..token_len]);
+            }
+        } else {
+            expanded.push_str(&placeholder[..token_len]);
+        }
+        remaining = &after_open[end + 1..];
+    }
+
+    expanded.push_str(remaining);
+    expanded
+}
+
+fn is_environment_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 impl HerdrConfig {
@@ -377,6 +480,8 @@ allowed_user_id = 1234567890
 # control_reply_limit = 2000        # default: discord's message cap
 # max_sync_messages = 5
 # catchup_backlog = 50
+# String values support `${NAME}` environment expansion. Missing variables
+# remain as the literal `${NAME}` text.
 
 [herdr]
 # socket_path = "/path/to/herdr.sock"
@@ -452,9 +557,18 @@ impl Debug for Config {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, time::Duration};
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
-    use super::{CONTROL_TIMEOUT, Delays, config_path, sample_config, state_dir};
+    use config::{Config as Settings, File, FileFormat};
+
+    use super::{
+        CONTROL_TIMEOUT, Config, Delays, config_path, expand_environment_values, sample_config,
+        state_dir,
+    };
     use crate::test_util::control_config;
 
     #[test]
@@ -467,6 +581,31 @@ mod tests {
     fn config_path_resolves_under_a_config_dir() {
         let path = config_path();
         assert!(path.ends_with("herdcord/config.toml"));
+    }
+
+    #[test]
+    fn config_loads_from_a_file_with_the_builder() {
+        static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "herdcord-config-test-{}-{}.toml",
+            std::process::id(),
+            NEXT_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(
+            &path,
+            "[discord]\nbot_token = \"token\"\nguild_id = 7\nallowed_user_id = 8\n",
+        )
+        .expect("write test config");
+
+        let config = Config::load(&path).expect("builder loads config");
+        std::fs::remove_file(path).expect("remove test config");
+
+        assert_eq!(config.discord.guild_id, serenity::all::GuildId::new(7));
+        assert_eq!(
+            config.discord.allowed_user_id,
+            serenity::all::UserId::new(8)
+        );
+        assert_eq!(config.delays, Delays::default());
     }
 
     #[test]
@@ -532,6 +671,58 @@ mod tests {
         );
         assert_eq!(config.herdr.default_harness, crate::session::Harness::Pi);
         assert_eq!(config.delays, Delays::default());
+    }
+
+    #[test]
+    fn environment_expansion_replaces_string_leaves_after_parsing() {
+        let raw = r#"
+            [discord]
+            bot_token = "${BOT_TOKEN}"
+            guild_id = 1
+            allowed_user_id = 2
+
+            [herdr]
+            socket_path = "${SOCKET_PATH}"
+            control_command = "run ${COMMAND}"
+            control_timeout = "${TIMEOUT}"
+            "#;
+        let values = [
+            ("BOT_TOKEN", "token with \"quotes\" and \\\"backslashes\\\""),
+            ("SOCKET_PATH", "/run/herdr.sock"),
+            ("COMMAND", "say \"hello\""),
+            ("TIMEOUT", "2m"),
+        ];
+        let mut settings = Settings::builder()
+            .add_source(File::from_str(raw, FileFormat::Toml))
+            .build()
+            .expect("builder parses config");
+        expand_environment_values(&mut settings, &|name| {
+            values
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_owned())
+        });
+        let config: Config = settings
+            .try_deserialize()
+            .expect("expanded config deserializes");
+
+        assert_eq!(config.discord.bot_token, values[0].1);
+        assert_eq!(config.herdr.socket_path, Some(PathBuf::from(values[1].1)));
+        assert_eq!(
+            config.herdr.control_command.as_deref(),
+            Some("run say \"hello\"")
+        );
+        assert_eq!(config.herdr.control_timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn missing_environment_variables_remain_literal_and_are_not_recursive() {
+        let expanded =
+            super::expand_string("before-${MISSING}-${NESTED}-after", &|name| match name {
+                "NESTED" => Some("${MISSING}".to_owned()),
+                _ => None,
+            });
+        assert_eq!(expanded, "before-${MISSING}-${MISSING}-after");
     }
 
     #[test]

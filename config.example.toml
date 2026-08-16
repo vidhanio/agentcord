@@ -4,6 +4,8 @@
 # ~/.config/herdcord/config.toml) and fill in the required keys. the path
 # can be overridden with `--config <path>` or `HERDCORD_CONFIG=<path>`.
 # everything commented below is optional and shows its default.
+# String values support `${NAME}` environment expansion. Missing variables
+# remain as the literal `${NAME}` text; expansion happens after TOML parsing.
 
 [discord]
 bot_token = "..."
