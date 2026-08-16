@@ -326,7 +326,7 @@ Discord ──► poise framework (src/commands/, serenity Framework)
 | `src/db/` | SQLite state: `mod.rs` (Db wrapper + queries), `model.rs` (row types), `migrate.rs` (schema push + legacy migrations) |
 | `src/commands/` | Slash commands: `mod.rs` (poise framework wiring), `agent.rs` (the `/agent` modal + launch), `herdr.rs` (the `/herdr` control command) |
 | `tests/` | `herdr_live.rs` (live integration, gated) and `fixtures/api/` (captured herdr API JSON, embedded via `include_str!`) |
-| `.github/workflows/` | CI — `ci-cd.yaml` (test, test-docs, check/clippy, check-docs, check-format via the flake's treefmt check; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs, nix for formatting) and `security-audit.yaml` (daily + on manifest changes, cargo-deny); `dependabot.yml` (weekly cargo + flake-input updates, flake inputs grouped into one PR) |
+| `.github/workflows/` | CI — `ci-cd.yaml` (test, test-docs, check/clippy, docs.rs-compatible `check-docs`, `check-nix` via `nix flake check`, `check-home-manager` for `homeManagerModules`, and check-format via the flake's treefmt check; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs, nix for Nix gates) and `security-audit.yaml` (daily + on manifest changes, cargo-deny); `dependabot.yml` (weekly cargo, flake-input, and GitHub Actions updates) |
 
 ## Development Commands
 
@@ -561,12 +561,13 @@ wire it into git with `prek install`.
 - **QA gates**: clippy `--all-targets -- -D warnings` (pedantic+nursery),
   nightly `cargo fmt --check`, `cargo deny check`, `nix flake check`
   (clippy, doc, fmt, treefmt, deny, nextest). CI runs the same gates
-  directly — `cargo test --all-targets` on stable, clippy/doc on nightly,
-  formatting via the flake's treefmt check
-  (`nix build .#checks.x86_64-linux.treefmt`), and `cargo-deny` (see
-  `.github/workflows/`); `nix flake check` remains the local hermetic
-  equivalent. Every commit is additionally gated by a prek hook running
-  `treefmt --ci` on the whole tree (`.pre-commit-config.yaml`).
+  directly — `cargo test --all-targets` on stable, clippy and docs.rs-compatible
+  docs on nightly, Nix outputs via `nix flake check`, the `homeManagerModules`
+  output via a focused module evaluation, formatting via the flake's treefmt
+  check (`nix build .#checks.x86_64-linux.treefmt`), and `cargo-deny` (see
+  `.github/workflows/`); `nix flake check` remains the
+  local hermetic equivalent. Every commit is additionally gated by a prek
+  hook running `treefmt --ci` on the whole tree (`.pre-commit-config.yaml`).
 - **Coverage expectations**: no coverage tooling; correctness is enforced by
   the fixture tests, the session parser + db tests, the live tests, and
   clippy's pedantic set. New herdr wire shapes should get a fixture +

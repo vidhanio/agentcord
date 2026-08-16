@@ -9,7 +9,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    groups:
-      flake-inputs:
-        patterns:
-          - '*'
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

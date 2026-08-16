@@ -82,8 +82,86 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Install `cargo-docs-rs`
+        uses: dtolnay/install@cargo-docs-rs
+
       - name: Check documentation
-        run: cargo doc --no-deps --all-features
+        run: cargo docs-rs --locked
+
+  check-nix:
+    name: Check Nix Outputs
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Cache Nix
+        uses: DeterminateSystems/magic-nix-cache-action@v9
+
+      - name: Check flake outputs
+        run: nix flake check
+
+  check-home-manager:
+    name: Check Home Manager Module
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Cache Nix
+        uses: DeterminateSystems/magic-nix-cache-action@v9
+
+      - name: Check Home Manager output
+        run: |
+          nix eval --impure --show-trace --expr '
+          let
+            flake = builtins.getFlake (toString ./.);
+            module = flake.homeManagerModules.default;
+            pkgs = import flake.inputs.nixpkgs {
+              system = "x86_64-linux";
+              overlays = [ flake.inputs.rust-overlay.overlays.default ];
+            };
+            moduleResult = module {
+              inherit pkgs;
+              lib = pkgs.lib;
+              config = {
+                programs.herdcord = {
+                  enable = true;
+                  settings = {
+                    discord = {
+                      bot_token = "token";
+                      guild_id = 1;
+                      allowed_user_id = 2;
+                    };
+                  };
+                };
+              };
+            };
+          in
+          assert
+            moduleResult.options.programs.herdcord.enable.description
+            == "Whether to enable herdcord.";
+          assert
+            moduleResult.options.programs.herdcord.package.default.pname
+            == "herdcord";
+          assert moduleResult.options.programs.herdcord.settings.default == { };
+          assert moduleResult.config.condition;
+          assert builtins.length moduleResult.config.content.home.packages == 1;
+          assert
+            builtins.hasAttr "herdcord/config.toml"
+            moduleResult.config.content.xdg.configFile;
+          true
+          '
 
   check-format:
     name: Check Formatting
