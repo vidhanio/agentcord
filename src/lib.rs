@@ -2,7 +2,7 @@ mod commands;
 pub mod config;
 pub mod control;
 pub mod db;
-pub mod error;
+mod error;
 mod forum;
 pub mod herdr;
 mod relay;
@@ -17,7 +17,7 @@ use std::{
 };
 
 pub use db::Db;
-use error::BotError;
+pub use error::BotError;
 use forum::Forum;
 use herdr::Herdr;
 use relay::{Relay, RelayJob};
