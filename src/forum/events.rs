@@ -9,7 +9,9 @@ use std::{
     time::Duration,
 };
 
-use serenity::all::{ChannelId, Context, EditThread, ThreadId, Typing as TypingHandle};
+use serenity::all::{
+    ChannelId, Context, CreateMessage, EditThread, ThreadId, Typing as TypingHandle,
+};
 use tracing::{info, warn};
 
 use crate::{
@@ -356,6 +358,16 @@ impl Forum {
 
                 self.sync_agent_typing(typing, ctx, &agent).await;
                 self.sync_agent_post(ctx, &agent).await;
+                // A blocked agent is waiting for input; the user should see
+                // that without having to poke it. Posted on every blocked
+                // status event — the event fires on the transition into
+                // blocked, so a repeated notice means a genuine re-block,
+                // and no dedupe window hides one.
+                if agent.status() == AgentStatus::Blocked
+                    && let Err(error) = self.post_blocked_notice(ctx, &agent).await
+                {
+                    warn!(?error, %pane_id, "failed to post blocked notice");
+                }
                 false
             }
             Some(EventKind::PaneAgentDetected) => {
@@ -446,6 +458,26 @@ impl Forum {
                 warn!(?error, %workspace_id, "failed to fetch updated workspace");
             }
         }
+    }
+
+    /// Posts "the agent is **blocked**" into the session's post: a stuck
+    /// agent is visible without anyone poking it. No dedupe window — each
+    /// blocked status event is a genuine state report.
+    async fn post_blocked_notice(&self, ctx: &Context, agent: &Agent) -> BotResult<()> {
+        let Some(session) = self.session_for_agent(agent).await else {
+            return Ok(());
+        };
+        let Some(post_id) = session.post_channel_id else {
+            return Ok(());
+        };
+        let post = from_i64(post_id)?;
+        post.widen()
+            .send_message(
+                &ctx.http,
+                CreateMessage::new().content("the agent is **blocked** — it's waiting for input."),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Starts or stops the session post's typing indicator to match the

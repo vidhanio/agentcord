@@ -220,8 +220,7 @@ async fn launch_from_modal(
     }
 
     // The agent's session reference may lag the launch; the empty path
-    // makes the post-prompt sync a no-op until the poll picks the session
-    // up.
+    // resolves to no row yet, which surfaces the wait for the post.
     let session_path = started.agent_session.as_ref().map_or_else(
         || SessionPath::from(String::new()),
         |session| session.value.clone(),
@@ -244,7 +243,6 @@ async fn launch_from_modal(
                 &started.pane_id,
                 RelayJob {
                     channel_id: forum::from_i64(post)?,
-                    session_path,
                     text: prompt.to_owned(),
                 },
             )

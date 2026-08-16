@@ -19,7 +19,7 @@ use std::{
 pub use db::Db;
 use error::BotError;
 use forum::Forum;
-use herdr::{Herdr, SessionPath};
+use herdr::Herdr;
 use relay::{Relay, RelayJob};
 use serenity::all::{
     ChannelId, ClientBuilder, Context, EventHandler, FullEvent, GatewayIntents, HttpBuilder,
@@ -75,7 +75,7 @@ impl Bot {
         );
 
         let forum = Arc::new(Forum::new(config.clone(), herdr.clone(), db.clone()));
-        let relay = Arc::new(Relay::new(herdr.clone(), forum.clone()));
+        let relay = Arc::new(Relay::new(herdr.clone()));
 
         Ok(Self {
             config,
@@ -118,10 +118,6 @@ impl Bot {
     ) {
         match self.forum.resume_session(ctx, session).await {
             Ok(Some(started)) => {
-                let session_path = started.agent_session.as_ref().map_or_else(
-                    || SessionPath::from(session.session_path.clone()),
-                    |agent_session| agent_session.value.clone(),
-                );
                 if let Err(error) = self
                     .relay
                     .submit(
@@ -129,7 +125,6 @@ impl Bot {
                         &started.pane_id,
                         RelayJob {
                             channel_id: ChannelId::new(message.channel_id.get()),
-                            session_path,
                             text: message.content.clone().into(),
                         },
                     )
@@ -294,7 +289,6 @@ impl Bot {
                 target,
                 RelayJob {
                     channel_id: ChannelId::new(message.channel_id.get()),
-                    session_path: SessionPath::from(session.session_path.clone()),
                     text: message.content.clone().into(),
                 },
             )

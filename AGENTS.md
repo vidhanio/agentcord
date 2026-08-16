@@ -95,7 +95,7 @@ agents.
   launch used: spawn in the workspace, bind the session to a forum post,
   relay the prompt, reply ephemerally with the thread link. Any manual
   post in a managed forum is deleted silently, and the bot's own posts
-  get their transcripts mirrored by the 2s poll.
+  get their transcripts mirrored by the 1s poll.
 - **`/herdr` is a configurable escape hatch.** When `HERDR_CONTROL_COMMAND`
   is set, `/herdr` spawns that one-shot external command (e.g. a lean
   `pi -p`) with the user's prompt piped to its stdin — prefixed with a
@@ -125,15 +125,15 @@ agents.
   event-driven; the poll's recovery escalation and the reconcile's existence probes
   remain only as backstops for events missed during a disconnect.
 - **One writer per concern.** The transcript mirror (posting agent turns,
-  tool embeds, user echoes) runs only from the 2s poll and the relay's
-  settle (the immediate reply path); events and the reconcile do post
+  tool embeds, user echoes) runs only from the 1s poll; events and the
+  reconcile do post
   metadata only — tags, title, unarchive, typing — never reading the
   transcript. `pane.agent_detected` only triggers the re-subscribe; the
   post-reconnect reconcile applies the new agent's metadata and the poll
   mirrors its transcript. The starter message refreshes only on post
   creation, session death, and resume. The poll's deleted-post recovery
   is the one rare full pass (ensure + metadata + mirror). The `sync_lock`
-  serializes the mirror passes (poll vs settle) and the ensure passes.
+  serializes the mirror and ensure passes.
 - **Conversations come from session files.** The bot reads each agent's
   transcript file directly and normalizes it with per-harness parsers
   (`src/session/`: `omp.rs`, `claude.rs`, `codex.rs`, `pi.rs` JSONL formats
@@ -193,17 +193,11 @@ agents.
 Discord ──► Bot event handler (src/lib.rs, serenity EventHandler::dispatch)
               │  message in a live session's forum post ──► Relay.submit (src/relay.rs)
               │                              │ per-agent FIFO worker (mpsc, 1 at a time;
-              │                              │ job carries session_path + post channel)
+              │                              │ job carries the post channel + text)
               │                              ▼
               │                    herdr agent prompt, delivered immediately (no wait)
-              │                              │ turn settlement tracked in a detached
-              │                              │ task: wait until idle/done/blocked
-              │                              │ ──► mirror session file + blocked notice
-              │                              ▼
-              │                    read_session(session file) ──► messages since last sync
-              │                              │ (delta tracked on the SessionRow)
-              │                              ▼
-              │                    chunked messages + tool embeds + tag update
+              │                              │ replies mirror via the 1s poll;
+              │                              │ blocked notices come from the status event
               │
               │  message in a dead session's post ──► Forum::resume_session
               │                              (native harness resume in the same
@@ -227,13 +221,13 @@ Discord ──► poise framework (src/commands/, serenity Framework)
               │         command (process group, timeout) ──► truncated
               │         ephemeral reply (HERDR_ENV=1 + socket injected)
               │
-              ├─ poll task (2s tick, src/forum/poll.rs)
+              ├─ poll task (1s tick, src/forum/poll.rs)
               │    stats every live session's transcript: mirrors the
               │    changed ones (unchanged = one stat, skipped entirely)
               │    + probes for transcript rotations (staleness + adoption)
               │
               └─ event loop (long-lived events.subscribe stream, src/forum/events.rs)
-                   pane.agent_status_changed (per agent pane) ──► typing + instant tags/title
+                   pane.agent_status_changed (per agent pane) ──► typing + tags/title (+ blocked notice)
                    pane.agent_detected ──► re-subscribe (reconcile applies metadata)
                    pane.closed / pane.exited / workspace.closed ──► post inactivated
                    workspace.created ──► forum created right away
@@ -278,7 +272,7 @@ Discord ──► poise framework (src/commands/, serenity Framework)
   sessions instantly — herdr emits no per-pane events for it;
   `workspace.created` gets its forum created immediately via the same
   sync path as updated/renamed); `poll.rs`
-  the 2s transcript poll + rotation adoption; `titles.rs` the post-title
+  the 1s transcript poll + rotation adoption; `titles.rs` the post-title
   selection and the one-line starter message (`` `pane` · cwd `…` ·
   session `…` ``, the pane part reading `inactive` once the agent is
   gone). Agents are spawned with an explicitly declared workspace + cwd:
@@ -310,14 +304,10 @@ Discord ──► poise framework (src/commands/, serenity Framework)
   same-channel-guarded removal, 600s idle timeout). `process_job` delivers
   the prompt **immediately** (`agent.prompt` without `wait` — herdr writes
   it to the agent's input and answers at once), so a long turn never holds
-  the queue: later messages reach the agent as they arrive instead of
-  sitting invisible behind the previous job's settle. Turn settlement runs
-  in a **detached task per message** (`settle_job`): `agent.wait` loop
-  until idle/done/blocked, then mirror the session file (post the new
-  messages since the last mirror) and post the
-  blocked notice (deduped per pane within 30s, since several outstanding
-  prompts can settle into one blocked state). The typing indicator is the
-  event loop's, driven by the working status event.
+  the queue: later messages reach the agent as they arrive. The relay never
+  waits on a turn: the 1s poll mirrors the reply, and the event loop posts
+  the blocked notice on the blocked status event. The worker dies after
+  600s of silence, removing its own entry.
 - `src/lib.rs` (Bot + event handler) — the serenity `EventHandler` in its
   `dispatch` form (Ready spawns the poll + event loop; ThreadCreate,
   ThreadDelete, and ChannelDelete are delegated to the forum's thread/channel
@@ -330,7 +320,7 @@ Discord ──► poise framework (src/commands/, serenity Framework)
 | Path | Purpose |
 |---|---|
 |`src/`|Bot core: `lib.rs` (Bot + event-handler dispatch), `config.rs`, `error.rs`, `relay.rs`, `control.rs` (the `/herdr` process runner), `test_util.rs` (shared test fixtures)|
-|`src/forum/`|Forum-side state, split by feature: `mod.rs` (struct + shared state), `tags.rs` (status/harness tag management), `workspace.rs` (workspace↔forum lifecycle, worktree resolution, stale-row pruning), `post.rs` (session↔post binding lifecycle, thread handling), `spawn.rs` (agent spawn + naming + cwd), `resume.rs` (dead-session resume), `lookup.rs` (Discord channel resolution), `sync.rs` (transcript mirror), `echo.rs` (user webhook echoes), `render.rs` (tool-call rendering + message splitting), `events.rs` (event loop + reconcile + pane lifecycle), `poll.rs` (2s transcript poll + rotations), `titles.rs` (titles + starter message)|
+|`src/forum/`|Forum-side state, split by feature: `mod.rs` (struct + shared state), `tags.rs` (status/harness tag management), `workspace.rs` (workspace↔forum lifecycle, worktree resolution, stale-row pruning), `post.rs` (session↔post binding lifecycle, thread handling), `spawn.rs` (agent spawn + naming + cwd), `resume.rs` (dead-session resume), `lookup.rs` (Discord channel resolution), `sync.rs` (transcript mirror), `echo.rs` (user webhook echoes), `render.rs` (tool-call rendering + message splitting), `events.rs` (event loop + reconcile + pane lifecycle), `poll.rs` (1s transcript poll + rotations), `titles.rs` (titles + starter message)|
 | `src/herdr/` | herdr Unix-socket client, split by concern: `mod.rs` (re-exports), `model.rs` (agent/workspace records + status + ids), `error.rs` (error type), `client.rs` (the socket client + API methods), `event.rs` (subscription machinery), `wire.rs` (envelope + result payloads) |
 | `src/session/` | Transcript normalization: `mod.rs` (Harness + read_session dispatch), `model.rs` (conversation model), `title.rs` (transcript-sourced titles), `common.rs` (shared parsing skeleton), `omp.rs`/`claude.rs`/`codex.rs`/`pi.rs` (per-harness file parsers, each with its parser tests), `opencode.rs` (opencode SQLite store reader) |
 | `src/db/` | SQLite state: `mod.rs` (Db wrapper + queries), `model.rs` (row types), `migrate.rs` (schema push + legacy migrations) |
@@ -431,7 +421,7 @@ wire it into git with `prek install`.
   four small collections on `Forum` (`sessions_by_pane`, `resuming`,
   `tool_messages`, `transcript_stamps`), and `sync_lock` (an
   `Arc<tokio::Mutex<()>>`) serializes
-  transcript mirrors so the poll and the relay settle can never
+  transcript mirrors so two mirror passes can never
   double-post from the same cursor — mirrors also re-read the row under
   the lock,
   because a caller's copy may predate another mirror's commits. Beware:
@@ -491,10 +481,9 @@ wire it into git with `prek install`.
   `ALLOWED_USER_ID`, `HERDR_CONTROL_COMMAND`/`HERDR_CONTROL_CWD`/
   `HERDR_CONTROL_TIMEOUT` (the `/herdr` control command knobs). Sane
   defaults as consts: `DEFAULT_HARNESS`
-  (`Harness::Pi`, the modal's preselected harness), `PROMPT_TIMEOUT`
-  (300s),
+  (`Harness::Pi`, the modal's preselected harness),
   `OPERATION_TIMEOUT` (30s),
-  `SYNC_INTERVAL` (600s), `MESSAGE_POLL_INTERVAL` (2s),
+  `SYNC_INTERVAL` (600s), `MESSAGE_POLL_INTERVAL` (1s),
   `MAX_SYNC_MESSAGES` (5), `CATCHUP_BACKLOG` (50), `CONTROL_TIMEOUT`
   (300s) and `CONTROL_REPLY_LIMIT` (2000). `socket_path()` honors
   `HERDR_SOCKET_PATH`/`HERDR_SESSION`; `session_socket_path(name)` resolves

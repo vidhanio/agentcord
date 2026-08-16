@@ -17,10 +17,6 @@ use crate::session::Harness;
 /// tag.
 pub const DEFAULT_HARNESS: Harness = Harness::Pi;
 
-/// How long one settle-wait call waits in a single request before the
-/// relay continues waiting silently.
-pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
-
 /// Timeout for individual herdr API calls.
 pub const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -28,10 +24,12 @@ pub const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// handles updates instantly in between.
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(600);
 
-/// How often the transcript watcher refreshes its file watches (sessions
-/// come and go) and checks for transcript rotations. New transcript
-/// messages are mirrored on notify file events, not on this tick.
-pub const MESSAGE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// How often the transcript poll ticks: one stat per live session,
+/// mirroring the changed ones and probing for rotations.
+///
+/// This is the reply-mirror cadence for the relay, which delivers prompts
+/// without waiting on turns.
+pub const MESSAGE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How many unsynced transcript messages one sync posts at most when a
 /// backlog beyond [`CATCHUP_BACKLOG`] is dropped, announced in small
