@@ -208,6 +208,15 @@ impl EventHandler for Bot {
                     warn!(?error, thread = %thread.base.name, "failed to handle new forum post");
                 }
             }
+            FullEvent::ThreadDelete { thread, .. } => {
+                if let Err(error) = self.forum.handle_thread_delete(ctx, thread).await {
+                    warn!(
+                        ?error,
+                        thread_id = %thread.id,
+                        "failed to handle deleted forum post"
+                    );
+                }
+            }
             FullEvent::Message { new_message, .. } => self.handle_message(ctx, new_message).await,
             // Interactions (the `/agent` and `/herdr` commands, the agent
             // modal) are handled by the poise framework.

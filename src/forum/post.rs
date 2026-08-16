@@ -6,6 +6,7 @@ use std::path::Path;
 
 use serenity::all::{
     ChannelId, Context, CreateForumPost, CreateMessage, GetMessages, GuildThread, MessageId,
+    PartialGuildThread,
 };
 use tracing::{info, warn};
 
@@ -213,6 +214,24 @@ impl Forum {
             "deleting manually created forum post"
         );
         thread.id.widen().delete(&ctx.http, None).await?;
+        Ok(())
+    }
+
+    /// Handles a deleted forum post. A deleted post of a live session is
+    /// re-created right away — a live agent always gets its post — via the
+    /// recovery pass (ensure + tags + mirror). Manual posts and the bot's
+    /// own deletions have no session row and are ignored; a dead session's
+    /// deleted post makes the row stale, which the reconcile prunes.
+    pub async fn handle_thread_delete(
+        &self,
+        ctx: &Context,
+        thread: &PartialGuildThread,
+    ) -> BotResult<()> {
+        let post_id = to_i64(thread.id)?;
+        let Some(session) = self.db.session_by_post(post_id).await? else {
+            return Ok(());
+        };
+        self.recover_session(ctx, &session).await;
         Ok(())
     }
 

@@ -65,8 +65,8 @@ impl Forum {
             if !unchanged {
                 // A changed file is mirrored; the recovery escalation
                 // inside `sync_session_by_path` re-creates a deleted post.
-                // An unchanged file's deleted post is left to the
-                // reconcile, whose ensure pass re-creates it.
+                // An unchanged file's deleted post is caught by Discord's
+                // `thread.delete` event; the reconcile is the backstop.
                 self.sync_session_by_path(ctx, &key).await;
             }
             self.check_rotation(ctx, &session, stamp).await;

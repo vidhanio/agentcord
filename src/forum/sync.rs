@@ -222,7 +222,7 @@ impl Forum {
     /// title), then the mirror straight into the re-created post — not via
     /// [`Self::sync_session_by_path`], whose recovery branch would recurse
     /// back here.
-    async fn recover_session(&self, ctx: &Context, session: &SessionRow) {
+    pub async fn recover_session(&self, ctx: &Context, session: &SessionRow) {
         let Some(agent) = self.live_agent(session).await else {
             warn!(
                 session = %session.session_path,

@@ -120,10 +120,10 @@ agents.
   re-binds the mapping) and a live agent always gets its post
   (`ensure_session_post` re-creates a deleted post in the workspace's
   forum, re-binding the session row — key and adopted transcript
-  preserved). The 2s poll detects the breakage when the transcript
-  changes and re-creates the post (ensure + tags + mirror); for a quiet
-  session the reconcile's ensure pass re-creates it within its 600s
-  cycle, so recovery happens without waiting for an event.
+  preserved). A deleted post is re-created the instant Discord's
+  `thread.delete` event arrives (the recovery pass: ensure + tags +
+  mirror); the poll's recovery escalation and the reconcile are the
+  backstops for missed events, so recovery never waits for a poll tick.
 - **One writer per concern.** The transcript mirror (posting agent turns,
   tool embeds, user echoes) runs only from the 2s poll and the relay's
   settle (the immediate reply path); events and the reconcile do post
@@ -212,6 +212,8 @@ Discord ──► Bot event handler (src/lib.rs, serenity EventHandler::dispatch
               │  new post in a managed forum ──► Forum::handle_thread_create
               │     bot's own posts: left alone (the poll mirrors them)
               │     manual posts: deleted silently (agents launch via /agent)
+              │  deleted post of a live session ──► Forum::handle_thread_delete
+              │     re-created right away (recovery pass: ensure + tags + mirror)
               │
 Discord ──► poise framework (src/commands/, serenity Framework)
               │  /agent ──► native modal (harness dropdown w/ default harness,
@@ -315,9 +317,9 @@ Discord ──► poise framework (src/commands/, serenity Framework)
   prompts can settle into one blocked state). The typing indicator is the
   event loop's, driven by the working status event.
 - `src/lib.rs` (Bot + event handler) — the serenity `EventHandler` in its
-  `dispatch` form (Ready spawns the poll + event loop; ThreadCreate is
-  delegated to `handle_thread_create`; Message relays to sessions and
-  resumes dead ones), plus the `run()` wiring: `Http` with the default
+  `dispatch` form (Ready spawns the poll + event loop; ThreadCreate and
+  ThreadDelete are delegated to the forum's thread handlers; Message
+  relays to sessions and resumes dead ones), plus the `run()` wiring: `Http` with the default
   ratelimiter, `ClientBuilder` with the bot handler and the poise framework.
 
 ## Key Directories
