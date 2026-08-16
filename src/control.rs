@@ -52,9 +52,10 @@ pub fn truncate_reply(output: &str, limit: usize) -> String {
 
 /// Runs the control command: spawns `command` (whitespace-split into
 /// argv) with `prompt` piped to its stdin, waits up to `timeout`, and
-/// returns the concatenated stdout and stderr. On timeout the command's
-/// whole process group is killed — the command runs in its own group, so
-/// its descendants die with it.
+/// returns the concatenated stdout and stderr.
+///
+/// On timeout the command's whole process group is killed — the command
+/// runs in its own group, so its descendants die with it.
 ///
 /// `extra_env` overrides the inherited environment; the caller injects
 /// `HERDR_ENV=1` and the resolved herdr socket path here.

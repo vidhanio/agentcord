@@ -1,8 +1,8 @@
 mod commands;
 pub mod config;
-mod control;
+pub mod control;
 pub mod db;
-mod error;
+pub mod error;
 mod forum;
 pub mod herdr;
 mod relay;

@@ -200,7 +200,7 @@ pub struct HerdrConfig {
     pub default_harness: Harness,
 
     /// The `/herdr` control command: a one-shot external command run with
-    /// the user's prompt piped to its stdin (see the `control` module).
+    /// the user's prompt piped to its stdin (see [`crate::control`]).
     /// When unset, `/herdr` is not registered at all.
     pub control_command: Option<String>,
 
@@ -232,7 +232,7 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns `BotError::Other` when the file cannot be read or is not
+    /// Returns [`BotError::Other`] when the file cannot be read or is not
     /// valid TOML.
     pub fn load(path: &Path) -> Result<Self, BotError> {
         let raw = std::fs::read_to_string(path).map_err(|error| {
