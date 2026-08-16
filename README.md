@@ -18,11 +18,11 @@ post, and the transcript mirrors into the thread.
 
 ## config
 
-the bot reads `$XDG_CONFIG_HOME/herdcord/config.toml`
-(`~/.config/herdcord/config.toml` by default). override the path with
+the bot looks for a config at `$XDG_CONFIG_HOME/herdcord/config.toml`
+(`~/.config/herdcord/config.toml` by default), overridable via
 `--config <path>` or the `HERDCORD_CONFIG` env var.
 
-minimum config:
+default config:
 
 ```toml
 [discord]
@@ -31,9 +31,7 @@ guild_id = 1234567890
 allowed_user_id = 1234567890
 ```
 
-see [`config.example.toml`](config.example.toml) for the full sample with
-every knob and its default. a missing config file makes the bot print a
-sample with the error.
+see [`config.example.toml`](config.example.toml) for all knobs.
 
 ## run
 
