@@ -181,11 +181,12 @@ impl Relay {
         Ok(())
     }
 
-    /// Detached settlement for one delivered prompt: keeps the typing
-    /// indicator up while the turn runs, waits for the agent to settle
-    /// (idle/done/blocked), syncs the transcript, and posts the blocked
-    /// notice. Runs outside the relay queue so a long turn never delays
-    /// later messages; failures are surfaced to the thread and logged.
+    /// Detached settlement for one delivered prompt: waits for the agent
+    /// to settle (idle/done/blocked), mirrors the transcript, and posts the
+    /// blocked notice. Runs outside the relay queue so a long turn never
+    /// delays later messages; failures are surfaced to the thread and
+    /// logged. The typing indicator is the event loop's job (driven by the
+    /// working status event), not this task's.
     async fn settle_job(
         &self,
         ctx: Context,
@@ -193,10 +194,6 @@ impl Relay {
         channel_id: ChannelId,
         session_path: SessionPath,
     ) {
-        // A typing indicator while the turn runs; dropped (stopping it)
-        // when the turn settles.
-        let _typing = serenity::all::Typing::start(Arc::clone(&ctx.http), channel_id.widen());
-
         let agent = match self
             .wait_until_settled(&ctx, &target, channel_id, crate::config::PROMPT_TIMEOUT)
             .await
@@ -208,8 +205,8 @@ impl Relay {
             }
         };
 
-        // The agent's output is synced from its session file; a sync failure
-        // is best-effort (the periodic reconcile retries).
+        // The agent's output is mirrored from its session file; a mirror
+        // failure is best-effort (the periodic reconcile retries).
         self.forum.sync_session_by_path(&ctx, &session_path).await;
 
         if agent.status() == AgentStatus::Blocked

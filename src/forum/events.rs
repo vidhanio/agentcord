@@ -113,14 +113,16 @@ impl Forum {
     }
 
     /// Reconciles the forums with herdr: ensures (and renames) a forum per
-    /// workspace, ensures and syncs a post per agent session, drops the
+    /// workspace, ensures a post per agent session and applies its metadata
+    /// (tags, title, unarchive), drops the
     /// status tags and closes the posts of sessions with no live agent
     /// (the harness tag stays; a message still unarchives the thread and
     /// resumes the session), prunes stale
     /// workspace/session rows whose Discord channels are gone, and prunes
     /// the pane→session map of panes herdr no longer reports. herdr is the
     /// source of truth for live state; the database holds the bindings and
-    /// sync cursors.
+    /// mirror cursors. The transcript mirror is not this pass's job — the
+    /// 2s poll owns it.
     async fn reconcile(&self, ctx: &Context, typing: &mut Typing) -> BotResult<()> {
         let workspaces = self.herdr.list_workspaces().await?;
 
@@ -155,7 +157,7 @@ impl Forum {
             live_panes.insert(agent.pane_id.clone());
 
             self.sync_agent_typing(typing, ctx, agent).await;
-            self.sync_agent_session(ctx, agent).await;
+            self.sync_agent_post(ctx, agent).await;
         }
 
         // Panes herdr no longer reports (a missed pane.closed event, e.g.
@@ -195,10 +197,7 @@ impl Forum {
             if live_paths.iter().any(|path| session.hosts(path.as_str())) {
                 continue;
             }
-            self.tool_messages
-                .lock()
-                .expect("tool_messages lock poisoned")
-                .retain(|(session_path, _), _| session_path.as_str() != session.session_path);
+            self.drop_session_bookkeeping(&session.session_path);
             let Ok(post) = from_i64(post_id) else {
                 continue;
             };
@@ -356,7 +355,7 @@ impl Forum {
                 }
 
                 self.sync_agent_typing(typing, ctx, &agent).await;
-                self.sync_agent_session(ctx, &agent).await;
+                self.sync_agent_post(ctx, &agent).await;
                 false
             }
             Some(EventKind::PaneAgentDetected) => {
@@ -374,22 +373,13 @@ impl Forum {
                     return false;
                 }
 
-                match self.herdr.get_agent(&pane_id).await {
-                    Ok(agent) => {
-                        // A (re)detected agent may resume a session with a
-                        // backlog; the catch-up magnitude rule covers it.
-                        self.sync_agent_session(ctx, &agent).await;
-                        // A genuinely new agent: re-subscribe so its status
-                        // events are covered.
-                        true
-                    }
-                    Err(error) => {
-                        warn!(?error, %pane_id, "failed to fetch detected agent");
-                        // Not (yet) a real agent; do not resubscribe, or a
-                        // phantom pane would trigger a reconnect storm.
-                        false
-                    }
-                }
+                // A genuinely new agent: re-subscribe so its status events
+                // are covered. The reconnect runs a reconcile, which
+                // applies the new agent's post metadata; the poll mirrors
+                // its transcript. herdr emits `agent_detected` once per
+                // label change, so a phantom pane costs one reconnect
+                // cycle, not a storm.
+                true
             }
             Some(EventKind::PaneClosed | EventKind::PaneExited) => {
                 let Some(pane_id) = event.pane_id() else {
@@ -502,11 +492,8 @@ impl Forum {
         let Ok(Some(session)) = self.db.get_session(&session_path).await else {
             return;
         };
-        // The session is dead: its tool-embed bookkeeping goes with it.
-        self.tool_messages
-            .lock()
-            .expect("tool_messages lock poisoned")
-            .retain(|(path, _), _| path.as_str() != session_path.as_str());
+        // The session is dead: its in-memory bookkeeping goes with it.
+        self.drop_session_bookkeeping(&session_path);
         self.inactivate_post(ctx, &session).await;
     }
 }

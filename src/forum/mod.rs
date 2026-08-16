@@ -54,6 +54,12 @@ mod workspace;
 type ToolMessages =
     Arc<Mutex<HashMap<(SessionPath, ToolCallId), (serenity::all::MessageId, ToolState)>>>;
 
+/// The transcript stamp (mtime, size) each live session's bound file had
+/// at the poll's last parse, so an unchanged file costs one stat instead of
+/// a full mirror pass. Keyed by session path — a rotation adoption opens
+/// the gate naturally, because the new file has a fresh stamp.
+type TranscriptStamps = Arc<Mutex<HashMap<SessionPath, (std::time::SystemTime, u64)>>>;
+
 /// Forum-side state: workspace forums, session-bound posts, and transcript
 /// syncing.
 #[derive(Debug, Clone)]
@@ -73,7 +79,9 @@ pub struct Forum {
     /// Only touched under `sync_lock`; entries are dropped when their
     /// session dies.
     tool_messages: ToolMessages,
-    /// Serializes transcript syncs: the poll and the event loop can fire
+    /// The poll's mirror gate; entries are dropped when their session dies.
+    transcript_stamps: TranscriptStamps,
+    /// Serializes transcript syncs: the poll and the relay settle can fire
     /// concurrently, and two syncs reading the same cursor would post
     /// duplicate messages.
     sync_lock: Arc<AsyncMutex<()>>,
@@ -88,8 +96,22 @@ impl Forum {
             sessions_by_pane: Arc::new(Mutex::new(HashMap::new())),
             resuming: Arc::new(Mutex::new(HashSet::new())),
             tool_messages: Arc::new(Mutex::new(HashMap::new())),
+            transcript_stamps: Arc::new(Mutex::new(HashMap::new())),
             sync_lock: Arc::new(AsyncMutex::new(())),
         }
+    }
+
+    /// Drops the in-memory bookkeeping of a dead session: its posted tool
+    /// embeds and its transcript mirror stamp.
+    fn drop_session_bookkeeping(&self, session_path: &str) {
+        self.tool_messages
+            .lock()
+            .expect("tool_messages lock poisoned")
+            .retain(|(path, _), _| path.as_str() != session_path);
+        self.transcript_stamps
+            .lock()
+            .expect("transcript_stamps lock poisoned")
+            .retain(|path, _| path.as_str() != session_path);
     }
 }
 

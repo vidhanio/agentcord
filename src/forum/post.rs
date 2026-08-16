@@ -172,8 +172,8 @@ impl Forum {
         Ok(())
     }
 
-    /// Handles a new forum post. The bot's own posts are left alone (bound
-    /// sessions get their transcript caught up); every manual post is
+    /// Handles a new forum post. The bot's own posts are left alone (the
+    /// 2s poll mirrors their transcripts into them); every manual post is
     /// deleted silently — agents launch only through the `/agent` modal.
     pub async fn handle_thread_create(&self, ctx: &Context, thread: &GuildThread) -> BotResult<()> {
         // Managed forums are found through the thread's parent: the forum
@@ -186,21 +186,6 @@ impl Forum {
             .is_none()
         {
             // Not a forum channel this bot manages.
-            return Ok(());
-        }
-
-        let post_id = to_i64(thread.id)?;
-        if let Some(session) = self.db.session_by_post(post_id).await? {
-            // Already bound to a session: catch up its transcript. The harness
-            // comes from the live agent when there is one, else omp.
-            let harness = self
-                .live_agent_harness(&session)
-                .await
-                .unwrap_or(Harness::Omp);
-            let forum = self
-                .forum_for_post(ctx, ChannelId::new(thread.id.get()))
-                .await?;
-            self.sync_session(ctx, &session, harness, forum).await?;
             return Ok(());
         }
 

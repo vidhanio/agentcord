@@ -164,18 +164,20 @@ impl Forum {
         Ok(())
     }
 
-    /// Best-effort sync of the session at `session_path`, used by the relay
-    /// after a prompt and by the poll on its tick. Failures are logged, not
+    /// Best-effort mirror of the session at `session_path`, used by the
+    /// relay after a prompt and by the poll on its tick. When the post or
+    /// its forum was deleted on Discord, escalates to the full live-agent
+    /// sync (ensure + metadata + mirror). Failures are logged, not
     /// propagated.
     pub async fn sync_session_by_path(&self, ctx: &Context, session_path: &SessionPath) {
         let session = match self.db.get_session(session_path).await {
             Ok(Some(session)) => session,
             Ok(None) => {
-                warn!(%session_path, "sync requested for unknown session");
+                warn!(%session_path, "mirror requested for unknown session");
                 return;
             }
             Err(error) => {
-                warn!(%session_path, ?error, "failed to look up session for sync");
+                warn!(%session_path, ?error, "failed to look up session for mirror");
                 return;
             }
         };
@@ -192,23 +194,34 @@ impl Forum {
             self.recover_session(ctx, &session).await;
             return;
         };
+        self.mirror_session_inner(ctx, &session, forum).await;
+    }
+
+    /// Mirrors one session's transcript into its post: resolves the
+    /// harness from the live agent (omp when there is none) and runs the
+    /// cursor-based sync. No recovery escalation — callers that can repair
+    /// a deleted post do that first.
+    async fn mirror_session_inner(&self, ctx: &Context, session: &SessionRow, forum: ChannelId) {
         if let Err(error) = self
             .sync_session(
                 ctx,
-                &session,
-                self.live_agent_harness(&session)
+                session,
+                self.live_agent_harness(session)
                     .await
                     .unwrap_or(Harness::Omp),
                 forum,
             )
             .await
         {
-            warn!(%session_path, ?error, "session sync failed");
+            warn!(session = %session.session_path, ?error, "session mirror failed");
         }
     }
 
     /// Re-creates a live session's forum post (and its workspace forum)
-    /// after a deletion on Discord, through the full live-agent sync.
+    /// after a deletion on Discord: the metadata pass (ensure + tags +
+    /// title), then the mirror straight into the re-created post — not via
+    /// [`Self::sync_session_by_path`], whose recovery branch would recurse
+    /// back here.
     async fn recover_session(&self, ctx: &Context, session: &SessionRow) {
         let Some(agent) = self.live_agent(session).await else {
             warn!(
@@ -217,7 +230,24 @@ impl Forum {
             );
             return;
         };
-        self.sync_agent_session(ctx, &agent).await;
+        self.sync_agent_post(ctx, &agent).await;
+        let Ok(Some(session)) = self
+            .db
+            .get_session(&SessionPath::from(session.session_path.clone()))
+            .await
+        else {
+            return;
+        };
+        let Some(post_id) = session.post_channel_id else {
+            return;
+        };
+        let Ok(post) = from_i64(post_id) else {
+            return;
+        };
+        let Ok(forum) = self.forum_for_post(ctx, post).await else {
+            return;
+        };
+        self.mirror_session_inner(ctx, &session, forum).await;
     }
 
     /// Every live herdr agent hosting `session`: matches each agent's
@@ -250,10 +280,12 @@ impl Forum {
             .and_then(|agent| agent.harness)
     }
 
-    /// Syncs a live agent into its post: ensures the post + row, re-applies
-    /// harness/status tags and the transcript-sourced post title, and mirrors
-    /// the transcript.
-    pub async fn sync_agent_session(&self, ctx: &Context, agent: &Agent) {
+    /// Syncs a live agent's post metadata: ensures the post + row (the
+    /// re-created one when it was deleted on Discord), re-applies the
+    /// harness/status tags and the transcript-sourced post title, and
+    /// reopens an archived thread. The transcript mirror is the poll's job
+    /// (and the relay settle's) — this pass never reads the transcript.
+    pub async fn sync_agent_post(&self, ctx: &Context, agent: &Agent) {
         if let Err(error) = self.ensure_session_post(ctx, agent).await {
             warn!(?error, pane = %agent.pane_id, "failed to ensure session post");
             return;
@@ -291,16 +323,6 @@ impl Forum {
         {
             warn!(?error, pane = %agent.pane_id, "failed to update post metadata");
         }
-
-        // The post's first message is metadata too — it carries the pane
-        // and cwd, which the tags and title do not.
-        if let Err(error) = self.sync_post_intro(ctx, &session, post, agent).await {
-            warn!(?error, pane = %agent.pane_id, "failed to refresh session intro");
-        }
-
-        if let Err(error) = self.sync_session(ctx, &session, harness, forum).await {
-            warn!(?error, pane = %agent.pane_id, "failed to sync session");
-        }
     }
 
     /// Refreshes a session post's starter message with `intro`. Skipped
@@ -334,8 +356,11 @@ impl Forum {
     }
 
     /// Refreshes a session post's starter message with the agent's current
-    /// intro (pane · worktree · cwd · session).
-    pub async fn sync_post_intro(
+    /// intro (pane · worktree · cwd · session). Only called when the intro's
+    /// contents can change: post creation (built inline), session death
+    /// (`inactive`), and resume (a new pane). The steady state never
+    /// rewrites it.
+    pub async fn refresh_agent_intro(
         &self,
         ctx: &Context,
         session: &SessionRow,

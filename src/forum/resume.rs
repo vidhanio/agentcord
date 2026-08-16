@@ -2,7 +2,7 @@
 //! workspace with a native harness resume, re-binding it to the same post.
 
 use serenity::all::Context;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     BotResult,
@@ -93,6 +93,21 @@ impl Forum {
         };
         self.db.upsert_session(&updated).await?;
         self.ensure_session_post(ctx, &started).await?;
+
+        // The post's starter message carries the pane id, which the new
+        // agent changed; refresh it so the preview shows the resumed pane.
+        let key = SessionPath::from(session.session_path.clone());
+        if let Ok(Some(row)) = self.db.get_session(&key).await
+            && let Some(post_id) = row.post_channel_id
+            && let Ok(post) = from_i64(post_id)
+            && let Err(error) = self.refresh_agent_intro(ctx, &row, post, &started).await
+        {
+            warn!(
+                ?error,
+                session = %session.session_path,
+                "failed to refresh resumed session intro"
+            );
+        }
         Ok(started)
     }
 }

@@ -1,5 +1,7 @@
-//! Transcript polling: a fixed-tick pass that syncs every live session and
-//! probes for transcript rotations.
+//! Transcript polling: a fixed-tick pass that mirrors every live session's
+//! transcript and probes for transcript rotations. One stat per session per
+//! pass gates the mirror (an unchanged file is skipped entirely) and feeds
+//! the rotation probe.
 
 use std::{
     collections::HashSet,
@@ -18,10 +20,11 @@ const SESSION_STALE_GRACE: Duration = Duration::from_secs(300);
 
 impl Forum {
     /// Mirrors live sessions' transcripts into their posts on a fixed
-    /// tick: each pass syncs every live session (cursor-based, so an
-    /// unchanged file is a cheap no-op) and probes for transcript
-    /// rotations. Runs in its own task so a slow sync can never stall
-    /// event handling.
+    /// tick: each pass stats every live session's bound transcript — one
+    /// stat serves the mirror gate (an unchanged file skips the parse, the
+    /// harness lookup, and the Discord post fetch) and the rotation probe —
+    /// and mirrors the changed ones. Runs in its own task so a slow mirror
+    /// can never stall event handling.
     pub async fn poll_loop(&self, ctx: Context) {
         let mut tick = tokio::time::interval(crate::config::MESSAGE_POLL_INTERVAL);
         loop {
@@ -32,8 +35,9 @@ impl Forum {
         }
     }
 
-    /// One poll pass: sync every live session and probe each for a
-    /// transcript rotation.
+    /// One poll pass: for each live session, stat its bound transcript and
+    /// mirror it when the stamp changed since the last pass; then probe it
+    /// for a rotation.
     async fn poll_once(&self, ctx: &Context) -> BotResult<()> {
         let keys: Vec<SessionPath> = self
             .sessions_by_pane
@@ -43,10 +47,50 @@ impl Forum {
             .cloned()
             .collect();
         for key in keys {
-            self.sync_session_by_path(ctx, &key).await;
-            self.check_rotation(ctx, &key).await;
+            let Some((session, stamp)) = self.transcript_stamp(&key).await else {
+                continue;
+            };
+            let unchanged = {
+                let mut stamps = self
+                    .transcript_stamps
+                    .lock()
+                    .expect("transcript_stamps lock poisoned");
+                // An unknown stamp (unreadable mtime) mirrors, to be safe.
+                stamp.is_some_and(|stamp| {
+                    let unchanged = stamps.get(&key).is_some_and(|known| *known == stamp);
+                    stamps.insert(key.clone(), stamp);
+                    unchanged
+                })
+            };
+            if !unchanged {
+                // A changed file is mirrored; the recovery escalation
+                // inside `sync_session_by_path` re-creates a deleted post.
+                // An unchanged file's deleted post is left to the
+                // reconcile, whose ensure pass re-creates it.
+                self.sync_session_by_path(ctx, &key).await;
+            }
+            self.check_rotation(ctx, &session, stamp).await;
         }
         Ok(())
+    }
+
+    /// The session row and the stamp (mtime, size) of its bound
+    /// transcript, when both exist. A missing file (mid-rotation
+    /// delete+recreate dance) skips the session entirely — the mirror would
+    /// no-op on it and the rotation probe needs the stamp.
+    async fn transcript_stamp(
+        &self,
+        key: &SessionPath,
+    ) -> Option<(SessionRow, Option<(SystemTime, u64)>)> {
+        let session = self.db.get_session(key).await.ok()??;
+        let metadata = tokio::fs::metadata(&session.transcript_path).await.ok()?;
+        Some((
+            session,
+            metadata
+                .modified()
+                .ok()
+                .map(|modified| (modified, metadata.len())),
+        ))
     }
 
     /// Probes one session for a transcript rotation: when its bound file
@@ -54,19 +98,23 @@ impl Forum {
     /// session is replaced in the same pane, and herdr may keep reporting
     /// the old path), the session re-binds to the newest unclaimed file in
     /// its directory — the post stays, the cursor restarts.
-    async fn check_rotation(&self, ctx: &Context, key: &SessionPath) {
-        let Ok(Some(session)) = self.db.get_session(key).await else {
+    async fn check_rotation(
+        &self,
+        ctx: &Context,
+        session: &SessionRow,
+        stamp: Option<(SystemTime, u64)>,
+    ) {
+        let Some((modified, _)) = stamp else {
             return;
         };
-        let path = PathBuf::from(&session.transcript_path);
-        let Ok(metadata) = tokio::fs::metadata(&path).await else {
+        if !modified
+            .elapsed()
+            .is_ok_and(|age| age > SESSION_STALE_GRACE)
+        {
             return;
-        };
-        let stale = metadata
-            .modified()
-            .is_ok_and(|m| m.elapsed().is_ok_and(|age| age > SESSION_STALE_GRACE));
-        if stale && let Some(new_path) = self.rotated_session_file(&session).await {
-            self.adopt_transcript(ctx, &session, &new_path).await;
+        }
+        if let Some(new_path) = self.rotated_session_file(session).await {
+            self.adopt_transcript(ctx, session, &new_path).await;
         }
     }
 
