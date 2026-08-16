@@ -11,3 +11,10 @@ allow = [
   "Unicode-3.0",
   "Zlib",
 ]
+
+[advisories]
+ignore = [
+  # derivative is unmaintained (no known vulnerability); pulled in
+  # transitively by poise, which has no updated release yet.
+  "RUSTSEC-2024-0388",
+]
