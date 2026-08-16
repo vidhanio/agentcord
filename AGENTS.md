@@ -327,7 +327,7 @@ Discord ──► poise framework (src/commands/, serenity Framework)
 | `src/commands/` | Slash commands: `mod.rs` (poise framework wiring), `agent.rs` (the `/agent` modal + launch), `herdr.rs` (the `/herdr` control command) |
 | `tests/` | `herdr_live.rs` (live integration, gated) and `fixtures/api/` (captured herdr API JSON, embedded via `include_str!`) |
 | `.github/workflows/nix-check.yaml` | Reusable Nix workflow: installs Nix, frees runner disk space, restores the Nix store cache, and runs one selected Nix check |
-| `.github/workflows/` | CI — `ci-cd.yaml` (test, test-docs, check/clippy, docs.rs-compatible `check-docs`, reusable `check-nix`, `check-home-manager`, and check-format jobs; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs) and `security-audit.yaml` (daily + on manifest changes, cargo-deny); `dependabot.yml` (weekly cargo, flake-input, and GitHub Actions updates) |
+| `.github/workflows/` | `ci.yaml` (test, test-docs, check/clippy, docs.rs-compatible `check-docs`, reusable `check-nix`, `check-home-manager`, and check-format jobs; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs) and `security-audit.yaml` (daily + on manifest changes, cargo-deny); `dependabot.yml` (weekly cargo, flake-input, and GitHub Actions updates) |
 
 ## Development Commands
 
