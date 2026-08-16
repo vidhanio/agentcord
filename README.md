@@ -31,9 +31,9 @@ guild_id = 1234567890
 allowed_user_id = 1234567890
 ```
 
-see [`config.example.toml`](config.example.toml) for all knobs. String
-values support `${NAME}` environment expansion after TOML parsing; values
-containing quotes or other TOML syntax are safe. If `NAME` is unset, the
+see [`config.example.toml`](config.example.toml) for all knobs. string
+values support `${NAME}` environment expansion after toml parsing; values
+containing quotes or other toml syntax are safe. if `NAME` is unset, the
 `${NAME}` placeholder remains literal.
 
 ## run
@@ -42,10 +42,10 @@ containing quotes or other TOML syntax are safe. If `NAME` is unset, the
 nix run .#default
 ```
 
-## Home Manager
+## home manager
 
-The flake exports a Home Manager module without requiring a Home Manager flake
-input. Add `inputs.herdcord.homeManagerModules.default` to your Home Manager
+the flake exports a home manager module without requiring a home manager flake
+input. add `inputs.herdcord.homeManagerModules.default` to your home manager
 configuration and enable the program:
 
 ```nix
@@ -66,8 +66,8 @@ configuration and enable the program:
 }
 ```
 
-`settings` is rendered as TOML at
-`$XDG_CONFIG_HOME/herdcord/config.toml`. The `package` option defaults to this
+`settings` is rendered as toml at
+`$XDG_CONFIG_HOME/herdcord/config.toml`. the `package` option defaults to this
 flake's `packages.<system>.default` and can be overridden when needed.
 
 ## license

@@ -1,71 +1,72 @@
-name: CI/CD
+name: ci/cd
 
 on:
   - push
   - pull_request
 
 permissions:
+  actions: write
   contents: read
 
 jobs:
   test:
-    name: Test
+    name: test
 
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
+      - name: install rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache dependencies
+      - name: cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Execute tests
+      - name: run tests
         run: cargo test --all-features --all-targets
 
   test-docs:
-    name: Test Documentation
+    name: test docs
 
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
+      - name: install rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache dependencies
+      - name: cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Run documentation tests
+      - name: run doc tests
         run: cargo test --doc --all-features
 
   check:
-    name: Check
+    name: check
 
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
+      - name: install rust
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: clippy
 
-      - name: Cache dependencies
+      - name: cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Check code
+      - name: check code
         run: cargo clippy --all-targets -- -D warnings
 
   check-docs:
-    name: Check Documentation
+    name: check docs
 
     runs-on: ubuntu-latest
 
@@ -73,55 +74,49 @@ jobs:
       RUSTDOCFLAGS: -D warnings
 
     steps:
-      - name: Checkout repository
+      - name: checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
+      - name: install rust
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Cache dependencies
+      - name: cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Install `cargo-docs-rs`
+      - name: install cargo-docs-rs
         uses: dtolnay/install@cargo-docs-rs
 
-      - name: Check documentation
+      - name: run cargo docs-rs
         run: cargo docs-rs --locked
 
   check-nix:
-    name: Check Nix Outputs
+    name: check nix
 
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: checkout
         uses: actions/checkout@v6
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v16
+      - name: setup nix
+        uses: ./.github/actions/setup-nix
 
-      - name: Cache Nix
-        uses: DeterminateSystems/magic-nix-cache-action@v9
-
-      - name: Check flake outputs
+      - name: check flake
         run: nix flake check
 
   check-home-manager:
-    name: Check Home Manager Module
+    name: check home manager
 
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: checkout
         uses: actions/checkout@v6
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v16
+      - name: setup nix
+        uses: ./.github/actions/setup-nix
 
-      - name: Cache Nix
-        uses: DeterminateSystems/magic-nix-cache-action@v9
-
-      - name: Check Home Manager output
+      - name: check module
         run: |
           nix eval --impure --show-trace --expr '
           let
@@ -164,22 +159,19 @@ jobs:
           '
 
   check-format:
-    name: Check Formatting
+    name: check format
 
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: checkout
         uses: actions/checkout@v6
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v16
-
-      - name: Cache Nix
-        uses: DeterminateSystems/magic-nix-cache-action@v9
+      - name: setup nix
+        uses: ./.github/actions/setup-nix
 
       # treefmt config lives in the flake (treefmt-nix: nixfmt, statix,
       # deadnix, nightly rustfmt, taplo), so the fmt gate is the flake's
       # own treefmt check: it formats the tree and fails on any diff.
-      - name: Check formatting
+      - name: check formatting
         run: nix build .#checks.x86_64-linux.treefmt

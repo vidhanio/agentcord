@@ -96,7 +96,7 @@ agents.
   relay the prompt, reply ephemerally with the thread link. Any manual
   post in a managed forum is deleted silently, and the bot's own posts
   get their transcripts mirrored by the 1s poll.
-- **`/herdr` is a configurable escape hatch.** When `herdr_control_command`
+- **`/herdr` is a configurable escape hatch.** When `herdr.control_command`
   is set, `/herdr` spawns that one-shot external command (e.g. a lean
   `pi -p`) with the user's prompt piped to its stdin — prefixed with a
   control-plane preamble telling it to bootstrap the herdr skill via
@@ -216,7 +216,7 @@ Discord ──► poise framework (src/commands/, serenity Framework)
               │             workspace dropdown, prompt input)
               │     submit ──► launch_from_modal: spawn → bind session post →
               │                relay the prompt → ephemeral thread link
-              │  /herdr (when herdr_control_command is set)
+              │  /herdr (when herdr.control_command is set)
               │     ──► control_prompt + stdin pipe ──► one-shot external
               │         command (process group, timeout) ──► truncated
               │         ephemeral reply (HERDR_ENV=1 + socket injected)
@@ -285,7 +285,7 @@ Discord ──► poise framework (src/commands/, serenity Framework)
   derive only knows text inputs — sends it as the command's initial
   response, awaits the submit through serenity's modal collector, defers
   the submit, and launches via the forum's spawn/bind/relay helpers,
-  editing the deferred response with the thread link. `/herdr` (`herdr.rs`) runs the configured `herdr_control_command`
+  editing the deferred response with the thread link. `/herdr` (`herdr.rs`) runs the configured `herdr.control_command`
   (`build_commands` registers it only when configured) — the prompt
   (preamble-prefixed via `control::control_prompt`) is piped to the
   command's stdin, `HERDR_ENV=1` + the bot's resolved socket are
@@ -326,7 +326,8 @@ Discord ──► poise framework (src/commands/, serenity Framework)
 | `src/db/` | SQLite state: `mod.rs` (Db wrapper + queries), `model.rs` (row types), `migrate.rs` (schema push + legacy migrations) |
 | `src/commands/` | Slash commands: `mod.rs` (poise framework wiring), `agent.rs` (the `/agent` modal + launch), `herdr.rs` (the `/herdr` control command) |
 | `tests/` | `herdr_live.rs` (live integration, gated) and `fixtures/api/` (captured herdr API JSON, embedded via `include_str!`) |
-| `.github/workflows/` | CI — `ci-cd.yaml` (test, test-docs, check/clippy, docs.rs-compatible `check-docs`, `check-nix` via `nix flake check`, `check-home-manager` for `homeManagerModules`, and check-format via the flake's treefmt check; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs, nix for Nix gates) and `security-audit.yaml` (daily + on manifest changes, cargo-deny); `dependabot.yml` (weekly cargo, flake-input, and GitHub Actions updates) |
+| `.github/actions/setup-nix/` | Reusable Nix setup: `cachix/install-nix-action`, Nix store caching, and runner disk cleanup |
+| `.github/workflows/` | CI — `ci-cd.yaml` (test, test-docs, check/clippy, docs.rs-compatible `check-docs`, `check-nix` via `nix flake check`, `check-home-manager` for `homeManagerModules`, and check-format via the flake's treefmt check; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs, nix via `setup-nix`) and `security-audit.yaml` (daily + on manifest changes, cargo-deny); `dependabot.yml` (weekly cargo, flake-input, and GitHub Actions updates) |
 
 ## Development Commands
 
@@ -335,11 +336,11 @@ toolchain is nightly (required for `rustfmt.toml` unstable options).
 
 **`nix develop` is the source of truth** — direnv (`.envrc` uses
 `use flake`) loads the same devshell. It provides the nightly toolchain,
-the treefmt wrapper, nil, and prek, plus the check tools (cargo-deny,
-cargo-nextest, …) propagated from the checks' native build inputs, and
-builds the flake checks (clippy/doc/fmt/treefmt/deny/nextest) so the
-environment is verified. The first load builds the checks; later loads
-are cached.
+the treefmt wrapper, nil, prek, `cargo-docs-rs`, and `cargo-edit`, plus the
+check tools (cargo-deny and cargo-nextest) propagated from the checks' native
+build inputs, and builds the flake checks (clippy/docs.rs/fmt/treefmt/deny/
+nextest) so the environment is verified. The first load builds the checks;
+later loads are cached.
 
 ```sh
 # inside the devshell (nix develop, or direnv on `cd`):
@@ -370,10 +371,11 @@ wire it into git with `prek install`.
 - Run the bot with a TOML config at `$XDG_CONFIG_HOME/herdcord/config.toml`
   (else `~/.config/herdcord/config.toml`; see `src/config.rs` and its
   `sample_config`, plus `config.example.toml` in the repo):
-  `discord_bot_token`, `guild_id`, and `allowed_user_id` required; the
-  path is overridable via `--config <path>` or the `HERDCORD_CONFIG` env
-  var; `allowed_user_id` is the only user allowed to talk to agents and
-  launch them via forum posts; the optional `[herdr]` table holds
+  `[discord].bot_token`, `[discord].guild_id`, and
+  `[discord].allowed_user_id` required; the path is overridable via
+  `--config <path>` or the `HERDCORD_CONFIG` env var; `allowed_user_id` is
+  the only user allowed to talk to agents and launch them via forum posts;
+  the optional `[herdr]` table holds
   `control_command` (the `/herdr` one-shot control command —
   whitespace-split, opt-in: unset registers no `/herdr`; the recommended
   lean payload is `pi -p --no-session --tools bash --no-skills
@@ -493,26 +495,31 @@ wire it into git with `prek install`.
   `max_sync_messages`/`catchup_backlog`, `control_reply_limit`), the
   `[herdr]` table (`socket_path`/`session` overrides, `default_harness`,
   the `/herdr` control knobs `control_command`/`control_cwd`/
-  `control_timeout`), and the `[delays]`
-  table with every timer. Sane defaults as consts: `DEFAULT_HARNESS`
-  (`Harness::Pi`, the modal's preselected harness),
-  `OPERATION_TIMEOUT` (30s),
-  `SYNC_INTERVAL` (600s), `MESSAGE_POLL_INTERVAL` (1s),
-  `MAX_SYNC_MESSAGES` (5), `CATCHUP_BACKLOG` (50), `CONTROL_TIMEOUT`
-  (300s) and `CONTROL_REPLY_LIMIT` (2000). `Config::socket_path()` and
+  `control_timeout`), and the `[delays]` table with every timer. Loading
+  uses the `config` crate; `${NAME}` expands in string leaves after TOML
+  parsing, so replacement values cannot change the TOML structure. Sane
+  defaults as consts: `DEFAULT_HARNESS` (`Harness::Pi`, the modal's
+  preselected harness), `OPERATION_TIMEOUT` (30s), `SYNC_INTERVAL` (600s),
+  `MESSAGE_POLL_INTERVAL` (1s), `MAX_SYNC_MESSAGES` (5),
+  `CATCHUP_BACKLOG` (50), `CONTROL_TIMEOUT` (300s), and
+  `CONTROL_REPLY_LIMIT` (2000). `HerdrConfig::socket_path()` and
   `default_socket_path()` honor `HERDR_SOCKET_PATH`/`HERDR_SESSION` as
-  herdr-injected/dev overrides; `session_socket_path(name)` resolves
-  a named session's socket regardless of env overrides; the state db lives
+  herdr-injected/dev overrides; `session_socket_path(name)` resolves a
+  named session's socket regardless of env overrides; the state db lives
   under `$XDG_STATE_HOME/herdcord`.
 - `src/control.rs` — the `/herdr` process runner: `control_prompt`,
   `run_control_command` (spawn + stdin pipe + process-group kill on
   timeout), `truncate_reply`.
-- `flake.nix` — crane + rust-overlay nightly; `packages.default`; checks
-  clippy/doc/fmt/deny/nextest; treefmt (nixfmt, statix, deadnix, rustfmt,
-  taplo). The serenity and poise dependencies are git branches, so `nix
-  flake check` needs network access to fetch them.
+- `flake.nix` — crane + rust-overlay nightly; `packages.default`,
+  `packages.cargo-docs-rs`, and `packages.cargo-edit`; the
+  `homeManagerModules.default` output; checks clippy/docs.rs/fmt/deny/
+  nextest; treefmt (nixfmt, statix, deadnix, rustfmt, taplo). The serenity
+  and poise dependencies are git branches, so `nix flake check` needs
+  network access to fetch them.
+- `nix/cargo-docs-rs.Cargo.lock` — pinned lockfile for the custom
+  `cargo-docs-rs` Crane tool.
 - `deny.toml` — license allowlist (incl. MIT-0/MPL-2.0 for toasty's
-  transitive deps).
+  transitive deps) and the justified `derivative` advisory ignore.
 
 ## Runtime/Tooling Preferences
 
@@ -528,9 +535,10 @@ wire it into git with `prek install`.
   to override).
 - **Dependencies**: prefer popular libraries over vendored logic (serenity's
   built-in `Typing`, `ExecuteWebhook`, poise, the `time` crate, etc.).
-  Current deps: clap, serenity, poise, toasty, nutype, thiserror, toml,
-  humantime, dirs, tokio, tracing, serde/serde_json, color-eyre (main
-  only). No anyhow in the lib.
+  Current deps: clap, config, humantime, dirs, serenity, poise, toasty,
+  nutype, thiserror, tokio, tracing, serde/serde_json, color-eyre (main
+  only). Nix provides `cargo-docs-rs` and `cargo-edit`; no anyhow in the
+  lib.
 
 ## Testing & QA
 
@@ -543,8 +551,8 @@ wire it into git with `prek install`.
   workspace/session upserts and lookups on an in-memory database,
   `src/forum/` tests the agent-name timestamp, the title selection, the
   modal construction, and the per-harness resume args, `src/config.rs`
-  tests state-dir resolution and the control knobs (`control_cwd`/
-  `control_timeout` defaults and overrides), `src/control.rs` runs real
+  tests the `config` builder, defaults, required fields, duration parsing,
+  and safe `${NAME}` expansion, `src/control.rs` runs real
   `cat`/`sh`/`sleep` processes (stdin pipe, stderr concatenation, env
   injection, nonzero exit, process-group kill on timeout), and
   `src/commands/` tests `build_commands` registration gating.
@@ -565,9 +573,10 @@ wire it into git with `prek install`.
   docs on nightly, Nix outputs via `nix flake check`, the `homeManagerModules`
   output via a focused module evaluation, formatting via the flake's treefmt
   check (`nix build .#checks.x86_64-linux.treefmt`), and `cargo-deny` (see
-  `.github/workflows/`); `nix flake check` remains the
-  local hermetic equivalent. Every commit is additionally gated by a prek
-  hook running `treefmt --ci` on the whole tree (`.pre-commit-config.yaml`).
+  `.github/actions/setup-nix/` and `.github/workflows/`); `nix flake check`
+  remains the local hermetic equivalent. Every commit is additionally gated
+  by a prek hook running `treefmt --ci` on the whole tree
+  (`.pre-commit-config.yaml`).
 - **Coverage expectations**: no coverage tooling; correctness is enforced by
   the fixture tests, the session parser + db tests, the live tests, and
   clippy's pedantic set. New herdr wire shapes should get a fixture +
