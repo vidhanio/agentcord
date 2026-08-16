@@ -370,24 +370,24 @@ wire it into git with `prek install`.
 - Run the bot with a TOML config at `$XDG_CONFIG_HOME/herdcord/config.toml`
   (else `~/.config/herdcord/config.toml`; see `src/config.rs` and its
   `sample_config`, plus `config.example.toml` in the repo):
-  `discord_bot_token` and `guild_id` required; the path is overridable
-  via `--config <path>` or the `HERDCORD_CONFIG` env var;
-  `allowed_user_id` optional (when set, only that Discord user may talk
-  to agents and launch them via forum posts); `herdr_control_command`
-  (the `/herdr` one-shot control command — whitespace-split, opt-in:
-  unset registers no `/herdr`; the recommended lean payload is
-  `pi -p --no-session --tools bash --no-skills --no-context-files
-  --no-extensions --no-themes --no-prompt-templates`),
-  `herdr_control_cwd` (default: home dir; a leading `~`/`~/` expands to
-  home) and `herdr_control_timeout` (default 300s). Durations are
-  integers (seconds) or human strings (`"500ms"`, `"5m"`, `"1h"`); a
-  `[delays]` table makes every timer configurable (herdr API calls,
-  reconcile, poll tick, rotation grace, relay workers, re-subscribe,
-  agent startup, the `/agent` modal) plus the `max_sync_messages`/
-  `catchup_backlog` mirror knobs. `herdr_socket_path`/`herdr_session`
-  override the socket; `HERDR_SOCKET_PATH`/`HERDR_SESSION` remain as
-  herdr-injected/dev overrides. `RUST_LOG` default
-  `warn,herdcord=trace`.
+  `discord_bot_token`, `guild_id`, and `allowed_user_id` required; the
+  path is overridable via `--config <path>` or the `HERDCORD_CONFIG` env
+  var; `allowed_user_id` is the only user allowed to talk to agents and
+  launch them via forum posts; the optional `[herdr]` table holds
+  `control_command` (the `/herdr` one-shot control command —
+  whitespace-split, opt-in: unset registers no `/herdr`; the recommended
+  lean payload is `pi -p --no-session --tools bash --no-skills
+  --no-context-files --no-extensions --no-themes
+  --no-prompt-templates`), `control_cwd` (default: home dir; a leading
+  `~`/`~/` expands to home) and `control_timeout` (default 300s).
+  Durations are integers (seconds) or human strings (`"500ms"`, `"5m"`,
+  `"1h"`); a `[delays]` table makes every timer configurable (herdr API
+  calls, reconcile, poll tick, rotation grace, relay workers,
+  re-subscribe, agent startup, the `/agent` modal) plus the
+  `max_sync_messages`/`catchup_backlog` mirror knobs. `herdr.socket_path`
+  and `herdr.session` override the socket; `HERDR_SOCKET_PATH`/
+  `HERDR_SESSION` remain as herdr-injected/dev overrides. `RUST_LOG`
+  default `warn,herdcord=trace`.
 
 ## Commits
 
@@ -487,11 +487,12 @@ wire it into git with `prek install`.
   `herdr.rs`.
 - `src/relay.rs` — conversation workers and the session-file sync delta.
 - `src/config.rs` — the TOML config at `$XDG_CONFIG_HOME/herdcord/config.toml`
-  (else `~/.config/herdcord/config.toml`): `discord_bot_token`, `guild_id`,
-  `allowed_user_id`, `default_harness`, the `/herdr` control knobs
-  (`herdr_control_command`/`herdr_control_cwd`/`herdr_control_timeout`),
-  the mirror knobs (`max_sync_messages`/`catchup_backlog`), the socket
-  overrides (`herdr_socket_path`/`herdr_session`), and the `[delays]`
+  (else `~/.config/herdcord/config.toml`): the `[discord]` table
+  (`bot_token`, `guild_id`, `allowed_user_id`, the mirror knobs
+  `max_sync_messages`/`catchup_backlog`, `control_reply_limit`), the
+  `[herdr]` table (`socket_path`/`session` overrides, `default_harness`,
+  the `/herdr` control knobs `control_command`/`control_cwd`/
+  `control_timeout`), and the `[delays]`
   table with every timer. Sane defaults as consts: `DEFAULT_HARNESS`
   (`Harness::Pi`, the modal's preselected harness),
   `OPERATION_TIMEOUT` (30s),

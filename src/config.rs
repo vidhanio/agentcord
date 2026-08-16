@@ -135,49 +135,37 @@ impl Default for Delays {
     }
 }
 
-/// TOML configuration for the bot, loaded from [`config_path`].
+/// TOML configuration for the bot, loaded from [`config_path`]: a
+/// `[discord]` table, a `[herdr]` table, and the optional `[delays]`
+/// table.
 #[derive(Clone, Deserialize)]
 pub struct Config {
+    /// The Discord-facing configuration: token, guild, allowed user, and
+    /// the mirror knobs.
+    pub discord: Discord,
+
+    /// The herdr-facing configuration: socket, default harness, and the
+    /// `/herdr` control command.
+    #[serde(default)]
+    pub herdr: HerdrConfig,
+
+    /// The delay knobs, all optional.
+    #[serde(default)]
+    pub delays: Delays,
+}
+
+/// The Discord-facing configuration: the bot token, the guild it operates
+/// in, the single allowed user, and the transcript-mirror knobs.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Discord {
     /// The Discord bot token.
-    pub discord_bot_token: String,
+    pub bot_token: String,
 
     /// The guild the bot operates in.
     pub guild_id: GuildId,
 
     /// The only Discord user allowed to run commands and talk to agents.
-    /// When unset, everyone can.
-    #[serde(default)]
-    pub allowed_user_id: Option<UserId>,
-
-    /// Harness preselected in the `/agent` modal and used to resume dead
-    /// sessions whose post has no harness tag ([`DEFAULT_HARNESS`]).
-    #[serde(default = "default_harness")]
-    pub default_harness: Harness,
-
-    /// The herdr Unix socket; when unset, `HERDR_SOCKET_PATH` and
-    /// `HERDR_SESSION` are honored, then the herdr config dir.
-    #[serde(default)]
-    pub herdr_socket_path: Option<PathBuf>,
-
-    /// A named herdr session whose socket to use (ignored when
-    /// `herdr_socket_path` is set).
-    #[serde(default)]
-    pub herdr_session: Option<String>,
-
-    /// The `/herdr` control command: a one-shot external command run with
-    /// the user's prompt piped to its stdin (see [`crate::control`]).
-    /// When unset, `/herdr` is not registered at all.
-    #[serde(default)]
-    pub herdr_control_command: Option<String>,
-
-    /// Working directory for the control command; defaults to the home
-    /// directory.
-    #[serde(default)]
-    pub herdr_control_cwd: Option<PathBuf>,
-
-    /// How long one control command may run ([`CONTROL_TIMEOUT`]).
-    #[serde(default = "control_timeout_default", with = "duration_secs")]
-    pub herdr_control_timeout: Duration,
+    pub allowed_user_id: UserId,
 
     /// The control command's reply cap ([`CONTROL_REPLY_LIMIT`]).
     #[serde(default = "control_reply_limit_default")]
@@ -192,10 +180,50 @@ pub struct Config {
     /// ([`CATCHUP_BACKLOG`]).
     #[serde(default = "catchup_backlog_default")]
     pub catchup_backlog: usize,
+}
 
-    /// The delay knobs, all optional.
-    #[serde(default)]
-    pub delays: Delays,
+/// The herdr-facing configuration: the socket, the default harness for
+/// launched agents, and the `/herdr` control command.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct HerdrConfig {
+    /// The herdr Unix socket; when unset, `HERDR_SOCKET_PATH` and
+    /// `HERDR_SESSION` are honored, then the herdr config dir.
+    pub socket_path: Option<PathBuf>,
+
+    /// A named herdr session whose socket to use (ignored when
+    /// `socket_path` is set).
+    pub session: Option<String>,
+
+    /// Harness preselected in the `/agent` modal and used to resume dead
+    /// sessions whose post has no harness tag ([`DEFAULT_HARNESS`]).
+    pub default_harness: Harness,
+
+    /// The `/herdr` control command: a one-shot external command run with
+    /// the user's prompt piped to its stdin (see [`crate::control`]).
+    /// When unset, `/herdr` is not registered at all.
+    pub control_command: Option<String>,
+
+    /// Working directory for the control command; defaults to the home
+    /// directory.
+    pub control_cwd: Option<PathBuf>,
+
+    /// How long one control command may run ([`CONTROL_TIMEOUT`]).
+    #[serde(with = "duration_secs")]
+    pub control_timeout: Duration,
+}
+
+impl Default for HerdrConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: None,
+            session: None,
+            default_harness: DEFAULT_HARNESS,
+            control_command: None,
+            control_cwd: None,
+            control_timeout: CONTROL_TIMEOUT,
+        }
+    }
 }
 
 impl Config {
@@ -209,8 +237,9 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, BotError> {
         let raw = std::fs::read_to_string(path).map_err(|error| {
             BotError::Other(format!(
-                "no configuration at {} ({error}); create it with at least \
-                 `discord_bot_token` and `guild_id`, e.g.\n{sample}",
+                "no configuration at {} ({error}); create it with at least a \
+                 `[discord]` table holding `bot_token`, `guild_id`, and \
+                 `allowed_user_id`, e.g.\n{sample}",
                 path.display(),
                 sample = sample_config()
             ))
@@ -231,14 +260,16 @@ impl Config {
     pub fn parse(raw: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(raw)
     }
+}
 
-    /// The control command's working directory: `herdr_control_cwd` when
-    /// set (a leading `~`/`~/` expands to the home directory), else the
-    /// home directory (falling back to `/tmp`).
+impl HerdrConfig {
+    /// The control command's working directory: `control_cwd` when set (a
+    /// leading `~`/`~/` expands to the home directory), else the home
+    /// directory (falling back to `/tmp`).
     #[must_use]
     pub fn control_cwd(&self) -> PathBuf {
         let home = dirs::home_dir();
-        let Some(cwd) = self.herdr_control_cwd.clone() else {
+        let Some(cwd) = self.control_cwd.clone() else {
             return home.unwrap_or_else(|| PathBuf::from("/tmp"));
         };
         if cwd == Path::new("~") {
@@ -252,30 +283,20 @@ impl Config {
         cwd
     }
 
-    /// How long one control command may run: `herdr_control_timeout` when
-    /// set, else [`CONTROL_TIMEOUT`].
+    /// How long one control command may run: `control_timeout` when set,
+    /// else [`CONTROL_TIMEOUT`].
     #[must_use]
     pub const fn control_timeout(&self) -> Duration {
-        self.herdr_control_timeout
+        self.control_timeout
     }
 
-    /// The herdr Unix socket: `herdr_socket_path` when set, else the
+    /// The herdr Unix socket: `socket_path` when set, else the
     /// herdr-injected or dev-set environment (`HERDR_SOCKET_PATH` /
     /// `HERDR_SESSION`), else `herdr.sock` under the herdr config dir.
     #[must_use]
     pub fn socket_path(&self) -> PathBuf {
-        self.herdr_socket_path
-            .clone()
-            .unwrap_or_else(default_socket_path)
+        self.socket_path.clone().unwrap_or_else(default_socket_path)
     }
-}
-
-const fn default_harness() -> Harness {
-    DEFAULT_HARNESS
-}
-
-const fn control_timeout_default() -> Duration {
-    CONTROL_TIMEOUT
 }
 
 const fn control_reply_limit_default() -> usize {
@@ -349,28 +370,25 @@ fn herdr_config_dir() -> PathBuf {
 /// missing-config error.
 #[must_use]
 pub const fn sample_config() -> &'static str {
-    r#"discord_bot_token = "..."
+    r#"[discord]
+bot_token = "..."
 guild_id = 1234567890
-
-# optional
-# allowed_user_id = 1234567890       # only this user may command agents
-# default_harness = "pi"             # omp | claude-code | codex | pi | opencode
-# herdr_socket_path = "/path/to/herdr.sock"
-# herdr_session = "main"             # named herdr session, else the main socket
-
-# the /herdr control command (unset = /herdr not registered)
-# herdr_control_command = "pi -p --no-session --tools bash --no-skills"
-# herdr_control_cwd = "~"            # default: home directory
-# herdr_control_timeout = "5m"       # default: 300s
-# control_reply_limit = 2000         # default: Discord's message cap
-
-# transcript mirroring
+allowed_user_id = 1234567890
+# control_reply_limit = 2000        # default: discord's message cap
 # max_sync_messages = 5
 # catchup_backlog = 50
 
+[herdr]
+# socket_path = "/path/to/herdr.sock"
+# session = "main"                  # named herdr session, else the main socket
+# default_harness = "pi"            # omp | claude-code | codex | pi | opencode
+# control_command = "pi -p --no-session --tools bash --no-skills"
+# control_cwd = "~"                 # default: home directory
+# control_timeout = "5m"            # default: 300s
+
 # delays: integer seconds or a string like "500ms", "30s", "5m", "1h"
-# [delays]
-# operation_timeout = "30s"          # per herdr API call
+[delays]
+# operation_timeout = "30s"          # per herdr api call
 # sync_interval = "10m"              # reconcile drift backstop
 # message_poll_interval = "1s"       # transcript poll tick
 # session_stale_grace = "5m"         # transcript rotation staleness
@@ -426,8 +444,8 @@ mod duration_secs {
 impl Debug for Config {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
-            .field("guild_id", &self.guild_id)
-            .field("allowed_user_id", &self.allowed_user_id)
+            .field("guild_id", &self.discord.guild_id)
+            .field("allowed_user_id", &self.discord.allowed_user_id)
             .finish_non_exhaustive()
     }
 }
@@ -454,34 +472,34 @@ mod tests {
     #[test]
     fn control_timeout_defaults_to_300s() {
         let config = control_config(None, None, None);
-        assert_eq!(config.control_timeout(), CONTROL_TIMEOUT);
+        assert_eq!(config.herdr.control_timeout(), CONTROL_TIMEOUT);
     }
 
     #[test]
     fn control_timeout_honors_the_override() {
         let config = control_config(None, None, Some(Duration::from_secs(42)));
-        assert_eq!(config.control_timeout(), Duration::from_secs(42));
+        assert_eq!(config.herdr.control_timeout(), Duration::from_secs(42));
     }
 
     #[test]
     fn control_cwd_defaults_to_the_home_directory() {
         let config = control_config(None, None, None);
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-        assert_eq!(config.control_cwd(), home);
+        assert_eq!(config.herdr.control_cwd(), home);
     }
 
     #[test]
     fn control_cwd_honors_the_override() {
         let cwd = PathBuf::from("/some/control/dir");
         let config = control_config(None, Some(cwd.clone()), None);
-        assert_eq!(config.control_cwd(), cwd);
+        assert_eq!(config.herdr.control_cwd(), cwd);
     }
 
     #[test]
     fn control_cwd_expands_a_leading_tilde() {
         let config = control_config(None, Some(PathBuf::from("~/Projects")), None);
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-        assert_eq!(config.control_cwd(), home.join("Projects"));
+        assert_eq!(config.herdr.control_cwd(), home.join("Projects"));
     }
 
     #[test]
@@ -504,34 +522,51 @@ mod tests {
     #[test]
     fn sample_config_parses_with_defaults() {
         let config = crate::config::Config::parse(sample_config()).expect("sample parses");
-        assert_eq!(config.guild_id, serenity::all::GuildId::new(1_234_567_890));
-        assert_eq!(config.default_harness, crate::session::Harness::Pi);
+        assert_eq!(
+            config.discord.guild_id,
+            serenity::all::GuildId::new(1_234_567_890)
+        );
+        assert_eq!(
+            config.discord.allowed_user_id,
+            serenity::all::UserId::new(1_234_567_890)
+        );
+        assert_eq!(config.herdr.default_harness, crate::session::Harness::Pi);
         assert_eq!(config.delays, Delays::default());
     }
 
     #[test]
     fn minimal_config_parses_with_all_defaults() {
-        let config = crate::config::Config::parse("discord_bot_token = \"token\"\nguild_id = 1\n")
-            .expect("minimal config parses");
+        let config = crate::config::Config::parse(
+            "[discord]\nbot_token = \"token\"\nguild_id = 1\nallowed_user_id = 2\n",
+        )
+        .expect("minimal config parses");
+        assert_eq!(
+            config.discord.allowed_user_id,
+            serenity::all::UserId::new(2)
+        );
         assert_eq!(config.delays, Delays::default());
-        assert_eq!(config.control_timeout(), CONTROL_TIMEOUT);
-        assert_eq!(config.control_reply_limit, 2000);
-        assert_eq!(config.max_sync_messages, 5);
-        assert_eq!(config.catchup_backlog, 50);
-        assert!(config.herdr_control_command.is_none());
+        assert_eq!(config.herdr.control_timeout(), CONTROL_TIMEOUT);
+        assert_eq!(config.discord.control_reply_limit, 2000);
+        assert_eq!(config.discord.max_sync_messages, 5);
+        assert_eq!(config.discord.catchup_backlog, 50);
+        assert!(config.herdr.control_command.is_none());
     }
 
     #[test]
     fn config_honors_duration_overrides() {
         let config = crate::config::Config::parse(
             r#"
-            discord_bot_token = "token"
+            [discord]
+            bot_token = "token"
             guild_id = 1
-            default_harness = "claude"
-            herdr_control_timeout = 42
+            allowed_user_id = 2
             control_reply_limit = 100
             max_sync_messages = 2
             catchup_backlog = 10
+
+            [herdr]
+            default_harness = "claude"
+            control_timeout = 42
 
             [delays]
             operation_timeout = "500ms"
@@ -546,11 +581,14 @@ mod tests {
             "#,
         )
         .expect("override config parses");
-        assert_eq!(config.default_harness, crate::session::Harness::ClaudeCode);
-        assert_eq!(config.herdr_control_timeout, Duration::from_secs(42));
-        assert_eq!(config.control_reply_limit, 100);
-        assert_eq!(config.max_sync_messages, 2);
-        assert_eq!(config.catchup_backlog, 10);
+        assert_eq!(
+            config.herdr.default_harness,
+            crate::session::Harness::ClaudeCode
+        );
+        assert_eq!(config.herdr.control_timeout, Duration::from_secs(42));
+        assert_eq!(config.discord.control_reply_limit, 100);
+        assert_eq!(config.discord.max_sync_messages, 2);
+        assert_eq!(config.discord.catchup_backlog, 10);
         assert_eq!(config.delays.operation_timeout, Duration::from_millis(500));
         assert_eq!(config.delays.sync_interval, Duration::from_secs(3600));
         assert_eq!(config.delays.message_poll_interval, Duration::from_secs(3));
@@ -568,7 +606,7 @@ mod tests {
     #[test]
     fn partial_delays_table_falls_back_per_field() {
         let config = crate::config::Config::parse(
-            "discord_bot_token = \"token\"\nguild_id = 1\n\n[delays]\nmessage_poll_interval = \"250ms\"\n",
+            "[discord]\nbot_token = \"token\"\nguild_id = 1\nallowed_user_id = 2\n\n[delays]\nmessage_poll_interval = \"250ms\"\n",
         )
         .expect("partial delays parse");
         assert_eq!(
@@ -582,7 +620,7 @@ mod tests {
     #[test]
     fn invalid_duration_is_rejected() {
         let result = crate::config::Config::parse(
-            "discord_bot_token = \"token\"\nguild_id = 1\nherdr_control_timeout = \"soon\"\n",
+            "[discord]\nbot_token = \"token\"\nguild_id = 1\nallowed_user_id = 2\n\n[herdr]\ncontrol_timeout = \"soon\"\n",
         );
         assert!(result.is_err());
     }
@@ -590,14 +628,19 @@ mod tests {
     #[test]
     fn unknown_harness_is_rejected() {
         let result = crate::config::Config::parse(
-            "discord_bot_token = \"token\"\nguild_id = 1\ndefault_harness = \"bogus\"\n",
+            "[discord]\nbot_token = \"token\"\nguild_id = 1\nallowed_user_id = 2\n\n[herdr]\ndefault_harness = \"bogus\"\n",
         );
         assert!(result.is_err());
     }
 
     #[test]
     fn missing_required_keys_are_rejected() {
-        assert!(crate::config::Config::parse("guild_id = 1\n").is_err());
-        assert!(crate::config::Config::parse("discord_bot_token = \"token\"\n").is_err());
+        assert!(crate::config::Config::parse("[discord]\nguild_id = 1\n").is_err());
+        assert!(crate::config::Config::parse("[discord]\nbot_token = \"token\"\n").is_err());
+        assert!(
+            crate::config::Config::parse("[discord]\nbot_token = \"token\"\nguild_id = 1\n")
+                .is_err()
+        );
+        assert!(crate::config::Config::parse("bot_token = \"token\"\n").is_err());
     }
 }

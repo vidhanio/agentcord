@@ -28,7 +28,7 @@ pub fn framework(bot: &Bot) -> BotFramework {
         .build();
     BotFramework {
         poise: poise_framework,
-        guild_id: bot.config.guild_id,
+        guild_id: bot.config.discord.guild_id,
     }
 }
 
@@ -37,7 +37,7 @@ pub fn framework(bot: &Bot) -> BotFramework {
 /// bot stays inert without one.
 fn build_commands(config: &crate::config::Config) -> Vec<poise::Command<Bot, BotError>> {
     let mut commands = vec![agent::agent()];
-    if config.herdr_control_command.is_some() {
+    if config.herdr.control_command.is_some() {
         commands.push(herdr::herdr());
     }
     commands

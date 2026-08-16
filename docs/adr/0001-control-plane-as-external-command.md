@@ -25,7 +25,8 @@ monitoring output, and reply with a single short confirmation.
 The recommended configuration is a lean one-shot `pi`:
 
 ```toml
-herdr_control_command = "pi -p --no-session --tools bash --no-skills --no-context-files --no-extensions --no-themes --no-prompt-templates"
+[herdr]
+control_command = "pi -p --no-session --tools bash --no-skills --no-context-files --no-extensions --no-themes --no-prompt-templates"
 ```
 
 Shell access only — herdr context arrives via the preamble's `herdr --skill`

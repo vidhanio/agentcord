@@ -76,8 +76,8 @@ impl Forum {
             .unwrap_or(0)
             .min(messages.len());
         let pending = messages.len() - synced;
-        let skip = if pending > self.config.catchup_backlog {
-            pending.saturating_sub(self.config.max_sync_messages)
+        let skip = if pending > self.config.discord.catchup_backlog {
+            pending.saturating_sub(self.config.discord.max_sync_messages)
         } else {
             0
         };

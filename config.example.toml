@@ -5,28 +5,25 @@
 # can be overridden with `--config <path>` or `HERDCORD_CONFIG=<path>`.
 # everything commented below is optional and shows its default.
 
-# required
-discord_bot_token = "..."
+[discord]
+bot_token = "..."
 guild_id = 1234567890
-
-# optional
-# allowed_user_id = 1234567890       # only this user may command agents
-# default_harness = "pi"             # omp | claude-code | codex | pi | opencode
-# herdr_socket_path = "/path/to/herdr.sock"
-# herdr_session = "main"             # named herdr session, else the main socket
-
-# the /herdr control command (unset = /herdr not registered)
-# herdr_control_command = "pi -p --no-session --tools bash --no-skills"
-# herdr_control_cwd = "~"            # default: home directory
-# herdr_control_timeout = "5m"       # default: 300s
-# control_reply_limit = 2000         # default: discord's message cap
-
-# transcript mirroring
+allowed_user_id = 1234567890 # the only user allowed to command agents
+# control_reply_limit = 2000        # default: discord's message cap
 # max_sync_messages = 5
 # catchup_backlog = 50
 
+[herdr]
+# socket_path = "/path/to/herdr.sock"
+# session = "main"                  # named herdr session, else the main socket
+# default_harness = "pi"            # omp | claude-code | codex | pi | opencode
+# control_command = "pi -p --no-session --tools bash --no-skills"
+#                                   # unset = /herdr not registered
+# control_cwd = "~"                 # default: home directory
+# control_timeout = "5m"            # default: 300s
+
 # delays: integer seconds or a string like "500ms", "30s", "5m", "1h"
-# [delays]
+[delays]
 # operation_timeout = "30s"          # per herdr api call
 # sync_interval = "10m"              # reconcile drift backstop
 # message_poll_interval = "1s"       # transcript poll tick

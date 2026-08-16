@@ -2,11 +2,11 @@
 
 use std::{path::PathBuf, time::Duration};
 
-use serenity::all::GuildId;
+use serenity::all::{GuildId, UserId};
 
 use crate::config::{
     CATCHUP_BACKLOG, CONTROL_REPLY_LIMIT, CONTROL_TIMEOUT, Config, DEFAULT_HARNESS, Delays,
-    MAX_SYNC_MESSAGES,
+    Discord, HerdrConfig, MAX_SYNC_MESSAGES,
 };
 
 /// A config with the `/herdr` control knobs set as given; the rest is
@@ -18,18 +18,22 @@ pub fn control_config(
     timeout: Option<Duration>,
 ) -> Config {
     Config {
-        discord_bot_token: "token".into(),
-        guild_id: GuildId::new(1),
-        allowed_user_id: None,
-        default_harness: DEFAULT_HARNESS,
-        herdr_socket_path: None,
-        herdr_session: None,
-        herdr_control_command: command.map(str::to_owned),
-        herdr_control_cwd: cwd,
-        herdr_control_timeout: timeout.unwrap_or(CONTROL_TIMEOUT),
-        control_reply_limit: CONTROL_REPLY_LIMIT,
-        max_sync_messages: MAX_SYNC_MESSAGES,
-        catchup_backlog: CATCHUP_BACKLOG,
+        discord: Discord {
+            bot_token: "token".into(),
+            guild_id: GuildId::new(1),
+            allowed_user_id: UserId::new(1),
+            control_reply_limit: CONTROL_REPLY_LIMIT,
+            max_sync_messages: MAX_SYNC_MESSAGES,
+            catchup_backlog: CATCHUP_BACKLOG,
+        },
+        herdr: HerdrConfig {
+            socket_path: None,
+            session: None,
+            default_harness: DEFAULT_HARNESS,
+            control_command: command.map(str::to_owned),
+            control_cwd: cwd,
+            control_timeout: timeout.unwrap_or(CONTROL_TIMEOUT),
+        },
         delays: Delays::default(),
     }
 }

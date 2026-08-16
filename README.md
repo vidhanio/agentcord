@@ -25,8 +25,10 @@ the bot reads `$XDG_CONFIG_HOME/herdcord/config.toml`
 minimum config:
 
 ```toml
-discord_bot_token = "..."
+[discord]
+bot_token = "..."
 guild_id = 1234567890
+allowed_user_id = 1234567890
 ```
 
 see [`config.example.toml`](config.example.toml) for the full sample with

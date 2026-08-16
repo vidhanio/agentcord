@@ -103,7 +103,9 @@ pub async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<
     };
 
     let selection = parse_agent_modal(&submit.data);
-    let harness = selection.harness.unwrap_or(bot.config.default_harness);
+    let harness = selection
+        .harness
+        .unwrap_or(bot.config.herdr.default_harness);
     let Some(workspace_label) = selection.workspace else {
         reply_to_submit(&submit, ctx.http(), "no workspace selected.").await?;
         return Ok(());
@@ -228,7 +230,7 @@ async fn launch_from_modal(
         .ok_or_else(|| BotError::Other("session has no forum post yet".into()))?;
     let link = format!(
         "https://discord.com/channels/{}/{}",
-        bot.config.guild_id, post
+        bot.config.discord.guild_id, post
     );
 
     if !prompt.trim().is_empty() {

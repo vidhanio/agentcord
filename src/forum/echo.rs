@@ -92,14 +92,18 @@ impl Forum {
     }
 
     /// The allowed user's webhook persona (guild nickname or display name,
-    /// plus avatar URL). Fetched fresh on each echo. `None` when no user is
-    /// configured or the fetch fails.
+    /// plus avatar URL). Fetched fresh on each echo. `None` when the
+    /// fetch fails.
     async fn user_profile(&self, ctx: &Context) -> Option<UserProfile> {
-        let user_id = self.config.allowed_user_id?;
+        let user_id = self.config.discord.allowed_user_id;
         let user = ctx.http.get_user(user_id).await.ok()?;
         // The guild nickname takes priority; fall back to the global
         // display name. The "(via herdr)" suffix marks webhook echoes.
-        let name = match ctx.http.get_member(self.config.guild_id, user_id).await {
+        let name = match ctx
+            .http
+            .get_member(self.config.discord.guild_id, user_id)
+            .await
+        {
             Ok(member) => member.display_name().to_owned(),
             Err(_) => user.global_name.as_deref().unwrap_or(&user.name).to_owned(),
         };

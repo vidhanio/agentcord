@@ -70,7 +70,7 @@ impl Bot {
             .map_err(|error| BotError::Other(format!("failed to open state database: {error}")))?;
 
         let herdr = Herdr::new(
-            config.socket_path(),
+            config.herdr.socket_path(),
             config.delays.operation_timeout,
             config.delays.agent_startup_timeout,
             config.delays.agent_startup_poll_interval,
@@ -101,13 +101,11 @@ impl Bot {
         bot.forum.run_event_loop(ctx).await;
     }
 
-    /// Whether `user_id` may run commands and talk to agents: everyone when
-    /// no allowed user is configured, otherwise only that user.
+    /// Whether `user_id` may run commands and talk to agents: only the
+    /// configured allowed user.
     #[must_use]
     pub fn is_allowed(&self, user_id: UserId) -> bool {
-        self.config
-            .allowed_user_id
-            .is_none_or(|allowed| allowed == user_id)
+        self.config.discord.allowed_user_id == user_id
     }
 
     /// Resumes a dead session's agent with `message` as the first prompt,
@@ -169,7 +167,8 @@ pub async fn run(config: Config) -> BotResult {
     // locks across requests, so the wedging the old one caused is gone.
     let token: Token = bot
         .config
-        .discord_bot_token
+        .discord
+        .bot_token
         .parse()
         .map_err(|error| BotError::Other(format!("invalid Discord bot token: {error}")))?;
     let http = HttpBuilder::new(token.clone()).build();

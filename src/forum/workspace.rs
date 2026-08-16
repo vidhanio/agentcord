@@ -40,6 +40,7 @@ impl Forum {
         let name = forum_channel_name(&workspace.label);
         let created = self
             .config
+            .discord
             .guild_id
             .create_channel(&ctx.http, CreateChannel::new(name).kind(ChannelType::Forum))
             .await?;

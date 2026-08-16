@@ -50,7 +50,7 @@ impl Forum {
         let harness = self
             .applied_harness(ctx, post)
             .await?
-            .unwrap_or(self.config.default_harness);
+            .unwrap_or(self.config.herdr.default_harness);
         let args = resume_args(harness, session);
         let workspace = self.workspace_by_label(&session.workspace_label).await?;
         let name = self.fresh_agent_name().await?;

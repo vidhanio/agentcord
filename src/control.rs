@@ -1,7 +1,7 @@
 //! The `/herdr` control command: a user-configured one-shot subprocess.
 //!
 //! The command (e.g. a lean `pi -p`) is configured via
-//! `herdr_control_command`; the user's prompt, prefixed with a
+//! `herdr.control_command`; the user's prompt, prefixed with a
 //! control-plane preamble ([`control_prompt`]), is piped to its stdin,
 //! and its concatenated output is relayed back as the reply
 //! ([`truncate_reply`]). The caller injects `HERDR_ENV=1` and the
