@@ -217,6 +217,15 @@ impl EventHandler for Bot {
                     );
                 }
             }
+            FullEvent::ChannelDelete { channel, .. } => {
+                if let Err(error) = self.forum.handle_channel_delete(ctx, channel).await {
+                    warn!(
+                        ?error,
+                        channel = %channel.base.name,
+                        "failed to handle deleted channel"
+                    );
+                }
+            }
             FullEvent::Message { new_message, .. } => self.handle_message(ctx, new_message).await,
             // Interactions (the `/agent` and `/herdr` commands, the agent
             // modal) are handled by the poise framework.

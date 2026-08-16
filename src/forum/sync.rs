@@ -470,12 +470,32 @@ impl Forum {
         // The call completed since it was posted: refresh the message in
         // place — the embed recolours, the text form swaps its gear for
         // the failure X and appends the error block.
-        self.update_tool_call(ctx, post, message_id, call).await?;
-        self.tool_messages
-            .lock()
-            .expect("tool_messages lock poisoned")
-            .insert(key, (message_id, call.state));
-        Ok(None)
+        match self.update_tool_call(ctx, post, message_id, call).await {
+            Ok(()) => {
+                self.tool_messages
+                    .lock()
+                    .expect("tool_messages lock poisoned")
+                    .insert(key, (message_id, call.state));
+                Ok(None)
+            }
+            // The posted message was deleted on Discord: forget it and
+            // re-post the call fresh, so a ghost message can never stall
+            // the mirror (an edit failure would abort the pass before the
+            // cursor commits).
+            Err(BotError::Serenity(error)) if crate::forum::lookup::is_not_found(&error) => {
+                self.tool_messages
+                    .lock()
+                    .expect("tool_messages lock poisoned")
+                    .remove(&key);
+                let id = self.post_tool_call(ctx, post, call).await?;
+                self.tool_messages
+                    .lock()
+                    .expect("tool_messages lock poisoned")
+                    .insert(key, (id, call.state));
+                Ok(Some(id))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Posts a tool call's message: the single-argument text form when the

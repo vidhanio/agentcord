@@ -12,11 +12,7 @@ impl Forum {
     pub async fn channel_exists(&self, ctx: &Context, channel_id: ChannelId) -> BotResult<bool> {
         match ctx.http.get_channel(channel_id.widen()).await {
             Ok(_) => Ok(true),
-            Err(serenity::Error::Http(serenity::all::HttpError::UnsuccessfulRequest(response)))
-                if response.status_code == serenity::all::StatusCode::NOT_FOUND =>
-            {
-                Ok(false)
-            }
+            Err(error) if is_not_found(&error) => Ok(false),
             Err(error) => Err(error.into()),
         }
     }
@@ -57,4 +53,16 @@ impl Forum {
             _ => Err(BotError::ForumChannelNotFound),
         }
     }
+}
+
+/// Whether `error` is a Discord 404: the channel or message it targeted is
+/// gone. Deleted-channel and deleted-message failures are repairs, not
+/// errors, for the paths that re-create their targets.
+#[must_use]
+pub fn is_not_found(error: &serenity::Error) -> bool {
+    matches!(
+        error,
+        serenity::Error::Http(serenity::all::HttpError::UnsuccessfulRequest(response))
+            if response.status_code == serenity::all::StatusCode::NOT_FOUND
+    )
 }

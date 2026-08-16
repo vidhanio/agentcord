@@ -14,8 +14,9 @@ runs only from status events and the reconcile drift backstop (startup,
 reconnect, 600s); the starter message's intro refreshes only on post
 creation, session death, and resume; `pane.agent_detected` only triggers the
 re-subscribe (the post-reconnect reconcile applies the new agent's metadata);
-thread creation only deletes manual posts; a deleted post is re-created on
-Discord's `thread.delete` event through the one rare full pass (ensure +
+thread creation only deletes manual posts; deleted posts and forums are
+repaired on Discord's `thread.delete` and `channel.delete` events (posts and
+forums re-created, dead rows pruned) through the one rare full pass (ensure +
 metadata + mirror), with the poll's recovery escalation and the reconcile as
 backstops.
 

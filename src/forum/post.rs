@@ -5,8 +5,8 @@
 use std::path::Path;
 
 use serenity::all::{
-    ChannelId, Context, CreateForumPost, CreateMessage, GetMessages, GuildThread, MessageId,
-    PartialGuildThread,
+    ChannelId, Context, CreateForumPost, CreateMessage, GetMessages, GuildChannel, GuildThread,
+    MessageId, PartialGuildThread,
 };
 use tracing::{info, warn};
 
@@ -219,9 +219,11 @@ impl Forum {
 
     /// Handles a deleted forum post. A deleted post of a live session is
     /// re-created right away — a live agent always gets its post — via the
-    /// recovery pass (ensure + tags + mirror). Manual posts and the bot's
-    /// own deletions have no session row and are ignored; a dead session's
-    /// deleted post makes the row stale, which the reconcile prunes.
+    /// recovery pass (ensure + tags + mirror). A dead session's deleted
+    /// post makes the row unrecoverable stale state, so the row is pruned
+    /// now instead of waiting for the reconcile's existence probe. Manual
+    /// posts and the bot's own deletions have no session row and are
+    /// ignored.
     pub async fn handle_thread_delete(
         &self,
         ctx: &Context,
@@ -231,7 +233,54 @@ impl Forum {
         let Some(session) = self.db.session_by_post(post_id).await? else {
             return Ok(());
         };
+        if self.hosting_agents(&session).await.is_empty() {
+            info!(
+                session = %session.session_path,
+                ?post_id,
+                "pruning session row (post deleted, agent gone)"
+            );
+            self.drop_session_bookkeeping(&session.session_path);
+            self.db.delete_session(&session.session_path).await?;
+            return Ok(());
+        }
         self.recover_session(ctx, &session).await;
+        Ok(())
+    }
+
+    /// Handles a deleted channel. A deleted forum of a live workspace is
+    /// re-created right away — a workspace always gets its forum — and the
+    /// live sessions in it get their posts re-created, so the workspace's
+    /// mirror survives the deletion without waiting for the reconcile. A
+    /// forum whose workspace is gone from herdr is unrecoverable: its row
+    /// is pruned now instead of waiting for the reconcile's existence
+    /// probe.
+    pub async fn handle_channel_delete(
+        &self,
+        ctx: &Context,
+        channel: &GuildChannel,
+    ) -> BotResult<()> {
+        let Some(row) = self.db.workspace_by_forum(to_i64(channel.id)?).await? else {
+            // Not a forum channel this bot manages.
+            return Ok(());
+        };
+        let Some(workspace) = self.workspace_by_label(&row.label).await? else {
+            info!(
+                workspace = %row.label,
+                "pruning workspace row (workspace gone, forum deleted)"
+            );
+            self.db.delete_workspace(&row.label).await?;
+            return Ok(());
+        };
+        self.sync_workspace_forum(ctx, &workspace).await?;
+        for agent in self
+            .herdr
+            .list_agents()
+            .await?
+            .into_iter()
+            .filter(|agent| agent.workspace_id == workspace.workspace_id)
+        {
+            self.sync_agent_post(ctx, &agent).await;
+        }
         Ok(())
     }
 

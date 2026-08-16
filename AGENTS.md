@@ -115,15 +115,15 @@ agents.
   so tags this bot does not manage are dropped. Stateless — the forum's tag
   list is fetched fresh on each write. A dead thread's harness tag is the
   resume harness; on death the applied tags are pruned to just the harness tag.
-- **Deleted forums and posts are re-created.** A workspace always gets its
-  forum channel (`ensure_workspace_forum` re-creates a deleted one and
-  re-binds the mapping) and a live agent always gets its post
-  (`ensure_session_post` re-creates a deleted post in the workspace's
-  forum, re-binding the session row — key and adopted transcript
-  preserved). A deleted post is re-created the instant Discord's
-  `thread.delete` event arrives (the recovery pass: ensure + tags +
-  mirror); the poll's recovery escalation and the reconcile are the
-  backstops for missed events, so recovery never waits for a poll tick.
+- **Deleted forums, posts, and messages are repaired on Discord events.** A
+  workspace always gets its forum (re-created on Discord's `channel.delete`), a live
+  agent always gets its post (re-created on `thread.delete` via the recovery pass:
+  ensure + tags + mirror), and a tool-embed message the user deleted is re-posted on
+  the next completion (an edit-404 drops the stale bookkeeping instead of stalling
+  the mirror). A dead session's deleted post, and a deleted forum whose workspace is
+  gone from herdr, are pruned on the same events. Every Discord-side repair is
+  event-driven; the poll's recovery escalation and the reconcile's existence probes
+  remain only as backstops for events missed during a disconnect.
 - **One writer per concern.** The transcript mirror (posting agent turns,
   tool embeds, user echoes) runs only from the 2s poll and the relay's
   settle (the immediate reply path); events and the reconcile do post
@@ -212,8 +212,10 @@ Discord ──► Bot event handler (src/lib.rs, serenity EventHandler::dispatch
               │  new post in a managed forum ──► Forum::handle_thread_create
               │     bot's own posts: left alone (the poll mirrors them)
               │     manual posts: deleted silently (agents launch via /agent)
-              │  deleted post of a live session ──► Forum::handle_thread_delete
-              │     re-created right away (recovery pass: ensure + tags + mirror)
+              │  deleted post ──► Forum::handle_thread_delete
+              │     live session: re-created (recovery pass); dead: row pruned
+              │  deleted channel (forum) ──► Forum::handle_channel_delete
+              │     forum + live posts re-created; row pruned if workspace gone
               │
 Discord ──► poise framework (src/commands/, serenity Framework)
               │  /agent ──► native modal (harness dropdown w/ default harness,
@@ -317,8 +319,9 @@ Discord ──► poise framework (src/commands/, serenity Framework)
   prompts can settle into one blocked state). The typing indicator is the
   event loop's, driven by the working status event.
 - `src/lib.rs` (Bot + event handler) — the serenity `EventHandler` in its
-  `dispatch` form (Ready spawns the poll + event loop; ThreadCreate and
-  ThreadDelete are delegated to the forum's thread handlers; Message
+  `dispatch` form (Ready spawns the poll + event loop; ThreadCreate,
+  ThreadDelete, and ChannelDelete are delegated to the forum's thread/channel
+  handlers; Message
   relays to sessions and resumes dead ones), plus the `run()` wiring: `Http` with the default
   ratelimiter, `ClientBuilder` with the bot handler and the poise framework.
 
