@@ -326,7 +326,7 @@ Discord ──► poise framework (src/commands/, serenity Framework)
 | `src/db/` | SQLite state: `mod.rs` (Db wrapper + queries), `model.rs` (row types), `migrate.rs` (schema push + legacy migrations) |
 | `src/commands/` | Slash commands: `mod.rs` (poise framework wiring), `agent.rs` (the `/agent` modal + launch), `herdr.rs` (the `/herdr` control command) |
 | `tests/` | `herdr_live.rs` (live integration, gated) and `fixtures/api/` (captured herdr API JSON, embedded via `include_str!`) |
-| `.github/workflows/` | CI — `ci-cd.yaml` (test, test-docs, check/clippy, check-docs, check-format via the flake's treefmt check; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs, nix for formatting) and `security-audit.yaml` (daily + on manifest changes, cargo-deny) |
+| `.github/workflows/` | CI — `ci-cd.yaml` (test, test-docs, check/clippy, check-docs, check-format via the flake's treefmt check; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs, nix for formatting) and `security-audit.yaml` (daily + on manifest changes, cargo-deny); `dependabot.yml` (weekly cargo + flake-input updates, flake inputs grouped into one PR) |
 
 ## Development Commands
 
