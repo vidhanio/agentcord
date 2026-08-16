@@ -11,11 +11,49 @@
   outputs =
     inputs:
     inputs.flake-parts.lib.mkFlake { inherit inputs; } (
-      { inputs, ... }:
+      {
+        inputs,
+        self,
+        ...
+      }:
       {
         imports = [ inputs.treefmt-nix.flakeModule ];
 
         systems = import inputs.systems;
+
+        flake.homeManagerModules.default =
+          {
+            config,
+            lib,
+            pkgs,
+            ...
+          }:
+          let
+            cfg = config.programs.herdcord;
+            toml = pkgs.formats.toml { };
+          in
+          {
+            options.programs.herdcord = {
+              enable = lib.mkEnableOption "herdcord";
+
+              package = lib.mkOption {
+                type = lib.types.package;
+                default = self.packages.${pkgs.system}.default;
+                description = "Package to install for herdcord.";
+              };
+
+              settings = lib.mkOption {
+                inherit (toml) type;
+                default = { };
+                description = "Configuration written to `herdcord/config.toml`.";
+              };
+            };
+
+            config = lib.mkIf cfg.enable {
+              home.packages = [ cfg.package ];
+              xdg.configFile."herdcord/config.toml".source = toml.generate "herdcord-config.toml" cfg.settings;
+            };
+          };
 
         perSystem =
           {
@@ -52,6 +90,52 @@
               strictDeps = true;
             };
 
+            mkCargoTool =
+              {
+                pname,
+                version,
+                src,
+                cargoLock,
+                ...
+              }@args:
+              craneLib.buildPackage (
+                {
+                  inherit
+                    pname
+                    version
+                    src
+                    cargoLock
+                    ;
+                  cargoArtifacts = craneLib.buildDepsOnly {
+                    inherit
+                      pname
+                      version
+                      src
+                      cargoLock
+                      ;
+                    strictDeps = true;
+                    doCheck = false;
+                  };
+                  cargoExtraArgs = "--locked";
+                  doCheck = false;
+                  strictDeps = true;
+                }
+                // args
+              );
+
+            cargoDocsRs = mkCargoTool {
+              pname = "cargo-docs-rs";
+              version = "1.0.4";
+              src = pkgs.fetchFromGitHub {
+                owner = "dtolnay";
+                repo = "cargo-docs-rs";
+                rev = "cd8275c03281264975ca5ea68373ba487d2dcea3";
+                hash = "sha256-969GTfOnPUQlDEqupIaP7dX3zexJr2+j+e/nuAgJu1o=";
+              };
+              cargoLock = ./nix/cargo-docs-rs.Cargo.lock;
+            };
+
+            cargoEdit = pkgs.cargo-edit;
             cargoArtifacts = craneLib.buildDepsOnly commonArgs;
           in
           {
@@ -60,12 +144,17 @@
               overlays = [ inputs.rust-overlay.overlays.default ];
             };
 
-            packages.default = craneLib.buildPackage (
-              commonArgs
-              // {
-                inherit cargoArtifacts;
-              }
-            );
+            packages = {
+              default = craneLib.buildPackage (
+                commonArgs
+                // {
+                  inherit cargoArtifacts;
+                }
+              );
+
+              cargo-docs-rs = cargoDocsRs;
+              cargo-edit = cargoEdit;
+            };
 
             checks = {
               clippy = craneLib.cargoClippy (
@@ -76,11 +165,15 @@
                 }
               );
 
-              doc = craneLib.cargoDoc (
+              doc = craneLib.mkCargoDerivation (
                 commonArgs
                 // {
                   inherit cargoArtifacts;
+                  nativeBuildInputs = [ cargoDocsRs ];
+                  buildPhaseCargoCommand = "cargo docs-rs --locked";
+                  installPhaseCommand = "mkdir -p $out";
                   env.RUSTDOCFLAGS = "--deny warnings";
+                  doCheck = false;
                 }
               );
 
@@ -107,6 +200,8 @@
               inherit (self') checks;
 
               packages = [
+                cargoDocsRs
+                cargoEdit
                 pkgs.nil
                 pkgs.prek
                 config.treefmt.build.wrapper

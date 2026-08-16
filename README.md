@@ -42,6 +42,34 @@ containing quotes or other TOML syntax are safe. If `NAME` is unset, the
 nix run .#default
 ```
 
+## Home Manager
+
+The flake exports a Home Manager module without requiring a Home Manager flake
+input. Add `inputs.herdcord.homeManagerModules.default` to your Home Manager
+configuration and enable the program:
+
+```nix
+{ inputs, ... }:
+{
+  imports = [ inputs.herdcord.homeManagerModules.default ];
+
+  programs.herdcord = {
+    enable = true;
+    settings = {
+      discord = {
+        bot_token = "...";
+        guild_id = 1234567890;
+        allowed_user_id = 1234567890;
+      };
+    };
+  };
+}
+```
+
+`settings` is rendered as TOML at
+`$XDG_CONFIG_HOME/herdcord/config.toml`. The `package` option defaults to this
+flake's `packages.<system>.default` and can be overridden when needed.
+
 ## license
 
 AGPL-3.0-or-later
