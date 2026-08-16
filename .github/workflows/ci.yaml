@@ -91,69 +91,87 @@ jobs:
 
   check-nix:
     name: check nix
-    uses: ./.github/workflows/nix-check.yaml
-    with:
-      name: check nix
-      command: nix flake check
-    permissions:
-      actions: write
-      contents: read
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+
+      - name: setup nix
+        uses: ./.github/actions/setup-nix
+
+      - name: check flake
+        run: nix flake check
 
   check-home-manager:
     name: check home manager
-    uses: ./.github/workflows/nix-check.yaml
-    with:
-      name: check home manager
-      command: |
-        nix eval --impure --show-trace --expr '
-        let
-          flake = builtins.getFlake (toString ./.);
-          module = flake.homeManagerModules.default;
-          pkgs = import flake.inputs.nixpkgs {
-            system = "x86_64-linux";
-            overlays = [ flake.inputs.rust-overlay.overlays.default ];
-          };
-          moduleResult = module {
-            inherit pkgs;
-            lib = pkgs.lib;
-            config = {
-              programs.herdcord = {
-                enable = true;
-                settings = {
-                  discord = {
-                    bot_token = "token";
-                    guild_id = 1;
-                    allowed_user_id = 2;
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+
+      - name: setup nix
+        uses: ./.github/actions/setup-nix
+
+      - name: check module
+        run: |
+          nix eval --impure --show-trace --expr '
+          let
+            flake = builtins.getFlake (toString ./.);
+            module = flake.homeManagerModules.default;
+            pkgs = import flake.inputs.nixpkgs {
+              system = "x86_64-linux";
+              overlays = [ flake.inputs.rust-overlay.overlays.default ];
+            };
+            moduleResult = module {
+              inherit pkgs;
+              lib = pkgs.lib;
+              config = {
+                programs.herdcord = {
+                  enable = true;
+                  settings = {
+                    discord = {
+                      bot_token = "token";
+                      guild_id = 1;
+                      allowed_user_id = 2;
+                    };
                   };
                 };
               };
             };
-          };
-        in
-        assert
-          moduleResult.options.programs.herdcord.enable.description
-          == "Whether to enable herdcord.";
-        assert
-          moduleResult.options.programs.herdcord.package.default.pname
-          == "herdcord";
-        assert moduleResult.options.programs.herdcord.settings.default == { };
-        assert moduleResult.config.condition;
-        assert builtins.length moduleResult.config.content.home.packages == 1;
-        assert
-          builtins.hasAttr "herdcord/config.toml"
-          moduleResult.config.content.xdg.configFile;
-        true
-        '
-    permissions:
-      actions: write
-      contents: read
+          in
+          assert
+            moduleResult.options.programs.herdcord.enable.description
+            == "Whether to enable herdcord.";
+          assert
+            moduleResult.options.programs.herdcord.package.default.pname
+            == "herdcord";
+          assert moduleResult.options.programs.herdcord.settings.default == { };
+          assert moduleResult.config.condition;
+          assert builtins.length moduleResult.config.content.home.packages == 1;
+          assert
+            builtins.hasAttr "herdcord/config.toml"
+            moduleResult.config.content.xdg.configFile;
+          true
+          '
 
   check-format:
     name: check format
-    uses: ./.github/workflows/nix-check.yaml
-    with:
-      name: check format
-      command: nix build .#checks.x86_64-linux.treefmt
-    permissions:
-      actions: write
-      contents: read
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+
+      - name: setup nix
+        uses: ./.github/actions/setup-nix
+
+      # treefmt config lives in the flake (treefmt-nix: nixfmt, statix,
+      # deadnix, nightly rustfmt, taplo), so the fmt gate is the flake's
+      # own treefmt check: it formats the tree and fails on any diff.
+      - name: check formatting
+        run: nix build .#checks.x86_64-linux.treefmt

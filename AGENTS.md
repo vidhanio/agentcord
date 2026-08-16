@@ -326,8 +326,8 @@ Discord ──► poise framework (src/commands/, serenity Framework)
 | `src/db/` | SQLite state: `mod.rs` (Db wrapper + queries), `model.rs` (row types), `migrate.rs` (schema push + legacy migrations) |
 | `src/commands/` | Slash commands: `mod.rs` (poise framework wiring), `agent.rs` (the `/agent` modal + launch), `herdr.rs` (the `/herdr` control command) |
 | `tests/` | `herdr_live.rs` (live integration, gated) and `fixtures/api/` (captured herdr API JSON, embedded via `include_str!`) |
-| `.github/workflows/nix-check.yaml` | Reusable Nix workflow: installs Nix, frees runner disk space, restores the Nix store cache, and runs a command supplied by the caller |
-| `.github/workflows/` | `ci.yaml` (test, test-docs, check/clippy, docs.rs-compatible `check-docs`, reusable Nix setup for `check-nix`, `check-home-manager`, and check-format; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs) and `security-audit.yaml` (daily + on manifest changes, cargo-deny); `dependabot.yml` (weekly cargo, flake-input, and GitHub Actions updates) |
+| `.github/actions/setup-nix/` | Reusable Nix setup composite action: installs Nix, frees runner disk space, and restores the Nix store cache |
+| `.github/workflows/` | `ci.yaml` (test, test-docs, check/clippy, docs.rs-compatible `check-docs`, Nix setup via `setup-nix` for `check-nix`, `check-home-manager`, and check-format; dtolnay toolchain + Swatinem rust-cache, nightly for clippy/docs) and `security-audit.yaml` (daily + on manifest changes, cargo-deny); `dependabot.yml` (weekly cargo, flake-input, and GitHub Actions updates) |
 
 ## Development Commands
 
@@ -573,8 +573,8 @@ wire it into git with `prek install`.
   docs on nightly, Nix outputs via `nix flake check`, the `homeManagerModules`
   output via a focused module evaluation, formatting via the flake's treefmt
   check (`nix build .#checks.x86_64-linux.treefmt`), and `cargo-deny` (see
-  `.github/workflows/nix-check.yaml` and `.github/workflows/`);
-  `nix flake check` remains the local hermetic equivalent. Every commit is additionally gated
+  `.github/actions/setup-nix/` and `.github/workflows/`); `nix flake check`
+  remains the local hermetic equivalent. Every commit is additionally gated
   by a prek hook running `treefmt --ci` on the whole tree
   (`.pre-commit-config.yaml`).
 - **Coverage expectations**: no coverage tooling; correctness is enforced by
