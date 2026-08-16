@@ -1,0 +1,38 @@
+# herdcord example config.
+#
+# copy to $XDG_CONFIG_HOME/herdcord/config.toml (default:
+# ~/.config/herdcord/config.toml) and fill in the required keys. the path
+# can be overridden with `--config <path>` or `HERDCORD_CONFIG=<path>`.
+# everything commented below is optional and shows its default.
+
+# required
+discord_bot_token = "..."
+guild_id = 1234567890
+
+# optional
+# allowed_user_id = 1234567890       # only this user may command agents
+# default_harness = "pi"             # omp | claude-code | codex | pi | opencode
+# herdr_socket_path = "/path/to/herdr.sock"
+# herdr_session = "main"             # named herdr session, else the main socket
+
+# the /herdr control command (unset = /herdr not registered)
+# herdr_control_command = "pi -p --no-session --tools bash --no-skills"
+# herdr_control_cwd = "~"            # default: home directory
+# herdr_control_timeout = "5m"       # default: 300s
+# control_reply_limit = 2000         # default: discord's message cap
+
+# transcript mirroring
+# max_sync_messages = 5
+# catchup_backlog = 50
+
+# delays: integer seconds or a string like "500ms", "30s", "5m", "1h"
+# [delays]
+# operation_timeout = "30s"          # per herdr api call
+# sync_interval = "10m"              # reconcile drift backstop
+# message_poll_interval = "1s"       # transcript poll tick
+# session_stale_grace = "5m"         # transcript rotation staleness
+# relay_idle_timeout = "10m"         # per-agent relay worker lifetime
+# resubscribe_delay = "5s"           # event-stream reconnect delay
+# agent_startup_timeout = "30s"      # agent.start detection wait
+# agent_startup_poll_interval = "100ms"
+# modal_timeout = "5m"               # /agent modal submission window

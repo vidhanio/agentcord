@@ -9,7 +9,7 @@ through their forum posts.
 **Control command**:
 The user-configured external command that `/herdr` runs as a one-shot
 subprocess: the user's prompt is piped to its stdin and its output is relayed
-back as the reply. Configurable via env var, opt-in, herdr-agnostic — herdr
+back as the reply. Configurable via the config file, opt-in, herdr-agnostic — herdr
 control is its common payload, not its contract.
 _Avoid_: control-plane agent (the old design's LLM-in-a-throwaway-session),
 control runner

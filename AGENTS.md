@@ -369,7 +369,9 @@ wire it into git with `prek install`.
   see it.
 - Run the bot with a TOML config at `$XDG_CONFIG_HOME/herdcord/config.toml`
   (else `~/.config/herdcord/config.toml`; see `src/config.rs` and its
-  `sample_config`): `discord_bot_token` and `guild_id` required;
+  `sample_config`, plus `config.example.toml` in the repo):
+  `discord_bot_token` and `guild_id` required; the path is overridable
+  via `--config <path>` or the `HERDCORD_CONFIG` env var;
   `allowed_user_id` optional (when set, only that Discord user may talk
   to agents and launch them via forum posts); `herdr_control_command`
   (the `/herdr` one-shot control command — whitespace-split, opt-in:
@@ -454,7 +456,8 @@ wire it into git with `prek install`.
 
 ## Important Files
 
-- `src/main.rs` — entry: color_eyre, `Config::load()` (TOML),
+- `src/main.rs` — entry: clap (`--config`/`HERDCORD_CONFIG`), color_eyre,
+  `Config::load()` (TOML),
   tracing init, `herdcord::run(config)`.
 - `src/lib.rs` — `Bot` struct (config, herdr client, forum, relay, state
   `Db`), `run()` (serenity `Http` with the default ratelimiter,
@@ -523,7 +526,7 @@ wire it into git with `prek install`.
   to override).
 - **Dependencies**: prefer popular libraries over vendored logic (serenity's
   built-in `Typing`, `ExecuteWebhook`, poise, the `time` crate, etc.).
-  Current deps: serenity, poise, toasty, nutype, thiserror, toml,
+  Current deps: clap, serenity, poise, toasty, nutype, thiserror, toml,
   humantime, dirs, tokio, tracing, serde/serde_json, color-eyre (main
   only). No anyhow in the lib.
 

@@ -199,16 +199,15 @@ pub struct Config {
 }
 
 impl Config {
-    /// Loads the config from [`config_path`], with a helpful error naming
-    /// the path and a sample when the file is missing.
+    /// Loads the config from `path`, with a helpful error naming the
+    /// path and a sample when the file is missing.
     ///
     /// # Errors
     ///
     /// Returns [`BotError::Other`] when the file cannot be read or is not
     /// valid TOML.
-    pub fn load() -> Result<Self, BotError> {
-        let path = config_path();
-        let raw = std::fs::read_to_string(&path).map_err(|error| {
+    pub fn load(path: &Path) -> Result<Self, BotError> {
+        let raw = std::fs::read_to_string(path).map_err(|error| {
             BotError::Other(format!(
                 "no configuration at {} ({error}); create it with at least \
                  `discord_bot_token` and `guild_id`, e.g.\n{sample}",
