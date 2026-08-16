@@ -7,7 +7,7 @@ use std::{path::Path, process::Command, time::Duration};
 
 use herdcord::{
     Harness,
-    config::socket_path,
+    config::default_socket_path,
     herdr::{AgentStatus, EventKind, Herdr, Subscription},
     read_session,
 };
@@ -49,7 +49,12 @@ async fn spawn_prompt_read_close_roundtrip() {
         return;
     }
 
-    let herdr = Herdr::new(socket_path(), Duration::from_secs(30));
+    let herdr = Herdr::new(
+        default_socket_path(),
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+        Duration::from_millis(100),
+    );
 
     // Sweep up workspaces leaked by earlier killed runs.
     sweep_workspaces(&herdr, "herdcord-live-").await;
@@ -100,7 +105,12 @@ async fn event_stream_delivers_pane_updates() {
         return;
     }
 
-    let herdr = Herdr::new(socket_path(), Duration::from_secs(30));
+    let herdr = Herdr::new(
+        default_socket_path(),
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+        Duration::from_millis(100),
+    );
 
     // Sweep up workspaces leaked by earlier killed runs. The prefix is
     // disjoint from the roundtrip test's so the two tests never close each
@@ -179,7 +189,12 @@ async fn session_file_records_conversation() {
         return;
     }
 
-    let herdr = Herdr::new(socket_path(), Duration::from_secs(30));
+    let herdr = Herdr::new(
+        default_socket_path(),
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+        Duration::from_millis(100),
+    );
 
     // Sweep up workspaces leaked by earlier killed runs. The prefix is
     // disjoint from the other tests' so they never close each other's

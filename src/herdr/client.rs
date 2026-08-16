@@ -19,29 +19,36 @@ use super::{
 };
 use crate::session::Harness;
 
-/// How long `agent.start` waits for the agent to be detected after the
-/// placeholder response.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How often `agent.start` polls for detection.
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
-
 /// Typed async client over the herdr Unix-socket API.
 #[derive(Debug, Clone)]
 pub struct Herdr {
     socket_path: PathBuf,
     operation_timeout: Duration,
+    /// How long `agent.start` waits for the agent to be detected after the
+    /// placeholder response.
+    startup_timeout: Duration,
+    /// How often `agent.start` polls for detection.
+    startup_poll_interval: Duration,
 }
 
 impl Herdr {
     /// Creates a client that talks to the herdr Unix socket at `socket_path`.
     ///
-    /// `operation_timeout` bounds each request's total runtime.
+    /// `operation_timeout` bounds each request's total runtime;
+    /// `startup_timeout`/`startup_poll_interval` bound the `agent.start`
+    /// detection wait.
     #[must_use]
-    pub const fn new(socket_path: PathBuf, operation_timeout: Duration) -> Self {
+    pub const fn new(
+        socket_path: PathBuf,
+        operation_timeout: Duration,
+        startup_timeout: Duration,
+        startup_poll_interval: Duration,
+    ) -> Self {
         Self {
             socket_path,
             operation_timeout,
+            startup_timeout,
+            startup_poll_interval,
         }
     }
 
@@ -254,13 +261,13 @@ impl Herdr {
             if !agent.launch_pending {
                 return Ok(agent);
             }
-            if started.elapsed() >= STARTUP_TIMEOUT {
+            if started.elapsed() >= self.startup_timeout {
                 return Err(Error::Herdr {
                     code: "agent_startup_timeout".into(),
                     message: format!("timed out waiting for agent `{name}` to start"),
                 });
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            tokio::time::sleep(self.startup_poll_interval).await;
         }
     }
 

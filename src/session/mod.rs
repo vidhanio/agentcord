@@ -12,6 +12,8 @@
 
 use std::{io::Result as IoResult, path::Path};
 
+use serde::Deserialize;
+
 mod claude;
 mod codex;
 mod common;
@@ -103,6 +105,21 @@ impl Harness {
             Self::Pi => "Pi",
             Self::Opencode => "OpenCode",
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for Harness {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).ok_or_else(|| {
+            serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(&s),
+                &"a harness: `omp`, `claude-code`, `codex`, `pi`, or `opencode`",
+            )
+        })
     }
 }
 

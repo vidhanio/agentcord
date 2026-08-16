@@ -23,9 +23,6 @@ pub struct RelayJob {
     pub text: String,
 }
 
-/// How long a worker with no incoming messages stays alive.
-const WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
-
 /// Relays user messages to herdr agents, one job at a time per agent. A
 /// delivered prompt is never waited on: the poll mirrors the agent's
 /// response (within a tick), and the event loop posts the blocked notice
@@ -37,16 +34,21 @@ const WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 #[derive(Debug, Clone)]
 pub struct Relay {
     herdr: Herdr,
+    /// How long a worker with no incoming messages stays alive.
+    idle_timeout: Duration,
     /// Live workers by pane id — agents are unnamed, so the pane is the
     /// stable relay target.
     workers: Arc<Mutex<HashMap<PaneId, mpsc::Sender<RelayJob>>>>,
 }
 
 impl Relay {
+    /// Creates a relay whose per-agent workers die after `idle_timeout` of
+    /// silence.
     #[must_use]
-    pub fn new(herdr: Herdr) -> Self {
+    pub fn new(herdr: Herdr, idle_timeout: Duration) -> Self {
         Self {
             herdr,
+            idle_timeout,
             workers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -99,7 +101,7 @@ impl Relay {
         mut receiver: mpsc::Receiver<RelayJob>,
     ) {
         loop {
-            let Ok(Some(job)) = tokio::time::timeout(WORKER_IDLE_TIMEOUT, receiver.recv()).await
+            let Ok(Some(job)) = tokio::time::timeout(self.idle_timeout, receiver.recv()).await
             else {
                 break;
             };

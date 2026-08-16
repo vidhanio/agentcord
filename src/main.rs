@@ -7,9 +7,7 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    _ = dotenvy::dotenv();
-
-    let config = Config::from_env()?;
+    let config = Config::load()?;
 
     let fmt = tracing_subscriber::fmt()
         .with_env_filter(

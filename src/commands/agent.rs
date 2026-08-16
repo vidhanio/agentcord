@@ -9,8 +9,6 @@
 //! serenity's modal collector, and the launch result edits the submit's
 //! deferred response (see the note in [`agent`]).
 
-use std::time::Duration;
-
 use poise::serenity_prelude as serenity;
 use serenity::{
     CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateLabel,
@@ -24,9 +22,6 @@ use crate::{
     Bot, BotResult, config::DEFAULT_HARNESS, error::BotError, forum, herdr::SessionPath,
     relay::RelayJob, session::Harness,
 };
-
-/// How long the `/agent` modal waits for the user to submit it.
-const MODAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Discord select menus accept at most 25 options; more workspaces than
 /// that are dropped (newest last after sorting) with a warning.
@@ -100,7 +95,7 @@ pub async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<
 
     let submit = ModalInteractionCollector::new(ctx.serenity_context())
         .filter(move |m| m.data.custom_id.as_str() == custom_id.as_str())
-        .timeout(MODAL_TIMEOUT)
+        .timeout(bot.config.delays.modal_timeout)
         .await;
     let Some(submit) = submit else {
         // The user never submitted; nothing to do.
@@ -108,7 +103,7 @@ pub async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<
     };
 
     let selection = parse_agent_modal(&submit.data);
-    let harness = selection.harness.unwrap_or(DEFAULT_HARNESS);
+    let harness = selection.harness.unwrap_or(bot.config.default_harness);
     let Some(workspace_label) = selection.workspace else {
         reply_to_submit(&submit, ctx.http(), "no workspace selected.").await?;
         return Ok(());

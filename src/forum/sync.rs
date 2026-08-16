@@ -23,10 +23,9 @@ impl Forum {
     /// stateful embeds (posted once, edited in place as they complete,
     /// errors baked into the call's own message), and new user
     /// turns as echoes (skipped when the user already typed them). A
-    /// backlog beyond
-    /// [`crate::config::CATCHUP_BACKLOG`] messages (downtime, reconnect, a
-    /// transcript rotation) truncates to the last
-    /// [`crate::config::MAX_SYNC_MESSAGES`] messages, announced in small
+    /// backlog beyond `catchup_backlog` messages (downtime, reconnect,
+    /// a transcript rotation) truncates to the last `max_sync_messages`
+    /// messages, announced in small
     /// italic text; normal turns — even heavy tool-call turns — are
     /// mirrored whole. The cursor commits after every post, so a mid-sync
     /// failure (e.g. a rate limit) resumes from the last posted message
@@ -77,8 +76,8 @@ impl Forum {
             .unwrap_or(0)
             .min(messages.len());
         let pending = messages.len() - synced;
-        let skip = if pending > crate::config::CATCHUP_BACKLOG {
-            pending.saturating_sub(crate::config::MAX_SYNC_MESSAGES)
+        let skip = if pending > self.config.catchup_backlog {
+            pending.saturating_sub(self.config.max_sync_messages)
         } else {
             0
         };

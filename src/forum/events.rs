@@ -6,7 +6,6 @@ use std::{
     collections::{HashMap, HashSet},
     path::Path,
     sync::Arc,
-    time::Duration,
 };
 
 use serenity::all::{
@@ -23,9 +22,6 @@ use crate::{
         WorkspaceId,
     },
 };
-
-/// Delay between attempts to (re)establish the herdr event subscription.
-const RESUBSCRIBE_DELAY: Duration = Duration::from_secs(5);
 
 /// A typing indicator on session posts, owned by the event loop: started
 /// when an agent starts working, stopped when the entry is dropped. One
@@ -251,7 +247,7 @@ impl Forum {
                 warn!(?error, "startup forum reconcile failed");
             }
 
-            let mut tick = tokio::time::interval(crate::config::SYNC_INTERVAL);
+            let mut tick = tokio::time::interval(self.config.delays.sync_interval);
 
             loop {
                 tokio::select! {
@@ -287,7 +283,7 @@ impl Forum {
                 Ok(agents) => agents,
                 Err(error) => {
                     warn!(?error, "failed to snapshot herdr session, retrying");
-                    tokio::time::sleep(RESUBSCRIBE_DELAY).await;
+                    tokio::time::sleep(self.config.delays.resubscribe_delay).await;
                     continue;
                 }
             };
@@ -296,7 +292,7 @@ impl Forum {
                 Ok(stream) => return stream,
                 Err(error) => {
                     warn!(?error, "failed to subscribe to herdr events, retrying");
-                    tokio::time::sleep(RESUBSCRIBE_DELAY).await;
+                    tokio::time::sleep(self.config.delays.resubscribe_delay).await;
                 }
             }
         }

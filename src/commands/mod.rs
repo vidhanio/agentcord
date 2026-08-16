@@ -33,7 +33,7 @@ pub fn framework(bot: &Bot) -> BotFramework {
 }
 
 /// The guild commands to register, in order. `/herdr` is only registered
-/// when a control command is configured (`HERDR_CONTROL_COMMAND`) — the
+/// when a control command is configured (`herdr_control_command`) — the
 /// bot stays inert without one.
 fn build_commands(config: &crate::config::Config) -> Vec<poise::Command<Bot, BotError>> {
     let mut commands = vec![agent::agent()];

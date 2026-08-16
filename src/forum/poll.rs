@@ -6,17 +6,13 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
 
 use serenity::all::Context;
 use tracing::{info, warn};
 
 use crate::{BotResult, db::SessionRow, forum::Forum, herdr::SessionPath};
-
-/// How long a tracked transcript must stay unchanged before the poll
-/// suspects the session rotated to a new file.
-const SESSION_STALE_GRACE: Duration = Duration::from_secs(300);
 
 impl Forum {
     /// Mirrors live sessions' transcripts into their posts on a fixed
@@ -26,7 +22,7 @@ impl Forum {
     /// and mirrors the changed ones. Runs in its own task so a slow mirror
     /// can never stall event handling.
     pub async fn poll_loop(&self, ctx: Context) {
-        let mut tick = tokio::time::interval(crate::config::MESSAGE_POLL_INTERVAL);
+        let mut tick = tokio::time::interval(self.config.delays.message_poll_interval);
         loop {
             tick.tick().await;
             if let Err(error) = self.poll_once(&ctx).await {
@@ -109,7 +105,7 @@ impl Forum {
         };
         if !modified
             .elapsed()
-            .is_ok_and(|age| age > SESSION_STALE_GRACE)
+            .is_ok_and(|age| age > self.config.delays.session_stale_grace)
         {
             return;
         }

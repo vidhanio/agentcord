@@ -70,12 +70,14 @@ impl Bot {
             .map_err(|error| BotError::Other(format!("failed to open state database: {error}")))?;
 
         let herdr = Herdr::new(
-            crate::config::socket_path(),
-            crate::config::OPERATION_TIMEOUT,
+            config.socket_path(),
+            config.delays.operation_timeout,
+            config.delays.agent_startup_timeout,
+            config.delays.agent_startup_poll_interval,
         );
 
         let forum = Arc::new(Forum::new(config.clone(), herdr.clone(), db.clone()));
-        let relay = Arc::new(Relay::new(herdr.clone()));
+        let relay = Arc::new(Relay::new(herdr.clone(), config.delays.relay_idle_timeout));
 
         Ok(Self {
             config,

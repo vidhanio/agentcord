@@ -96,7 +96,7 @@ agents.
   relay the prompt, reply ephemerally with the thread link. Any manual
   post in a managed forum is deleted silently, and the bot's own posts
   get their transcripts mirrored by the 1s poll.
-- **`/herdr` is a configurable escape hatch.** When `HERDR_CONTROL_COMMAND`
+- **`/herdr` is a configurable escape hatch.** When `herdr_control_command`
   is set, `/herdr` spawns that one-shot external command (e.g. a lean
   `pi -p`) with the user's prompt piped to its stdin — prefixed with a
   control-plane preamble telling it to bootstrap the herdr skill via
@@ -216,7 +216,7 @@ Discord ──► poise framework (src/commands/, serenity Framework)
               │             workspace dropdown, prompt input)
               │     submit ──► launch_from_modal: spawn → bind session post →
               │                relay the prompt → ephemeral thread link
-              │  /herdr (when HERDR_CONTROL_COMMAND is set)
+              │  /herdr (when herdr_control_command is set)
               │     ──► control_prompt + stdin pipe ──► one-shot external
               │         command (process group, timeout) ──► truncated
               │         ephemeral reply (HERDR_ENV=1 + socket injected)
@@ -285,13 +285,13 @@ Discord ──► poise framework (src/commands/, serenity Framework)
   derive only knows text inputs — sends it as the command's initial
   response, awaits the submit through serenity's modal collector, defers
   the submit, and launches via the forum's spawn/bind/relay helpers,
-  editing the deferred response with the thread link. `/herdr` (`herdr.rs`) runs the configured `HERDR_CONTROL_COMMAND`
+  editing the deferred response with the thread link. `/herdr` (`herdr.rs`) runs the configured `herdr_control_command`
   (`build_commands` registers it only when configured) — the prompt
   (preamble-prefixed via `control::control_prompt`) is piped to the
   command's stdin, `HERDR_ENV=1` + the bot's resolved socket are
   injected, and the concatenated output is truncated and edited into the
   deferred ephemeral response. The `allowed` check gates every command
-  on `ALLOWED_USER_ID`.
+  on `allowed_user_id`.
 - `src/control.rs` — the `/herdr` process runner: `control_prompt`
   frames the one-shot session, `run_control_command` spawns the
   whitespace-split command in its own process group (prompt on stdin,
@@ -367,19 +367,25 @@ wire it into git with `prek install`.
   **git-tracked** files. Any new file must be `git add`-ed before
   `nix build .#default`/`nix flake check`, or the sandbox build silently won't
   see it.
-- Run the bot with env config (see `src/config.rs`): `DISCORD_BOT_TOKEN` and
-  `GUILD_ID` required; `ALLOWED_USER_ID` optional (when set, only that
-  Discord user may talk to agents and launch them via forum posts);
-  `HERDR_CONTROL_COMMAND` (the `/herdr` one-shot control command —
-  whitespace-split, opt-in: unset registers no `/herdr`; the recommended
-  lean payload is `pi -p --no-session --tools bash --no-skills
-  --no-context-files --no-extensions --no-themes
-  --no-prompt-templates`), `HERDR_CONTROL_CWD` (default: home dir; a
-  leading `~`/`~/` expands to home) and
-  `HERDR_CONTROL_TIMEOUT` (seconds, default 300);
-  `RUST_LOG` default `warn,herdcord=trace`. Everything else (timeouts,
-  harness, sync interval, state dir, socket path) is a sane default
-  const in `src/config.rs`.
+- Run the bot with a TOML config at `$XDG_CONFIG_HOME/herdcord/config.toml`
+  (else `~/.config/herdcord/config.toml`; see `src/config.rs` and its
+  `sample_config`): `discord_bot_token` and `guild_id` required;
+  `allowed_user_id` optional (when set, only that Discord user may talk
+  to agents and launch them via forum posts); `herdr_control_command`
+  (the `/herdr` one-shot control command — whitespace-split, opt-in:
+  unset registers no `/herdr`; the recommended lean payload is
+  `pi -p --no-session --tools bash --no-skills --no-context-files
+  --no-extensions --no-themes --no-prompt-templates`),
+  `herdr_control_cwd` (default: home dir; a leading `~`/`~/` expands to
+  home) and `herdr_control_timeout` (default 300s). Durations are
+  integers (seconds) or human strings (`"500ms"`, `"5m"`, `"1h"`); a
+  `[delays]` table makes every timer configurable (herdr API calls,
+  reconcile, poll tick, rotation grace, relay workers, re-subscribe,
+  agent startup, the `/agent` modal) plus the `max_sync_messages`/
+  `catchup_backlog` mirror knobs. `herdr_socket_path`/`herdr_session`
+  override the socket; `HERDR_SOCKET_PATH`/`HERDR_SESSION` remain as
+  herdr-injected/dev overrides. `RUST_LOG` default
+  `warn,herdcord=trace`.
 
 ## Commits
 
@@ -448,7 +454,7 @@ wire it into git with `prek install`.
 
 ## Important Files
 
-- `src/main.rs` — entry: color_eyre, dotenvy, `Config::from_env` (envy),
+- `src/main.rs` — entry: color_eyre, `Config::load()` (TOML),
   tracing init, `herdcord::run(config)`.
 - `src/lib.rs` — `Bot` struct (config, herdr client, forum, relay, state
   `Db`), `run()` (serenity `Http` with the default ratelimiter,
@@ -477,16 +483,20 @@ wire it into git with `prek install`.
   modal command in `agent.rs` and the `/herdr` control command in
   `herdr.rs`.
 - `src/relay.rs` — conversation workers and the session-file sync delta.
-- `src/config.rs` — minimal env config: `DISCORD_BOT_TOKEN`, `GUILD_ID`,
-  `ALLOWED_USER_ID`, `HERDR_CONTROL_COMMAND`/`HERDR_CONTROL_CWD`/
-  `HERDR_CONTROL_TIMEOUT` (the `/herdr` control command knobs). Sane
-  defaults as consts: `DEFAULT_HARNESS`
+- `src/config.rs` — the TOML config at `$XDG_CONFIG_HOME/herdcord/config.toml`
+  (else `~/.config/herdcord/config.toml`): `discord_bot_token`, `guild_id`,
+  `allowed_user_id`, `default_harness`, the `/herdr` control knobs
+  (`herdr_control_command`/`herdr_control_cwd`/`herdr_control_timeout`),
+  the mirror knobs (`max_sync_messages`/`catchup_backlog`), the socket
+  overrides (`herdr_socket_path`/`herdr_session`), and the `[delays]`
+  table with every timer. Sane defaults as consts: `DEFAULT_HARNESS`
   (`Harness::Pi`, the modal's preselected harness),
   `OPERATION_TIMEOUT` (30s),
   `SYNC_INTERVAL` (600s), `MESSAGE_POLL_INTERVAL` (1s),
   `MAX_SYNC_MESSAGES` (5), `CATCHUP_BACKLOG` (50), `CONTROL_TIMEOUT`
-  (300s) and `CONTROL_REPLY_LIMIT` (2000). `socket_path()` honors
-  `HERDR_SOCKET_PATH`/`HERDR_SESSION`; `session_socket_path(name)` resolves
+  (300s) and `CONTROL_REPLY_LIMIT` (2000). `Config::socket_path()` and
+  `default_socket_path()` honor `HERDR_SOCKET_PATH`/`HERDR_SESSION` as
+  herdr-injected/dev overrides; `session_socket_path(name)` resolves
   a named session's socket regardless of env overrides; the state db lives
   under `$XDG_STATE_HOME/herdcord`.
 - `src/control.rs` — the `/herdr` process runner: `control_prompt`,
@@ -513,9 +523,9 @@ wire it into git with `prek install`.
   to override).
 - **Dependencies**: prefer popular libraries over vendored logic (serenity's
   built-in `Typing`, `ExecuteWebhook`, poise, the `time` crate, etc.).
-  Current deps: serenity, poise, toasty, nutype, thiserror, envy, dotenvy,
-  dirs, tokio, tracing, serde/serde_json, color-eyre (main only). No anyhow
-  in the lib.
+  Current deps: serenity, poise, toasty, nutype, thiserror, toml,
+  humantime, dirs, tokio, tracing, serde/serde_json, color-eyre (main
+  only). No anyhow in the lib.
 
 ## Testing & QA
 

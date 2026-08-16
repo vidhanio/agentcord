@@ -9,7 +9,7 @@ fragile (session lifecycle, one-at-a-time mutex, crash cleanup), and put an LLM
 between the user and a socket API the bot already speaks natively.
 
 The revisit decides the opposite shape: `/herdr` spawns a **user-configured
-external command** (env var, opt-in, no default) with the user's prompt piped
+external command** (config file, opt-in, no default) with the user's prompt piped
 to its stdin, waits up to a configurable timeout, and relays the concatenated
 stdout+stderr as an ephemeral reply. No herdr session is spawned — the bot
 injects `HERDR_ENV=1` and the resolved socket env instead, so the command's
@@ -24,8 +24,8 @@ monitoring output, and reply with a single short confirmation.
 
 The recommended configuration is a lean one-shot `pi`:
 
-```sh
-HERDR_CONTROL_COMMAND="pi -p --no-session --tools bash --no-skills --no-context-files --no-extensions --no-themes --no-prompt-templates"
+```toml
+herdr_control_command = "pi -p --no-session --tools bash --no-skills --no-context-files --no-extensions --no-themes --no-prompt-templates"
 ```
 
 Shell access only — herdr context arrives via the preamble's `herdr --skill`
@@ -38,5 +38,5 @@ Rejected alternatives: typed slash subcommands over `src/herdr/` (locks the
 surface to herdr's API — the point is a general escape hatch), and reviving
 the throwaway-session control agent (the original's slowness and fragility).
 Consequence: the configured command runs as the bot's user with full power —
-arbitrary code execution gated only by `ALLOWED_USER_ID` and the command being
+arbitrary code execution gated only by `allowed_user_id` and the command being
 explicitly configured, which is the accepted model for a personal bot.
