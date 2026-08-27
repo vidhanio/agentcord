@@ -1,1 +1,0 @@
-{"id":"req_workspace_list","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w3","number":1,"label":"vidhanix","focused":false,"pane_count":3,"tab_count":3,"active_tab_id":"w3:t5","agent_status":"unknown"},{"workspace_id":"w4","number":2,"label":"herdcord","focused":true,"pane_count":1,"tab_count":1,"active_tab_id":"w4:t1","agent_status":"working"}]}}

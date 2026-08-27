@@ -1,20 +1,17 @@
 use thiserror::Error;
 
-/// The bot's unified error type.
 #[derive(Debug, Error)]
 pub enum BotError {
-    #[error(transparent)]
-    Herdr(#[from] crate::herdr::Error),
-
-    #[error(transparent)]
+    #[error("configuration error: {0}")]
+    Config(String),
+    #[error("ACP error: {0}")]
+    Acp(#[from] agent_client_protocol::Error),
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
+    #[error("Discord error: {0}")]
     Serenity(Box<serenity::Error>),
-
-    #[error(transparent)]
-    Toasty(#[from] toasty::Error),
-
-    #[error("forum channel not found")]
-    ForumChannelNotFound,
-
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("{0}")]
     Other(String),
 }

@@ -1,179 +1,158 @@
+mod acp;
 mod commands;
 pub mod config;
-pub mod control;
-pub mod db;
+mod db;
 mod error;
 mod forum;
-pub mod herdr;
-mod relay;
-mod session;
-#[cfg(test)]
-mod test_util;
+mod permission;
+mod projects;
+mod render;
 
 use std::{
+    collections::HashMap,
     fmt::{self, Debug, Formatter},
-    path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
-pub use db::Db;
+pub use config::Config;
+use db::Db;
 pub use error::BotError;
-use forum::Forum;
-use herdr::Herdr;
-use relay::{Relay, RelayJob};
+use projects::ProjectCatalog;
 use serenity::all::{
-    ChannelId, ClientBuilder, Context, EventHandler, FullEvent, GatewayIntents, HttpBuilder,
-    Message, Token, UserId, async_trait,
+    ClientBuilder, Context, EventHandler, FullEvent, GatewayIntents, GenericChannelId, HttpBuilder,
+    Token, UserId, async_trait,
 };
-pub use session::{Harness, SessionRole, read_session, read_session_messages, read_session_title};
 use tracing::{info, warn};
-
-pub use self::config::Config;
 
 pub type BotResult<T = ()> = Result<T, BotError>;
 
-/// The Discord bot: relays forum posts to herdr agents.
 #[derive(Clone)]
 pub struct Bot {
-    pub config: Arc<Config>,
-    pub herdr: Herdr,
-    pub db: Db,
-    pub forum: Arc<Forum>,
-    pub relay: Arc<Relay>,
+    pub(crate) config: Arc<Config>,
+    pub(crate) db: Db,
+    pub(crate) projects: Arc<ProjectCatalog>,
+    context: Arc<OnceLock<Context>>,
+    pub(crate) active: Arc<Mutex<HashMap<GenericChannelId, acp::ActiveSession>>>,
+    pub(crate) render_locks: Arc<Mutex<HashMap<GenericChannelId, Arc<tokio::sync::Mutex<()>>>>>,
+    pub(crate) resume_locks: Arc<Mutex<HashMap<GenericChannelId, Arc<tokio::sync::Mutex<()>>>>>,
+    pub(crate) next_generation: Arc<AtomicU64>,
+    ready_started: Arc<AtomicBool>,
 }
 
 impl Debug for Bot {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Bot")
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Bot")
             .field("config", &self.config)
+            .field("projects", &self.projects)
             .finish_non_exhaustive()
     }
 }
 
 impl Bot {
-    async fn new(config: Config) -> BotResult<Self> {
-        let config = Arc::new(config);
-
-        // Open the state database (workspaces and session bindings) before
-        // anything else so configuration problems surface early.
-        let db_path = state_db_path();
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                BotError::Other(format!(
-                    "failed to create state directory {}: {error}",
-                    parent.display()
-                ))
-            })?;
-        }
-        let db = Db::open(&db_path)
-            .await
-            .map_err(|error| BotError::Other(format!("failed to open state database: {error}")))?;
-
-        let herdr = Herdr::new(
-            config.herdr.socket_path(),
-            config.delays.operation_timeout,
-            config.delays.agent_startup_timeout,
-            config.delays.agent_startup_poll_interval,
-        );
-
-        let forum = Arc::new(Forum::new(config.clone(), herdr.clone(), db.clone()));
-        let relay = Arc::new(Relay::new(herdr.clone(), config.delays.relay_idle_timeout));
-
+    fn new(config: Config) -> BotResult<Self> {
+        config.validate()?;
+        let projects = ProjectCatalog::discover(&config.projects)?;
+        let db = Db::open(&config::state_path())?;
         Ok(Self {
-            config,
-            herdr,
+            config: Arc::new(config),
             db,
-            forum,
-            relay,
+            projects: Arc::new(projects),
+            context: Arc::default(),
+            active: Arc::default(),
+            render_locks: Arc::default(),
+            resume_locks: Arc::default(),
+            next_generation: Arc::new(AtomicU64::new(1)),
+            ready_started: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    async fn event_loop(bot: Arc<Self>, ctx: Context) {
-        // Message mirroring runs on its own task: a stuck Discord call in a
-        // sync must never stall herdr event handling. The poll runs on a
-        // fixed tick, so the startup reconcile (capped catch-up) always
-        // runs first.
-        tokio::spawn({
-            let forum = bot.forum.clone();
-            let ctx = ctx.clone();
-            async move { forum.poll_loop(ctx).await }
-        });
-        bot.forum.run_event_loop(ctx).await;
+    pub(crate) fn context(&self) -> BotResult<&Context> {
+        self.context
+            .get()
+            .ok_or_else(|| BotError::Other("Discord is not ready".into()))
     }
 
-    /// Whether `user_id` may run commands and talk to agents: only the
-    /// configured allowed user.
     #[must_use]
-    pub fn is_allowed(&self, user_id: UserId) -> bool {
-        self.config.discord.allowed_user_id == user_id
+    pub fn is_allowed(&self, user: UserId) -> bool {
+        user == self.config.discord.allowed_user_id
     }
 
-    /// Resumes a dead session's agent with `message` as the first prompt,
-    /// or replies when the session is already starting or the resume fails.
-    async fn resume_session_and_relay(
-        &self,
-        ctx: &Context,
-        message: &Message,
-        session: &db::SessionRow,
-    ) {
-        match self.forum.resume_session(ctx, session).await {
-            Ok(Some(started)) => {
-                if let Err(error) = self
-                    .relay
-                    .submit(
-                        ctx.clone(),
-                        &started.pane_id,
-                        RelayJob {
-                            channel_id: ChannelId::new(message.channel_id.get()),
-                            text: message.content.clone().into(),
-                        },
-                    )
-                    .await
-                {
-                    warn!(?error, "failed to queue resume relay job");
+    async fn handle_ready(&self, ctx: &Context) {
+        let _ = self.context.set(ctx.clone());
+        if self.ready_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Err(error) = self.validate_and_reconcile_forum().await {
+            self.ready_started.store(false, Ordering::Release);
+            warn!(?error, "configured Agentcord forum is unavailable");
+            return;
+        }
+        self.restore_all().await;
+        info!("agentcord ready");
+    }
+
+    async fn handle_message(&self, message: &serenity::all::Message) {
+        let Ok(ctx) = self.context() else {
+            return;
+        };
+        if !self.is_allowed(message.author.id)
+            || message.author.id == ctx.cache.current_user().id
+            || message.content.trim().is_empty()
+        {
+            return;
+        }
+        let Ok(Some(_)) = self.db.session(message.channel_id) else {
+            return;
+        };
+        if let Err(error) = self
+            .submit(message.channel_id, message.content.to_string())
+            .await
+        {
+            let _ = message
+                .reply(&ctx.http, format!("couldn't send to ACP: {error}"))
+                .await;
+        }
+    }
+}
+
+#[async_trait]
+impl EventHandler for Bot {
+    async fn dispatch(&self, ctx: &Context, event: &FullEvent) {
+        match event {
+            FullEvent::Ready { .. } => self.handle_ready(ctx).await,
+            FullEvent::Message { new_message, .. } => self.handle_message(new_message).await,
+            FullEvent::ThreadCreate { thread, .. } => {
+                if let Err(error) = self.delete_manual_post(thread).await {
+                    warn!(?error, thread = %thread.base.name, "failed to handle forum post");
                 }
             }
-            Ok(None) => {
-                if let Err(error) = message
-                    .reply(
-                        &ctx.http,
-                        "this session is starting up — send your message again in a moment.",
-                    )
-                    .await
-                {
-                    warn!(?error, "failed to reply about session startup");
+            FullEvent::ThreadDelete { thread, .. } => {
+                let channel = thread.id.widen();
+                if self.db.session(channel).ok().flatten().is_some() {
+                    self.forget(channel);
+                    if let Err(error) = self.db.delete_session(channel) {
+                        warn!(?error, ?channel, "failed to delete removed session binding");
+                    }
                 }
             }
-            Err(error) => {
-                warn!(?error, session = %session.session_path, "failed to resume session");
-                if let Err(reply_error) = message
-                    .reply(&ctx.http, format!("failed to resume this session: {error}"))
-                    .await
-                {
-                    warn!(?reply_error, "failed to reply about session resume failure");
-                }
-            }
+            _ => {}
         }
     }
 }
 
 pub async fn run(config: Config) -> BotResult {
-    let bot = Bot::new(config).await?;
-
-    info!("building client...");
-
-    // The default ratelimiter and request pipeline: no custom client, no
-    // disabled ratelimiting — the next-branch ratelimiter no longer holds
-    // locks across requests, so the wedging the old one caused is gone.
+    let bot = Arc::new(Bot::new(config)?);
     let token: Token = bot
         .config
         .discord
         .bot_token
         .parse()
-        .map_err(|error| BotError::Other(format!("invalid Discord bot token: {error}")))?;
+        .map_err(|error| BotError::Config(format!("invalid Discord bot token: {error}")))?;
     let http = HttpBuilder::new(token.clone()).build();
-
-    let bot = Arc::new(bot);
     let mut client = ClientBuilder::new_with_http(
         token,
         Arc::new(http),
@@ -181,127 +160,8 @@ pub async fn run(config: Config) -> BotResult {
     )
     .event_handler(bot.clone())
     .framework(Box::new(commands::framework(&bot)))
-    .data(bot.clone())
+    .data(bot)
     .await?;
-
-    info!("starting client...");
-
     client.start().await?;
-
     Ok(())
-}
-
-#[async_trait]
-impl EventHandler for Bot {
-    async fn dispatch(&self, ctx: &Context, event: &FullEvent) {
-        match event {
-            FullEvent::Ready { .. } => {
-                info!("bot ready");
-                tokio::spawn(Self::event_loop(Arc::new(self.clone()), ctx.clone()));
-            }
-            FullEvent::ThreadCreate { thread, .. } => {
-                if let Err(error) = self.forum.handle_thread_create(ctx, thread).await {
-                    warn!(?error, thread = %thread.base.name, "failed to handle new forum post");
-                }
-            }
-            FullEvent::ThreadDelete { thread, .. } => {
-                if let Err(error) = self.forum.handle_thread_delete(ctx, thread).await {
-                    warn!(
-                        ?error,
-                        thread_id = %thread.id,
-                        "failed to handle deleted forum post"
-                    );
-                }
-            }
-            FullEvent::ChannelDelete { channel, .. } => {
-                if let Err(error) = self.forum.handle_channel_delete(ctx, channel).await {
-                    warn!(
-                        ?error,
-                        channel = %channel.base.name,
-                        "failed to handle deleted channel"
-                    );
-                }
-            }
-            FullEvent::Message { new_message, .. } => self.handle_message(ctx, new_message).await,
-            // Interactions (the `/agent` and `/herdr` commands, the agent
-            // modal) are handled by the poise framework.
-            _ => {}
-        }
-    }
-}
-
-impl Bot {
-    async fn handle_message(&self, ctx: &Context, message: &Message) {
-        if !self.is_allowed(message.author.id) {
-            return;
-        }
-
-        if message.author.id == ctx.cache.current_user().id {
-            return;
-        }
-
-        if message.content.trim().is_empty() {
-            return;
-        }
-
-        // Only messages in managed forum posts are relayed.
-        let Ok(post_id) = i64::try_from(message.channel_id.get()) else {
-            return;
-        };
-        let session = match self.db.session_by_post(post_id).await {
-            Ok(Some(session)) => session,
-            Ok(None) => return, // Unmanaged channel.
-            Err(error) => {
-                warn!(?error, "failed to look up session for post");
-                return;
-            }
-        };
-
-        // Find the live agent bound to this session.
-        let agents = match self.herdr.list_agents().await {
-            Ok(agents) => agents,
-            Err(error) => {
-                warn!(?error, "failed to list agents for message relay");
-                return;
-            }
-        };
-
-        let Some(agent) = agents.iter().find(|agent| {
-            agent
-                .agent_session
-                .as_ref()
-                .is_some_and(|session_ref| session.hosts(session_ref.value.as_str()))
-        }) else {
-            // No live agent hosts this session: re-launch it in place,
-            // resuming the same conversation, and relay the message to the
-            // new agent.
-            self.resume_session_and_relay(ctx, message, &session).await;
-            return;
-        };
-
-        // Agents are addressed by their pane id, which herdr accepts
-        // anywhere it takes an agent name.
-        let target = &agent.pane_id;
-
-        if let Err(error) = self
-            .relay
-            .submit(
-                ctx.clone(),
-                target,
-                RelayJob {
-                    channel_id: ChannelId::new(message.channel_id.get()),
-                    text: message.content.clone().into(),
-                },
-            )
-            .await
-        {
-            warn!(?error, "failed to queue relay job");
-        }
-    }
-}
-
-/// Resolves the state database path: `<state dir>/herdcord.sqlite`.
-#[must_use]
-fn state_db_path() -> PathBuf {
-    crate::config::state_dir().join("herdcord.sqlite")
 }

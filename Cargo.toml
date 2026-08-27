@@ -1,5 +1,5 @@
 [package]
-name = "herdcord"
+name = "agentcord"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,6 +7,7 @@ license = "AGPL-3.0-or-later"
 publish = false
 
 [dependencies]
+agent-client-protocol = "2"
 clap = { version = "4", features = ["derive", "env"] }
 color-eyre = "0.6"
 config = { version = "0.15", default-features = false, features = ["toml"] }
@@ -14,7 +15,6 @@ dirs = "5"
 humantime = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toasty = { version = "0.10.0", features = ["sqlite"] }
 # The serenity `next` branch (0.13 dev line): Component V2, modal select
 # values, reworked ratelimiter.
 serenity = { git = "https://github.com/serenity-rs/serenity", branch = "next", default-features = false, features = [
@@ -33,7 +33,6 @@ poise = { git = "https://github.com/serenity-rs/poise", branch = "serenity-next"
   "handle_panics",
 ] }
 thiserror = "2"
-jiff = "0.2"
 tokio = { version = "1", features = [
   "macros",
   "net",
@@ -44,7 +43,6 @@ tokio = { version = "1", features = [
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-nutype = { version = "0.7.0", features = ["serde"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 
 [lints]

@@ -1,75 +1,73 @@
-# herdcord
+# agentcord
 
-a discord bot that mirrors [herdr](https://herdr.dev) agent sessions into
-discord forums: each workspace gets a forum channel, each agent session a
-post, and the transcript mirrors into the thread.
+Agentcord is a Discord client for coding agents that implement the
+[Agent Client Protocol](https://agentclientprotocol.com). One configured Discord
+forum contains every session, one post per ACP session.
 
-## features
+Agentcord has no built-in knowledge of agent brands. Commands, arguments,
+environment overlays, display names, forum tags, and Unicode or custom Discord
+emoji all come from configuration.
 
-- forum channel per herdr workspace, created and renamed automatically
-- one post per agent session, with harness and status tags
-- full transcript mirror: messages, tool calls, user echoes
-- typing indicators and blocked notices from herdr's event stream
-- resume a dead session by typing into its closed post
-- `/agent` slash command: launch an agent from a native modal
-- optional `/herdr` control command: one-shot external command, prompt piped
-  to stdin
-- everything configurable: toml config file, every delay a knob
+## What it does
 
-## config
+- `/agent` opens a native modal for choosing a configured agent and working
+  directory, then creates an ACP session and sends its initial prompt.
+- Messages in a session post are delivered as ACP prompts.
+- Streamed thoughts and final output are edited in place; final output is split
+  without truncation when it exceeds Discord's message limit.
+- Structured ACP tool calls, plans, modes, configuration, usage, titles, and
+  permission requests are projected into Discord.
+- Restorable sessions reconnect through `session/load` after a restart or when
+  the allowed user sends a message to an inactive post.
+- Each ACP session owns an isolated, process-group-supervised subprocess.
 
-the bot looks for a config at `$XDG_CONFIG_HOME/herdcord/config.toml`
-(`~/.config/herdcord/config.toml` by default), overridable via
-`--config <path>` or the `HERDCORD_CONFIG` env var.
+## Configuration
 
-default config:
+Agentcord loads `$XDG_CONFIG_HOME/agentcord/config.toml` by default. Override it
+with `--config` or `AGENTCORD_CONFIG`. `${NAME}` placeholders in string values
+are expanded after TOML parsing.
 
-```toml
-[discord]
-bot_token = "..."
-guild_id = 1234567890
-allowed_user_id = 1234567890
-```
+`projects.base_path` is only a display prefix. The canonical entries in
+`projects.directories` are the working-directory source of truth and may live
+anywhere on the filesystem.
 
-see [`config.example.toml`](config.example.toml) for all knobs. string
-values support `${NAME}` environment expansion after toml parsing; values
-containing quotes or other toml syntax are safe. if `NAME` is unset, the
-`${NAME}` placeholder remains literal.
+See [config.example.toml](config.example.toml) for the complete schema.
 
-## run
+## Run
 
-```
+```sh
 nix run .#default
 ```
 
-## home manager
-
-the flake exports a home manager module without requiring a home manager flake
-input. add `inputs.herdcord.homeManagerModules.default` to your home manager
-configuration and enable the program:
+## Home Manager
 
 ```nix
 { inputs, ... }:
 {
-  imports = [ inputs.herdcord.homeManagerModules.default ];
-
-  programs.herdcord = {
+  imports = [ inputs.agentcord.homeManagerModules.default ];
+  programs.agentcord = {
     enable = true;
     settings = {
       discord = {
         bot_token = "...";
-        guild_id = 1234567890;
-        allowed_user_id = 1234567890;
+        guild_id = 123;
+        allowed_user_id = 456;
+        forum_channel_id = 789;
+      };
+      projects = {
+        base_path = "~/Projects";
+        directories = [ "~/Projects/agentcord" ];
+      };
+      agents.example = {
+        display_name = "Example";
+        command = "example-acp";
+        tag = { name = "example"; emoji = "🤖"; };
       };
     };
   };
 }
 ```
 
-`settings` is rendered as toml at
-`$XDG_CONFIG_HOME/herdcord/config.toml`. the `package` option defaults to this
-flake's `packages.<system>.default` and can be overridden when needed.
-
-## license
+## License
 
 AGPL-3.0-or-later

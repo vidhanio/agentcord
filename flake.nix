@@ -29,29 +29,29 @@
             ...
           }:
           let
-            cfg = config.programs.herdcord;
+            cfg = config.programs.agentcord;
             toml = pkgs.formats.toml { };
           in
           {
-            options.programs.herdcord = {
-              enable = lib.mkEnableOption "herdcord";
+            options.programs.agentcord = {
+              enable = lib.mkEnableOption "agentcord";
 
               package = lib.mkOption {
                 type = lib.types.package;
                 default = self.packages.${pkgs.system}.default;
-                description = "Package to install for herdcord.";
+                description = "Package to install for Agentcord.";
               };
 
               settings = lib.mkOption {
                 inherit (toml) type;
                 default = { };
-                description = "Configuration written to `herdcord/config.toml`.";
+                description = "Configuration written to `agentcord/config.toml`.";
               };
             };
 
             config = lib.mkIf cfg.enable {
               home.packages = [ cfg.package ];
-              xdg.configFile."herdcord/config.toml".source = toml.generate "herdcord-config.toml" cfg.settings;
+              xdg.configFile."agentcord/config.toml".source = toml.generate "agentcord-config.toml" cfg.settings;
             };
           };
 
@@ -76,9 +76,8 @@
 
             # Only cargo sources reach the derivation: crane's standard
             # filter (directories, `.rs`, `.toml`, `Cargo.lock`) plus the
-            # whole `tests` directory (fixtures with captured herdr API JSON
-            # are embedded via `include_str!`). Anything else (docs, CI,
-            # dotfiles) is noise that would churn rebuilds.
+            # `tests` directory. Anything else (docs, CI, dotfiles) is noise
+            # that would churn rebuilds.
             src = pkgs.lib.cleanSourceWith {
               src = ./.;
               filter =

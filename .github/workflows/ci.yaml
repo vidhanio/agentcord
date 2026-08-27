@@ -130,7 +130,7 @@ jobs:
               inherit pkgs;
               lib = pkgs.lib;
               config = {
-                programs.herdcord = {
+                programs.agentcord = {
                   enable = true;
                   settings = {
                     discord = {
@@ -144,16 +144,16 @@ jobs:
             };
           in
           assert
-            moduleResult.options.programs.herdcord.enable.description
-            == "Whether to enable herdcord.";
+            moduleResult.options.programs.agentcord.enable.description
+            == "Whether to enable agentcord.";
           assert
-            moduleResult.options.programs.herdcord.package.default.pname
-            == "herdcord";
-          assert moduleResult.options.programs.herdcord.settings.default == { };
+            moduleResult.options.programs.agentcord.package.default.pname
+            == "agentcord";
+          assert moduleResult.options.programs.agentcord.settings.default == { };
           assert moduleResult.config.condition;
           assert builtins.length moduleResult.config.content.home.packages == 1;
           assert
-            builtins.hasAttr "herdcord/config.toml"
+            builtins.hasAttr "agentcord/config.toml"
             moduleResult.config.content.xdg.configFile;
           true
           '
