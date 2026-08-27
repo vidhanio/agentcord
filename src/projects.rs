@@ -7,8 +7,6 @@ use crate::{BotError, BotResult, config::ProjectsConfig};
 
 pub const DISCORD_PROJECT_LIMIT: usize = 25;
 
-/// A configured working directory. The canonical directory is its identity;
-/// the label is presentation only.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Project {
     pub label: String,

@@ -27,10 +27,6 @@ Agentcord loads `$XDG_CONFIG_HOME/agentcord/config.toml` by default. Override it
 with `--config` or `AGENTCORD_CONFIG`. `${NAME}` placeholders in string values
 are expanded after TOML parsing.
 
-`projects.base_path` is only a display prefix. The canonical entries in
-`projects.directories` are the working-directory source of truth and may live
-anywhere on the filesystem.
-
 See [config.example.toml](config.example.toml) for the complete schema.
 
 ## Run

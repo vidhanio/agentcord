@@ -11,10 +11,6 @@ parsing, agent-name branching, or external workspace manager integration.
 directory catalog, Discord context, active ACP registry, and session-local
 locks. Pass a shared `Bot`, not independent copies of its constituent state.
 
-Configured directories are the working-directory source of truth.
-`projects.base_path` only shortens labels and never constrains where a directory
-may live.
-
 ## Source layout
 
 - `src/lib.rs`: `Bot`, Serenity event handling, startup and wiring.

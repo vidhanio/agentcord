@@ -8,10 +8,7 @@ allowed_user_id = 1234567890
 forum_channel_id = 1234567890
 
 [projects]
-# Display-only prefix removed from directory labels when possible.
 base_path = "~/Projects"
-# These canonical working directories are the source of truth. They may be
-# inside or outside `base_path`.
 directories = ["~/Projects/agentcord", "/work/client-project"]
 
 [agents.example]

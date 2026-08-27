@@ -34,10 +34,7 @@ pub struct DiscordConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProjectsConfig {
-    /// A display-only prefix removed from directory labels when possible.
     pub base_path: PathBuf,
-    /// Canonical working directories offered by `/agent`. They may be
-    /// anywhere on the filesystem; `base_path` never constrains them.
     #[serde(alias = "paths")]
     pub directories: Vec<PathBuf>,
 }
