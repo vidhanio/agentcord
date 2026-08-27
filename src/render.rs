@@ -18,6 +18,7 @@ const EMBED_LIMIT: usize = 3800;
 struct OutputState {
     thought: String,
     final_text: String,
+    thought_message_count: usize,
 }
 
 impl Bot {
@@ -27,52 +28,93 @@ impl Bot {
         turn: u64,
         update: SessionUpdate,
     ) -> BotResult {
+        self.render_updates(thread, turn, vec![update]).await
+    }
+
+    pub async fn render_updates(
+        &self,
+        thread: GenericChannelId,
+        turn: u64,
+        updates: Vec<SessionUpdate>,
+    ) -> BotResult {
         let ctx = self.context()?;
         let lock = self.session_lock(thread);
         let _guard = lock.lock().await;
-        match update {
-            SessionUpdate::AgentThoughtChunk(chunk) => {
-                self.render_output_chunk(ctx, thread, turn, chunk, true)
-                    .await
+        let mut updates = updates.into_iter().peekable();
+        while let Some(update) = updates.next() {
+            match update {
+                SessionUpdate::AgentThoughtChunk(first) => {
+                    let mut chunks = vec![first];
+                    while matches!(updates.peek(), Some(SessionUpdate::AgentThoughtChunk(_))) {
+                        if let Some(SessionUpdate::AgentThoughtChunk(chunk)) = updates.next() {
+                            chunks.push(chunk);
+                        }
+                    }
+                    self.render_output_chunks(ctx, thread, turn, &chunks, true)
+                        .await?;
+                }
+                SessionUpdate::AgentMessageChunk(first) => {
+                    let mut chunks = vec![first];
+                    while matches!(updates.peek(), Some(SessionUpdate::AgentMessageChunk(_))) {
+                        if let Some(SessionUpdate::AgentMessageChunk(chunk)) = updates.next() {
+                            chunks.push(chunk);
+                        }
+                    }
+                    self.render_output_chunks(ctx, thread, turn, &chunks, false)
+                        .await?;
+                }
+                // Discord-originated prompts are already visible. Ignoring user
+                // chunks prevents agents that echo prompt history from duplicating them.
+                SessionUpdate::UserMessageChunk(_) => {}
+                SessionUpdate::ToolCall(call) => {
+                    self.render_tool(ctx, thread, call, None).await?;
+                }
+                SessionUpdate::ToolCallUpdate(first) => {
+                    let call_id = first.tool_call_id.to_string();
+                    let mut batch = vec![first];
+                    while matches!(
+                        updates.peek(),
+                        Some(SessionUpdate::ToolCallUpdate(update))
+                            if update.tool_call_id.to_string() == call_id
+                    ) {
+                        if let Some(SessionUpdate::ToolCallUpdate(update)) = updates.next() {
+                            batch.push(update);
+                        }
+                    }
+                    self.render_tool_updates(ctx, thread, batch).await?;
+                }
+                SessionUpdate::UsageUpdate(usage) => {
+                    self.update_usage(thread, &usage).await?;
+                }
+                SessionUpdate::SessionInfoUpdate(info) => {
+                    let value = serde_json::to_value(info).unwrap_or_default();
+                    let Some(title_value) = value.get("title") else {
+                        continue;
+                    };
+                    let title = title_value.as_str();
+                    let row = self.db.session(thread)?.ok_or_else(|| {
+                        crate::BotError::Other(
+                            "session disappeared while updating its title".into(),
+                        )
+                    })?;
+                    self.update_title(&row, title).await?;
+                }
+                other => {
+                    self.render_metadata(ctx, thread, other).await?;
+                }
             }
-            SessionUpdate::AgentMessageChunk(chunk) => {
-                self.render_output_chunk(ctx, thread, turn, chunk, false)
-                    .await
-            }
-            // Discord-originated prompts are already visible. Ignoring user
-            // chunks prevents agents that echo prompt history from duplicating them.
-            SessionUpdate::UserMessageChunk(_) => Ok(()),
-            SessionUpdate::ToolCall(call) => self.render_tool(ctx, thread, call, None).await,
-            SessionUpdate::ToolCallUpdate(update) => {
-                self.render_tool_update(ctx, thread, update).await
-            }
-            SessionUpdate::SessionInfoUpdate(info) => {
-                let value = serde_json::to_value(info).unwrap_or_default();
-                let Some(title_value) = value.get("title") else {
-                    return Ok(());
-                };
-                let title = title_value.as_str();
-                let row = self.db.session(thread)?.ok_or_else(|| {
-                    crate::BotError::Other("session disappeared while updating its title".into())
-                })?;
-                self.update_title(&row, title).await
-            }
-            other => self.render_metadata(ctx, thread, other).await,
         }
+        Ok(())
     }
 
-    async fn render_output_chunk(
+    async fn render_output_chunks(
         &self,
         ctx: &Context,
         thread: GenericChannelId,
         turn: u64,
-        chunk: ContentChunk,
+        chunks: &[ContentChunk],
         thought: bool,
     ) -> BotResult {
-        let text = content_text(&chunk.content);
-        if text.is_empty() {
-            return Ok(());
-        }
         let key = format!("turn:{turn}:response");
         let mut row = self.db.render(thread, &key)?.unwrap_or_else(|| RenderRow {
             source_key: key,
@@ -81,21 +123,52 @@ impl Bot {
             state_json: serde_json::to_string(&OutputState::default()).unwrap(),
         });
         let mut state: OutputState = serde_json::from_str(&row.state_json).unwrap_or_default();
-        if thought && state.final_text.is_empty() {
-            state.thought.push_str(&text);
-            state.thought = keep_tail(&state.thought, THOUGHT_LIMIT);
-        } else if !thought {
-            if state.final_text.is_empty() {
-                state.thought.clear();
+        let mut changed = false;
+        for chunk in chunks {
+            let text = content_text(&chunk.content);
+            if text.is_empty() {
+                continue;
             }
-            state.final_text.push_str(&text);
+            if thought {
+                if state.final_text.is_empty() {
+                    state.thought.push_str(&text);
+                    state.thought = keep_tail(&state.thought, THOUGHT_LIMIT);
+                    changed = true;
+                }
+            } else {
+                state.final_text.push_str(&text);
+                changed = true;
+            }
         }
-        let chunks = if state.final_text.is_empty() {
-            vec![format!("*{}*", state.thought)]
+        if !changed {
+            return Ok(());
+        }
+        if state.final_text.is_empty() {
+            let thought_count = state
+                .thought_message_count
+                .min(row.discord_message_ids.len());
+            let mut thought_ids = row.discord_message_ids[..thought_count].to_vec();
+            sync_text_messages(
+                ctx,
+                thread,
+                &mut thought_ids,
+                &[format!("*{}*", state.thought)],
+            )
+            .await?;
+            row.discord_message_ids = thought_ids;
+            state.thought_message_count = row.discord_message_ids.len();
         } else {
-            split_message(&state.final_text, MESSAGE_LIMIT)
-        };
-        sync_text_messages(ctx, thread, &mut row.discord_message_ids, &chunks).await?;
+            if state.thought_message_count == 0 && !state.thought.is_empty() {
+                state.thought_message_count = row.discord_message_ids.len().min(1);
+            }
+            let thought_count = state
+                .thought_message_count
+                .min(row.discord_message_ids.len());
+            let mut final_ids = row.discord_message_ids.split_off(thought_count);
+            let final_chunks = split_message(&state.final_text, MESSAGE_LIMIT);
+            sync_text_messages(ctx, thread, &mut final_ids, &final_chunks).await?;
+            row.discord_message_ids.extend(final_ids);
+        }
         row.state_json = serde_json::to_string(&state).expect("output state serializes");
         self.db.upsert_render(thread, &row)
     }
@@ -120,13 +193,17 @@ impl Bot {
         self.db.upsert_render(thread, &row)
     }
 
-    async fn render_tool_update(
+    async fn render_tool_updates(
         &self,
         ctx: &Context,
         thread: GenericChannelId,
-        update: ToolCallUpdate,
+        updates: Vec<ToolCallUpdate>,
     ) -> BotResult {
-        let call_id = update.tool_call_id.to_string();
+        let call_id = updates
+            .first()
+            .expect("tool update batch is non-empty")
+            .tool_call_id
+            .to_string();
         let key = format!("tool:{call_id}");
         let mut row = self.db.render(thread, &key)?.unwrap_or_else(|| RenderRow {
             source_key: key,
@@ -142,8 +219,10 @@ impl Bot {
         });
         let mut state: serde_json::Value =
             serde_json::from_str(&row.state_json).unwrap_or_default();
-        let update = serde_json::to_value(update).unwrap_or_default();
-        merge_object(&mut state, &update);
+        for update in updates {
+            let update = serde_json::to_value(update).unwrap_or_default();
+            merge_object(&mut state, &update);
+        }
         row.state_json = serde_json::to_string(&state).expect("tool state serializes");
         sync_tool_message(ctx, thread, &mut row.discord_message_ids, &state).await?;
         self.db.upsert_render(thread, &row)

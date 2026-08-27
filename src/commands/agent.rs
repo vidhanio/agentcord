@@ -10,7 +10,7 @@ use tracing::warn;
 use crate::{Bot, BotError, BotResult};
 
 const AGENT_SELECT_ID: &str = "agent";
-const DIRECTORY_SELECT_ID: &str = "directory";
+const PROJECT_INPUT_ID: &str = "project";
 const PROMPT_INPUT_ID: &str = "prompt";
 
 #[poise::command(slash_command, check = "super::allowed")]
@@ -36,8 +36,8 @@ pub async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<
     let Some(agent_key) = selection.agent else {
         return reply(&submit, ctx.http(), "no agent selected").await;
     };
-    let Some(directory) = selection.directory else {
-        return reply(&submit, ctx.http(), "no directory selected").await;
+    let Some(project_input) = selection.project else {
+        return reply(&submit, ctx.http(), "the project path is empty").await;
     };
     let prompt = selection.prompt.unwrap_or_default();
     if prompt.trim().is_empty() {
@@ -52,7 +52,7 @@ pub async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<
             if !bot.config.agents.contains_key(&agent_key) {
                 return Err(BotError::Other(format!("unknown agent `{agent_key}`")));
             }
-            let project = bot.projects.resolve(&directory)?;
+            let project = bot.resolve_project(&project_input)?;
             let thread = bot.launch(&agent_key, project, prompt).await?;
             Ok::<_, BotError>(format!(
                 "launched **{}** — https://discord.com/channels/{}/{}",
@@ -81,56 +81,34 @@ fn build_modal<'a>(bot: &'a Bot, custom_id: &'a str) -> CreateModal<'a> {
             CreateSelectMenuOption::new(&agent.display_name, key).default_selection(index == 0)
         })
         .collect();
-    let directory_options = bot
-        .projects
-        .projects()
-        .iter()
-        .enumerate()
-        .map(|(index, project)| {
-            CreateSelectMenuOption::new(truncate(&project.label, 100), index.to_string())
-                .default_selection(index == 0)
-        })
-        .collect();
     let agent = CreateSelectMenu::new(
         AGENT_SELECT_ID,
         CreateSelectMenuKind::String {
             options: agent_options,
         },
     );
-    let directory = CreateSelectMenu::new(
-        DIRECTORY_SELECT_ID,
-        CreateSelectMenuKind::String {
-            options: directory_options,
-        },
-    );
+    let project = CreateInputText::new(InputTextStyle::Short, PROJECT_INPUT_ID)
+        .placeholder("/path/to/project")
+        .required(true);
     let prompt = CreateInputText::new(InputTextStyle::Paragraph, PROMPT_INPUT_ID)
         .placeholder("what should the agent do?");
     CreateModal::new(custom_id, "launch an agent").components(vec![
         CreateModalComponent::Label(CreateLabel::select_menu("agent", agent)),
-        CreateModalComponent::Label(CreateLabel::select_menu("directory", directory)),
+        CreateModalComponent::Label(CreateLabel::input_text("project", project)),
         CreateModalComponent::Label(CreateLabel::input_text("prompt", prompt)),
     ])
 }
 
-fn truncate(value: &str, limit: usize) -> String {
-    if value.chars().count() <= limit {
-        return value.to_owned();
-    }
-    let mut truncated = value.chars().take(limit - 1).collect::<String>();
-    truncated.push('…');
-    truncated
-}
-
 struct Selection {
     agent: Option<String>,
-    directory: Option<String>,
+    project: Option<String>,
     prompt: Option<String>,
 }
 
 fn parse_modal(data: &ModalInteractionData) -> Selection {
     let mut selection = Selection {
         agent: None,
-        directory: None,
+        project: None,
         prompt: None,
     };
     for component in &data.components {
@@ -141,10 +119,8 @@ fn parse_modal(data: &ModalInteractionData) -> Selection {
             LabelComponent::SelectMenu(select) if select.custom_id.as_str() == AGENT_SELECT_ID => {
                 selection.agent = select.values.as_slice().first().cloned();
             }
-            LabelComponent::SelectMenu(select)
-                if select.custom_id.as_str() == DIRECTORY_SELECT_ID =>
-            {
-                selection.directory = select.values.as_slice().first().cloned();
+            LabelComponent::InputText(text) if text.custom_id.as_str() == PROJECT_INPUT_ID => {
+                selection.project = Some(text.value.as_str().to_owned());
             }
             LabelComponent::InputText(text) if text.custom_id.as_str() == PROMPT_INPUT_ID => {
                 selection.prompt = Some(text.value.as_str().to_owned());

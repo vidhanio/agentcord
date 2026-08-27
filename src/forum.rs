@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Write};
 
+use agent_client_protocol::schema::v1::UsageUpdate;
 use serenity::all::{
     Channel, ChannelType, Context, CreateForumPost, CreateForumTag, CreateMessage, EditChannel,
-    EditMessage, EditThread, EmojiId, ForumEmoji, ForumTag, ForumTagId, GetMessages, GuildChannel,
-    GuildThread, MessageId, ReactionType, ThreadId, small_fixed_array::TruncatingInto,
+    EditMessage, EditThread, EmojiId, ForumEmoji, ForumTag, ForumTagId, GenericChannelId,
+    GetMessages, GuildChannel, GuildThread, MessageId, ReactionType, ThreadId,
+    small_fixed_array::TruncatingInto,
 };
 
 use crate::{
@@ -36,12 +38,10 @@ impl Bot {
     pub async fn create_session_post(&self, metadata: &SessionMetadata) -> BotResult<SessionRow> {
         let ctx = self.context()?;
         let tags = self.tag_ids(ctx).await?;
-        let display_name = &self
-            .config
+        self.config
             .agents
             .get(&metadata.agent_key)
-            .ok_or_else(|| BotError::Config(format!("unknown agent `{}`", metadata.agent_key)))?
-            .display_name;
+            .ok_or_else(|| BotError::Config(format!("unknown agent `{}`", metadata.agent_key)))?;
         let tag = tags.get(&metadata.agent_key).copied().ok_or_else(|| {
             BotError::Other(format!("missing forum tag for `{}`", metadata.agent_key))
         })?;
@@ -54,11 +54,7 @@ impl Bot {
                 &ctx.http,
                 CreateForumPost::new(
                     &title,
-                    CreateMessage::new().content(starter_message(
-                        metadata,
-                        display_name,
-                        Availability::Active,
-                    )),
+                    CreateMessage::new().content(starter_message(metadata, None)),
                 ),
             )
             .await?;
@@ -115,28 +111,6 @@ impl Bot {
         let ctx = self.context()?;
         let agent = self.config.agents.get(&row.agent_key);
         let display_name = agent.map_or(row.agent_key.as_str(), |agent| &agent.display_name);
-        let metadata = SessionMetadata {
-            agent_key: row.agent_key.clone(),
-            project_label: row.project_label.clone(),
-            cwd: row.project_path.clone(),
-            session_id: row.session_id.clone(),
-            protocol_version: row.protocol_version.clone(),
-            capabilities_json: row.capabilities_json.clone(),
-            restorable: row.restorable,
-        };
-        let mut content = starter_message(&metadata, display_name, availability);
-        if let Some(error) = error {
-            content.push_str(" · error `");
-            content.push_str(&escape_inline(error));
-            content.push('`');
-        }
-        row.thread_id
-            .edit_message(
-                &ctx.http,
-                row.starter_message_id,
-                EditMessage::new().content(content),
-            )
-            .await?;
         let tags = self.tag_ids(ctx).await?;
         let applied: Vec<_> = tags.get(&row.agent_key).copied().into_iter().collect();
         ThreadId::new(row.thread_id.get())
@@ -150,6 +124,33 @@ impl Bot {
         self.db
             .set_availability(row.thread_id, availability, error)?;
         tracing::debug!(agent = %display_name, session = %row.session_id, ?availability, "updated session availability");
+        Ok(())
+    }
+
+    pub async fn update_usage(&self, thread: GenericChannelId, usage: &UsageUpdate) -> BotResult {
+        let ctx = self.context()?;
+        let row = self
+            .db
+            .session(thread)?
+            .ok_or_else(|| BotError::Other("session disappeared while updating usage".into()))?;
+        let metadata = SessionMetadata {
+            agent_key: row.agent_key,
+            project_label: row.project_label,
+            cwd: row.project_path,
+            session_id: row.session_id,
+            protocol_version: row.protocol_version,
+            capabilities_json: row.capabilities_json,
+            restorable: row.restorable,
+        };
+        let usage = usage_text(usage);
+        let content = starter_message(&metadata, Some(&usage));
+        row.thread_id
+            .edit_message(
+                &ctx.http,
+                row.starter_message_id,
+                EditMessage::new().content(content),
+            )
+            .await?;
         Ok(())
     }
 
@@ -331,54 +332,26 @@ pub fn post_title(project: &str, title: Option<&str>, session_id: &str) -> Strin
     truncate_end(raw.trim(), THREAD_TITLE_LIMIT)
 }
 
-fn starter_message(
-    metadata: &SessionMetadata,
-    display_name: &str,
-    availability: Availability,
-) -> String {
-    let capabilities: serde_json::Value =
-        serde_json::from_str(&metadata.capabilities_json).unwrap_or_default();
-    let enabled = capability_names(&capabilities);
-    format!(
-        "agent `{}` · project `{}` · cwd `{}` · session `{}` · ACP `{}` · restore `{}` · status `{}` · capabilities `{}`",
-        escape_inline(display_name),
-        escape_inline(&metadata.project_label),
-        escape_inline(&metadata.cwd),
+fn starter_message(metadata: &SessionMetadata, usage: Option<&str>) -> String {
+    let mut content = format!(
+        "session `{}` · cwd `{}`",
         escape_inline(&metadata.session_id),
-        escape_inline(&metadata.protocol_version),
-        if metadata.restorable { "load" } else { "none" },
-        availability.as_str(),
-        if enabled.is_empty() {
-            "baseline".into()
-        } else {
-            enabled.join(", ")
-        },
-    )
+        escape_inline(&metadata.cwd),
+    );
+    if let Some(usage) = usage {
+        content.push_str(" · usage `");
+        content.push_str(&escape_inline(usage));
+        content.push('`');
+    }
+    content
 }
 
-fn capability_names(value: &serde_json::Value) -> Vec<String> {
-    fn walk(prefix: &str, value: &serde_json::Value, output: &mut Vec<String>) {
-        if output.len() >= 12 {
-            return;
-        }
-        match value {
-            serde_json::Value::Bool(true) => output.push(prefix.to_owned()),
-            serde_json::Value::Object(fields) => {
-                for (name, value) in fields {
-                    let next = if prefix.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{prefix}.{name}")
-                    };
-                    walk(&next, value, output);
-                }
-            }
-            _ => {}
-        }
+fn usage_text(usage: &UsageUpdate) -> String {
+    let mut content = format!("{} / {} tokens", usage.used, usage.size);
+    if let Some(cost) = &usage.cost {
+        let _ = write!(content, " · {} {}", cost.amount, cost.currency);
     }
-    let mut output = Vec::new();
-    walk("", value, &mut output);
-    output
+    content
 }
 
 fn escape_inline(value: &str) -> String {

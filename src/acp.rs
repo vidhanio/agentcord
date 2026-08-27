@@ -17,7 +17,7 @@ use agent_client_protocol::{
         },
     },
 };
-use serenity::all::{Context, CreateMessage, GenericChannelId};
+use serenity::all::{Context, GenericChannelId};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, warn};
 
@@ -332,13 +332,28 @@ async fn run_connection(
     let (updates_tx, mut updates_rx) = mpsc::unbounded_channel::<SessionUpdate>();
     let render_binding = binding.clone();
     let render_bot = bot.clone();
+    let edit_debounce = bot.config.timeouts.edit_debounce;
     tokio::spawn(async move {
         while let Some(update) = updates_rx.recv().await {
             let Some(thread) = render_binding.thread() else {
                 continue;
             };
+            let mut updates = vec![update];
+            if !edit_debounce.is_zero() {
+                let deadline = tokio::time::sleep(edit_debounce);
+                tokio::pin!(deadline);
+                loop {
+                    tokio::select! {
+                        next = updates_rx.recv() => match next {
+                            Some(next) => updates.push(next),
+                            None => break,
+                        },
+                        () = &mut deadline => break,
+                    }
+                }
+            }
             let turn = render_binding.turn.load(Ordering::Acquire);
-            if let Err(error) = render_bot.render_update(thread, turn, update).await {
+            if let Err(error) = render_bot.render_updates(thread, turn, updates).await {
                 warn!(?error, ?thread, "failed to render ACP update");
             }
         }
@@ -476,20 +491,10 @@ async fn run_commands(
         match command {
             SessionCommand::Bind { thread, prompt } => {
                 binding.thread.store(thread.get(), Ordering::Release);
-                binding.accept_updates.store(true, Ordering::Release);
-                for (index, chunk) in crate::render::split_message(&prompt, 1_980)
-                    .into_iter()
-                    .enumerate()
-                {
-                    let content = if index == 0 {
-                        format!("**prompt**\n{chunk}")
-                    } else {
-                        chunk
-                    };
-                    let _ = thread
-                        .send_message(&ctx.http, CreateMessage::new().content(content))
-                        .await;
+                if let Err(error) = bot.post_user_message(thread, &prompt).await {
+                    warn!(?error, ?thread, "failed to mirror initial user message");
                 }
+                binding.accept_updates.store(true, Ordering::Release);
                 prompt_agent(bot, ctx, binding, &connection, &session_id, prompt).await;
             }
             SessionCommand::Prompt(prompt) => {

@@ -7,16 +7,16 @@ uses one configured forum, one post per ACP session, and one supervised ACP
 subprocess per active session. There is no terminal scraping, transcript
 parsing, agent-name branching, or external workspace manager integration.
 
-`Bot` is the application state and owns the configuration, database, canonical
-directory catalog, Discord context, active ACP registry, and session-local
-locks. Pass a shared `Bot`, not independent copies of its constituent state.
+`Bot` is the application state and owns the configuration, database, Discord
+context, active ACP registry, and session-local locks. Pass a shared `Bot`, not
+independent copies of its constituent state.
 
 ## Source layout
 
 - `src/lib.rs`: `Bot`, Serenity event handling, startup and wiring.
 - `src/acp.rs`: ACP subprocess/session supervision, prompt queues, restoration.
 - `src/config.rs`: TOML schema, environment expansion, validation and paths.
-- `src/projects.rs`: canonical configured directories and display labels.
+- `src/projects.rs`: path resolution and display labels.
 - `src/db.rs`: new Agentcord SQLite state and Discord projection bindings.
 - `src/forum.rs`: fixed forum validation, tags, posts, titles and availability.
 - `src/render.rs`: ordered ACP update and tool-call projection.

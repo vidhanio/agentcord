@@ -1,11 +1,6 @@
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use crate::{BotError, BotResult, config::ProjectsConfig};
-
-pub const DISCORD_PROJECT_LIMIT: usize = 25;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Project {
@@ -13,51 +8,12 @@ pub struct Project {
     pub path: PathBuf,
 }
 
-#[derive(Clone, Debug)]
-pub struct ProjectCatalog {
-    projects: Vec<Project>,
-}
-
-impl ProjectCatalog {
-    pub fn discover(config: &ProjectsConfig) -> BotResult<Self> {
-        let display_base = canonicalize(&expand_home(&config.base_path)?, "display base")?;
-        let home = dirs::home_dir().and_then(|path| path.canonicalize().ok());
-        let mut by_path = BTreeMap::new();
-        for configured in &config.directories {
-            let path = canonicalize(&expand_home(configured)?, "project directory")?;
-            let label = display_label(&path, &display_base, home.as_deref());
-            by_path.insert(path.clone(), Project { label, path });
-        }
-        let mut projects = by_path.into_values().collect::<Vec<_>>();
-        projects.sort_by(|left, right| left.label.cmp(&right.label));
-        if projects.len() > DISCORD_PROJECT_LIMIT {
-            return Err(BotError::Config(format!(
-                "{} configured directories exceed Discord's {DISCORD_PROJECT_LIMIT}-option selector limit",
-                projects.len()
-            )));
-        }
-        Ok(Self { projects })
-    }
-
-    #[must_use]
-    pub fn projects(&self) -> &[Project] {
-        &self.projects
-    }
-
-    pub fn resolve(&self, selection: &str) -> BotResult<Project> {
-        let index = selection
-            .parse::<usize>()
-            .map_err(|_| BotError::Other("invalid directory selection".into()))?;
-        let configured = self
-            .projects
-            .get(index)
-            .ok_or_else(|| BotError::Other("unknown directory selection".into()))?;
-        let path = canonicalize(&configured.path, "project directory")?;
-        Ok(Project {
-            label: configured.label.clone(),
-            path,
-        })
-    }
+pub fn resolve(config: &ProjectsConfig, input: &str) -> BotResult<Project> {
+    let path = canonicalize(&expand_home(Path::new(input))?, "project directory")?;
+    let display_base = canonicalize(&expand_home(&config.base_path)?, "display base")?;
+    let home = dirs::home_dir().and_then(|path| path.canonicalize().ok());
+    let label = display_label(&path, &display_base, home.as_deref());
+    Ok(Project { label, path })
 }
 
 fn canonicalize(path: &Path, description: &str) -> BotResult<PathBuf> {

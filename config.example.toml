@@ -9,7 +9,6 @@ forum_channel_id = 1234567890
 
 [projects]
 base_path = "~/Projects"
-directories = ["~/Projects/agentcord", "/work/client-project"]
 
 [agents.example]
 display_name = "Example Agent"
@@ -30,3 +29,4 @@ modal = "5m"
 startup = "1m"
 prompt = "1h"
 permission = "5m"
+edit_debounce = "100ms"

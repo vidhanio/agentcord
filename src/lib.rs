@@ -7,6 +7,7 @@ mod forum;
 mod permission;
 mod projects;
 mod render;
+mod webhook;
 
 use std::{
     collections::HashMap,
@@ -20,7 +21,7 @@ use std::{
 pub use config::Config;
 use db::Db;
 pub use error::BotError;
-use projects::ProjectCatalog;
+use projects::Project;
 use serenity::all::{
     ClientBuilder, Context, EventHandler, FullEvent, GatewayIntents, GenericChannelId, HttpBuilder,
     Token, UserId, async_trait,
@@ -33,11 +34,11 @@ pub type BotResult<T = ()> = Result<T, BotError>;
 pub struct Bot {
     pub(crate) config: Arc<Config>,
     pub(crate) db: Db,
-    pub(crate) projects: Arc<ProjectCatalog>,
     context: Arc<OnceLock<Context>>,
     pub(crate) active: Arc<Mutex<HashMap<GenericChannelId, acp::ActiveSession>>>,
     pub(crate) render_locks: Arc<Mutex<HashMap<GenericChannelId, Arc<tokio::sync::Mutex<()>>>>>,
     pub(crate) resume_locks: Arc<Mutex<HashMap<GenericChannelId, Arc<tokio::sync::Mutex<()>>>>>,
+    pub(crate) webhook_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) next_generation: Arc<AtomicU64>,
     ready_started: Arc<AtomicBool>,
 }
@@ -47,7 +48,6 @@ impl Debug for Bot {
         formatter
             .debug_struct("Bot")
             .field("config", &self.config)
-            .field("projects", &self.projects)
             .finish_non_exhaustive()
     }
 }
@@ -55,16 +55,15 @@ impl Debug for Bot {
 impl Bot {
     fn new(config: Config) -> BotResult<Self> {
         config.validate()?;
-        let projects = ProjectCatalog::discover(&config.projects)?;
         let db = Db::open(&config::state_path())?;
         Ok(Self {
             config: Arc::new(config),
             db,
-            projects: Arc::new(projects),
             context: Arc::default(),
             active: Arc::default(),
             render_locks: Arc::default(),
             resume_locks: Arc::default(),
+            webhook_lock: Arc::default(),
             next_generation: Arc::new(AtomicU64::new(1)),
             ready_started: Arc::new(AtomicBool::new(false)),
         })
@@ -79,6 +78,10 @@ impl Bot {
     #[must_use]
     pub fn is_allowed(&self, user: UserId) -> bool {
         user == self.config.discord.allowed_user_id
+    }
+
+    pub(crate) fn resolve_project(&self, input: &str) -> BotResult<Project> {
+        projects::resolve(&self.config.projects, input)
     }
 
     async fn handle_ready(&self, ctx: &Context) {

@@ -10,10 +10,10 @@ emoji all come from configuration.
 
 ## What it does
 
-- `/agent` opens a native modal for choosing a configured agent and working
-  directory, then creates an ACP session and sends its initial prompt.
+- `/agent` opens a native modal for choosing a configured agent and entering a
+  working directory, then creates an ACP session and sends its initial prompt.
 - Messages in a session post are delivered as ACP prompts.
-- Streamed thoughts and final output are edited in place; final output is split
+- Streamed thoughts are kept visible, while final output is appended and split
   without truncation when it exceeds Discord's message limit.
 - Structured ACP tool calls, plans, modes, configuration, usage, titles, and
   permission requests are projected into Discord.
@@ -44,10 +44,7 @@ See [config.example.toml](config.example.toml) for the complete schema.
         allowed_user_id = 456;
         forum_channel_id = 789;
       };
-      projects = {
-        base_path = "~/Projects";
-        directories = [ "~/Projects/agentcord" ];
-      };
+      projects.base_path = "~/Projects";
       agents.example = {
         display_name = "Example";
         command = "example-acp";

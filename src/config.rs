@@ -35,8 +35,6 @@ pub struct DiscordConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProjectsConfig {
     pub base_path: PathBuf,
-    #[serde(alias = "paths")]
-    pub directories: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -78,6 +76,8 @@ pub struct Timeouts {
     pub prompt: Duration,
     #[serde(with = "duration")]
     pub permission: Duration,
+    #[serde(with = "duration")]
+    pub edit_debounce: Duration,
 }
 
 impl Default for Timeouts {
@@ -87,6 +87,7 @@ impl Default for Timeouts {
             startup: Duration::from_secs(60),
             prompt: Duration::from_secs(3600),
             permission: Duration::from_secs(300),
+            edit_debounce: Duration::from_millis(100),
         }
     }
 }
@@ -131,11 +132,6 @@ impl Config {
                 "{} agents exceed Discord's {DISCORD_SELECT_LIMIT}-option selector limit",
                 self.agents.len()
             )));
-        }
-        if self.projects.directories.is_empty() {
-            return Err(BotError::Config(
-                "at least one `projects.directories` entry is required".into(),
-            ));
         }
         let mut tag_names = HashSet::new();
         for (key, agent) in &self.agents {
