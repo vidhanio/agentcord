@@ -29,12 +29,6 @@ are expanded after TOML parsing.
 
 See [config.example.toml](config.example.toml) for the complete schema.
 
-## Run
-
-```sh
-nix run .#default
-```
-
 ## Home Manager
 
 ```nix
@@ -63,7 +57,3 @@ nix run .#default
   };
 }
 ```
-
-## License
-
-AGPL-3.0-or-later
