@@ -38,7 +38,7 @@
 
               package = lib.mkOption {
                 type = lib.types.package;
-                default = self.packages.${pkgs.system}.default;
+                default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
                 description = "Package to install for Agentcord.";
               };
 
@@ -234,9 +234,6 @@
             devShells.default = craneLib.devShell {
               inherit (self') checks;
 
-              # Fetch git dependencies (poise/serenity) with the system `git`,
-              # which honors the machine's GitHub SSH configuration, instead
-              # of libgit2, which fails on SSH host-key validation.
               env.CARGO_NET_GIT_FETCH_WITH_CLI = "true";
 
               packages = [
