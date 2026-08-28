@@ -325,7 +325,13 @@ async fn sync_thought_messages(
     if rendered == state.thought_rendered {
         return Ok(());
     }
-    let chunks = split_message(&state.thought, MESSAGE_LIMIT - 2)
+    // Italics break when the asterisks hug whitespace, so trim the whole
+    // message before splitting it.
+    let thought = state.thought.trim();
+    if thought.is_empty() {
+        return Ok(());
+    }
+    let chunks = split_message(thought, MESSAGE_LIMIT - 2)
         .into_iter()
         .map(|chunk| format!("*{chunk}*"))
         .collect::<Vec<_>>();
