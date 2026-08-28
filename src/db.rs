@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::HashSet, path::Path, sync::Arc};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serenity::all::{GenericChannelId, MessageId};
@@ -156,6 +156,36 @@ impl Db {
         drop(statement);
         drop(connection);
         Ok(sessions)
+    }
+
+    pub fn agent_session(
+        &self,
+        agent_key: &str,
+        session_id: &str,
+    ) -> BotResult<Option<SessionRow>> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT thread_id, starter_message_id, session_id, agent_key,
+                        project_path, project_label, title, protocol_version,
+                        capabilities_json, restorable, availability, turn, last_error
+                 FROM sessions WHERE agent_key = ?1 AND session_id = ?2",
+                params![agent_key, session_id],
+                map_session,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn session_keys(&self) -> BotResult<HashSet<(String, String)>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("SELECT agent_key, session_id FROM sessions")?;
+        let keys = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<HashSet<_>, _>>()?;
+        drop(statement);
+        drop(connection);
+        Ok(keys)
     }
 
     pub fn set_availability(

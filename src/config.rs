@@ -1,7 +1,7 @@
 //! Agentcord's entirely configuration-driven runtime contract.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -47,12 +47,6 @@ pub struct AgentConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    pub tag: AgentTag,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct AgentTag {
-    pub name: String,
     pub emoji: TagEmoji,
 }
 
@@ -141,11 +135,10 @@ impl Config {
                 self.agents.len()
             )));
         }
-        let mut tag_names = HashSet::new();
         for (key, agent) in &self.agents {
-            if key.trim().is_empty() || key.len() > 100 {
+            if key.trim().is_empty() || key.chars().count() > 20 {
                 return Err(BotError::Config(format!(
-                    "agent key `{key}` must contain 1–100 bytes"
+                    "agent key `{key}` must contain 1–20 characters because it names the forum tag"
                 )));
             }
             if agent.display_name.trim().is_empty() || agent.display_name.chars().count() > 100 {
@@ -158,23 +151,12 @@ impl Config {
                     "agent `{key}` has an empty command"
                 )));
             }
-            if agent.tag.name.trim().is_empty() || agent.tag.name.chars().count() > 20 {
-                return Err(BotError::Config(format!(
-                    "agent `{key}` tag name must contain 1–20 characters"
-                )));
-            }
-            if !tag_names.insert(agent.tag.name.as_str()) {
-                return Err(BotError::Config(format!(
-                    "agent tag name `{}` is configured more than once",
-                    agent.tag.name
-                )));
-            }
-            if matches!(&agent.tag.emoji, TagEmoji::Unicode(value) if value.trim().is_empty()) {
+            if matches!(&agent.emoji, TagEmoji::Unicode(value) if value.trim().is_empty()) {
                 return Err(BotError::Config(format!(
                     "agent `{key}` has an empty tag emoji"
                 )));
             }
-            if matches!(agent.tag.emoji, TagEmoji::Custom { id: 0, .. }) {
+            if matches!(agent.emoji, TagEmoji::Custom { id: 0, .. }) {
                 return Err(BotError::Config(format!(
                     "agent `{key}` has an invalid custom emoji id"
                 )));

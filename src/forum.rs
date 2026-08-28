@@ -25,6 +25,7 @@ pub struct SessionMetadata {
     pub protocol_version: String,
     pub capabilities_json: String,
     pub restorable: bool,
+    pub title: Option<String>,
 }
 
 impl Bot {
@@ -45,7 +46,11 @@ impl Bot {
         let tag = tags.get(&metadata.agent_key).copied().ok_or_else(|| {
             BotError::Other(format!("missing forum tag for `{}`", metadata.agent_key))
         })?;
-        let title = post_title(&metadata.project_label, None, &metadata.session_id);
+        let title = post_title(
+            &metadata.project_label,
+            metadata.title.as_deref(),
+            &metadata.session_id,
+        );
         let created = self
             .config
             .discord
@@ -73,7 +78,7 @@ impl Bot {
             agent_key: metadata.agent_key.clone(),
             project_path: metadata.cwd.clone(),
             project_label: metadata.project_label.clone(),
-            title: None,
+            title: metadata.title.clone(),
             protocol_version: metadata.protocol_version.clone(),
             capabilities_json: metadata.capabilities_json.clone(),
             restorable: metadata.restorable,
@@ -141,6 +146,7 @@ impl Bot {
             protocol_version: row.protocol_version,
             capabilities_json: row.capabilities_json,
             restorable: row.restorable,
+            title: row.title,
         };
         let usage = usage_text(usage);
         let content = starter_message(&metadata, Some(&usage));
@@ -201,8 +207,8 @@ impl Bot {
         let configured_names = self
             .config
             .agents
-            .values()
-            .map(|agent| agent.tag.name.as_str())
+            .keys()
+            .map(String::as_str)
             .collect::<Vec<_>>();
         let mut desired = channel
             .available_tags
@@ -211,9 +217,10 @@ impl Bot {
             .map(copy_tag)
             .collect::<Vec<_>>();
         desired.extend(
-            self.config.agents.values().map(|agent| {
-                CreateForumTag::new(&agent.tag.name).emoji(reaction(&agent.tag.emoji))
-            }),
+            self.config
+                .agents
+                .iter()
+                .map(|(key, agent)| CreateForumTag::new(key).emoji(reaction(&agent.emoji))),
         );
         if desired.len() > 20 {
             return Err(BotError::Config(format!(
@@ -230,13 +237,8 @@ impl Bot {
         let wanted = self
             .config
             .agents
-            .values()
-            .map(|agent| {
-                (
-                    agent.tag.name.clone(),
-                    configured_emoji_key(&agent.tag.emoji),
-                )
-            })
+            .iter()
+            .map(|(key, agent)| (key.clone(), configured_emoji_key(&agent.emoji)))
             .collect::<Vec<_>>();
         let needs_update = wanted
             .iter()
@@ -252,12 +254,12 @@ impl Bot {
         Ok(self
             .config
             .agents
-            .iter()
-            .filter_map(|(key, agent)| {
+            .keys()
+            .filter_map(|key| {
                 channel
                     .available_tags
                     .iter()
-                    .find(|tag| tag.name == agent.tag.name)
+                    .find(|tag| &tag.name == key)
                     .map(|tag| (key.clone(), tag.id))
             })
             .collect())
@@ -358,7 +360,7 @@ fn escape_inline(value: &str) -> String {
     truncate_end(&value.replace('`', "ˋ").replace(['\n', '\r'], " "), 300)
 }
 
-fn truncate_end(value: &str, limit: usize) -> String {
+pub fn truncate_end(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         return value.to_owned();
     }

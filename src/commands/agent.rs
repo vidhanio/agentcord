@@ -13,6 +13,7 @@ const AGENT_SELECT_ID: &str = "agent";
 const PROJECT_INPUT_ID: &str = "project";
 const PROMPT_INPUT_ID: &str = "prompt";
 
+/// Launch a new ACP session with a configured agent
 #[poise::command(slash_command, check = "super::allowed")]
 pub async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<(), BotError> {
     let bot = (*ctx.data()).clone();

@@ -12,6 +12,8 @@ emoji all come from configuration.
 
 - `/agent` opens a native modal for choosing a configured agent and entering a
   working directory, then creates an ACP session and sends its initial prompt.
+- `/import` binds an existing ACP session of a configured agent to a new forum
+  post; imported posts stay archived until their first message restores them.
 - Messages in a session post are delivered as ACP prompts.
 - Streamed thoughts are kept visible, while final output is appended and split
   without truncation when it exceeds Discord's message limit.

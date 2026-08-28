@@ -12,7 +12,7 @@ pub fn framework(bot: &Bot) -> BotFramework {
     BotFramework {
         poise: poise::Framework::builder()
             .options(poise::FrameworkOptions {
-                commands: vec![agent::agent()],
+                commands: vec![agent::agent(), import::import()],
                 on_error,
                 ..Default::default()
             })
@@ -83,3 +83,4 @@ fn on_error(error: FrameworkError<'_, Bot, BotError>) -> poise::BoxFuture<'_, ()
 }
 
 mod agent;
+mod import;

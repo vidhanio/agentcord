@@ -16,6 +16,21 @@ pub fn resolve(config: &ProjectsConfig, input: &str) -> BotResult<Project> {
     Ok(Project { label, path })
 }
 
+/// Describes a project from a working directory reported by an agent, keeping
+/// the raw path when the directory no longer exists on disk.
+pub fn adopt(config: &ProjectsConfig, reported: &Path) -> Project {
+    let path = reported
+        .canonicalize()
+        .unwrap_or_else(|_| reported.to_owned());
+    let display_base = expand_home(&config.base_path)
+        .ok()
+        .and_then(|base| base.canonicalize().ok())
+        .unwrap_or_else(|| config.base_path.clone());
+    let home = dirs::home_dir().and_then(|path| path.canonicalize().ok());
+    let label = display_label(&path, &display_base, home.as_deref());
+    Project { label, path }
+}
+
 fn canonicalize(path: &Path, description: &str) -> BotResult<PathBuf> {
     let canonical = path.canonicalize().map_err(|error| {
         BotError::Config(format!(

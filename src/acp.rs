@@ -1,9 +1,11 @@
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use agent_client_protocol::{
@@ -12,13 +14,14 @@ use agent_client_protocol::{
         ProtocolVersion,
         v1::{
             CancelNotification, ContentBlock, Implementation, InitializeRequest,
-            LoadSessionRequest, NewSessionRequest, PromptRequest, RequestPermissionRequest,
-            SessionId, SessionNotification, SessionUpdate,
+            InitializeResponse, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
+            PromptRequest, RequestPermissionRequest, SessionId, SessionInfo, SessionNotification,
+            SessionUpdate,
         },
     },
 };
 use serenity::all::{Context, GenericChannelId};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{OnceCell, mpsc, oneshot};
 use tracing::{error, warn};
 
 use crate::{
@@ -27,7 +30,7 @@ use crate::{
     db::{Availability, SessionRow},
     forum::SessionMetadata,
     permission,
-    projects::Project,
+    projects::{self, Project},
 };
 
 #[derive(Debug)]
@@ -48,9 +51,34 @@ pub struct ActiveSession {
 
 #[derive(Debug)]
 enum StartMode {
-    New { agent_key: String, project: Project },
+    New {
+        agent_key: String,
+        project: Project,
+    },
     Load(SessionRow),
+    Import {
+        agent_key: String,
+        session_id: String,
+    },
 }
+
+/// A session known to a harness through `session/list`, not yet imported.
+#[derive(Clone, Debug)]
+pub struct ListedSession {
+    pub session_id: String,
+    pub title: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+type ListingCell = OnceCell<Result<Vec<ListedSession>, String>>;
+
+#[derive(Clone, Debug)]
+pub struct CachedListing {
+    listed_at: Instant,
+    listing: Arc<ListingCell>,
+}
+
+const LISTING_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 struct Binding {
@@ -187,6 +215,72 @@ impl Bot {
         }
     }
 
+    pub async fn import(&self, agent_key: &str, session_id: &str) -> BotResult<GenericChannelId> {
+        let ctx = self.context()?.clone();
+        if let Some(row) = self.db.agent_session(agent_key, session_id)? {
+            return Err(BotError::Other(format!(
+                "this session is already imported as https://discord.com/channels/{}/{}/{}",
+                self.config.discord.guild_id, row.thread_id, row.thread_id
+            )));
+        }
+        let mut pending = self.spawn(
+            ctx.clone(),
+            StartMode::Import {
+                agent_key: agent_key.to_owned(),
+                session_id: session_id.to_owned(),
+            },
+        )?;
+        let metadata = self.await_ready(&mut pending).await?;
+        let mut row = self.create_session_post(&metadata).await?;
+        row.availability = Availability::Restorable;
+        if let Err(error) = self.db.insert_session(&row) {
+            let _ = row.thread_id.delete(&ctx.http, None).await;
+            return Err(error);
+        }
+        if let Err(error) = self
+            .update_availability(&row, Availability::Restorable, None)
+            .await
+        {
+            warn!(?error, thread = ?row.thread_id, "failed to archive imported session");
+        }
+        let _ = pending.commands.send(SessionCommand::Shutdown);
+        Ok(row.thread_id)
+    }
+
+    /// Lists the sessions a harness currently exposes through `session/list`.
+    ///
+    /// Results are cached briefly per harness so that repeated autocomplete
+    /// requests reuse a single connection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the listing cache mutex is poisoned.
+    pub async fn list_sessions(&self, agent_key: &str) -> BotResult<Vec<ListedSession>> {
+        if !self.config.agents.contains_key(agent_key) {
+            return Err(BotError::Other(format!("unknown agent `{agent_key}`")));
+        }
+        let listing = {
+            let mut listings = self.listings.lock().expect("listing cache poisoned");
+            cached_listing(&mut listings, agent_key)
+        };
+        let agent_key = agent_key.to_owned();
+        let listed = listing
+            .get_or_init(|| async {
+                let Some(agent) = self.config.agents.get(&agent_key).cloned() else {
+                    return Err("agent is no longer configured".into());
+                };
+                let fetched =
+                    tokio::time::timeout(self.config.timeouts.startup, fetch(agent)).await;
+                match fetched {
+                    Ok(Ok(listed)) => Ok(listed),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(_) => Err("ACP agent listing timed out".into()),
+                }
+            })
+            .await;
+        listed.clone().map_err(BotError::Other)
+    }
+
     pub(super) fn forget(&self, thread: GenericChannelId) {
         let removed = self
             .active
@@ -200,7 +294,7 @@ impl Bot {
 
     fn spawn(&self, ctx: Context, mode: StartMode) -> BotResult<PendingSession> {
         let agent_key = match &mode {
-            StartMode::New { agent_key, .. } => agent_key,
+            StartMode::New { agent_key, .. } | StartMode::Import { agent_key, .. } => agent_key,
             StartMode::Load(row) => &row.agent_key,
         };
         let agent = self.config.agents.get(agent_key).ok_or_else(|| {
@@ -210,7 +304,7 @@ impl Bot {
         let (ready_tx, ready) = oneshot::channel();
         let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
         let binding = Arc::new(match &mode {
-            StartMode::New { .. } => Binding::new(None, 0),
+            StartMode::New { .. } | StartMode::Import { .. } => Binding::new(None, 0),
             StartMode::Load(row) => Binding::new(Some(row.thread_id), row.turn),
         });
         let task = tokio::spawn(run_connection(
@@ -401,7 +495,8 @@ async fn run_connection(
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(process, |connection: ConnectionTo<Agent>| async move {
-            let (session_id, metadata) = initialize_session(&connection, &mode, &binding).await?;
+            let (session_id, metadata) =
+                initialize_session(&bot, &connection, &mode, &binding).await?;
             signal_ready(&connection_ready, Ok(metadata));
             run_commands(&bot, &ctx, &binding, connection, session_id, command_rx).await
         })
@@ -413,11 +508,9 @@ async fn run_connection(
     result
 }
 
-async fn initialize_session(
+async fn initialize(
     connection: &ConnectionTo<Agent>,
-    mode: &StartMode,
-    binding: &Binding,
-) -> Result<(SessionId, SessionMetadata), agent_client_protocol::Error> {
+) -> Result<InitializeResponse, agent_client_protocol::Error> {
     let initialized = connection
         .send_request(
             InitializeRequest::new(ProtocolVersion::V1)
@@ -433,6 +526,16 @@ async fn initialize_session(
             )),
         );
     }
+    Ok(initialized)
+}
+
+async fn initialize_session(
+    bot: &Bot,
+    connection: &ConnectionTo<Agent>,
+    mode: &StartMode,
+    binding: &Binding,
+) -> Result<(SessionId, SessionMetadata), agent_client_protocol::Error> {
+    let initialized = initialize(connection).await?;
     let capabilities_json = serde_json::to_string(&initialized.agent_capabilities)
         .map_err(agent_client_protocol::Error::into_internal_error)?;
     let restorable = initialized.agent_capabilities.load_session;
@@ -452,6 +555,7 @@ async fn initialize_session(
                 protocol_version,
                 capabilities_json,
                 restorable,
+                title: None,
             };
             Ok((response.session_id, metadata))
         }
@@ -476,11 +580,113 @@ async fn initialize_session(
                 protocol_version,
                 capabilities_json,
                 restorable,
+                title: row.title.clone(),
             };
             binding.accept_updates.store(true, Ordering::Release);
             Ok((session_id, metadata))
         }
+        StartMode::Import {
+            agent_key,
+            session_id,
+        } => {
+            if !restorable {
+                return Err(agent_client_protocol::Error::invalid_request().data(
+                    "agent does not advertise session/load, so its sessions cannot be imported",
+                ));
+            }
+            let listed = find_listed_session(connection, session_id).await?;
+            let project = projects::adopt(&bot.config.projects, &listed.cwd);
+            let metadata = SessionMetadata {
+                agent_key: agent_key.clone(),
+                project_label: project.label,
+                cwd: project.path.display().to_string(),
+                session_id: session_id.clone(),
+                protocol_version,
+                capabilities_json,
+                restorable,
+                title: listed.title,
+            };
+            Ok((SessionId::new(session_id.clone()), metadata))
+        }
     }
+}
+
+async fn list_all_sessions(
+    connection: &ConnectionTo<Agent>,
+) -> Result<Vec<SessionInfo>, agent_client_protocol::Error> {
+    let mut listed = Vec::new();
+    let mut cursor = None;
+    loop {
+        let request = ListSessionsRequest::new().cursor(cursor.take());
+        let response = connection.send_request(request).block_task().await?;
+        listed.extend(response.sessions);
+        let Some(next) = response.next_cursor else {
+            return Ok(listed);
+        };
+        cursor = Some(next);
+    }
+}
+
+async fn find_listed_session(
+    connection: &ConnectionTo<Agent>,
+    session_id: &str,
+) -> Result<SessionInfo, agent_client_protocol::Error> {
+    list_all_sessions(connection)
+        .await?
+        .into_iter()
+        .find(|listed| listed.session_id.0.as_ref() == session_id)
+        .ok_or_else(|| {
+            agent_client_protocol::Error::invalid_request()
+                .data(format!("agent does not know session `{session_id}`"))
+        })
+}
+
+fn cached_listing(
+    listings: &mut HashMap<String, CachedListing>,
+    agent_key: &str,
+) -> Arc<ListingCell> {
+    if let Some(cached) = listings.get(agent_key)
+        && cached.listed_at.elapsed() < LISTING_TTL
+    {
+        return cached.listing.clone();
+    }
+    let cached = CachedListing {
+        listed_at: Instant::now(),
+        listing: Arc::new(OnceCell::new()),
+    };
+    listings.insert(agent_key.to_owned(), cached.clone());
+    cached.listing
+}
+
+async fn fetch(agent: AgentConfig) -> Result<Vec<ListedSession>, agent_client_protocol::Error> {
+    let process = AcpAgent::new(
+        AcpAgentConfig::new(agent.command)
+            .args(agent.args)
+            .envs(agent.env),
+    );
+    agent_client_protocol::Client
+        .connect_with(process, |connection: ConnectionTo<Agent>| async move {
+            let initialized = initialize(&connection).await?;
+            if initialized
+                .agent_capabilities
+                .session_capabilities
+                .list
+                .is_none()
+            {
+                return Err(agent_client_protocol::Error::invalid_request()
+                    .data("agent does not advertise session/list"));
+            }
+            Ok(list_all_sessions(&connection)
+                .await?
+                .into_iter()
+                .map(|listed| ListedSession {
+                    session_id: listed.session_id.to_string(),
+                    title: listed.title,
+                    updated_at: listed.updated_at,
+                })
+                .collect())
+        })
+        .await
 }
 
 async fn run_commands(

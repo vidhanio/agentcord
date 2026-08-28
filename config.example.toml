@@ -15,13 +15,14 @@ display_name = "Example Agent"
 command = "example-agent-acp"
 args = ["--stdio"]
 env = { EXAMPLE_SETTING = "1" }
-tag = { name = "example", emoji = "🤖" }
+# The agent key above doubles as the forum tag name, so keep it to 1-20 chars.
+emoji = "🤖"
 
 [agents.custom-emoji]
 display_name = "Custom Agent"
 command = "/opt/custom-agent/bin/acp"
 args = []
-tag = { name = "custom", emoji = { id = 123456789012345678, animated = false } }
+emoji = { id = 123456789012345678, animated = false }
 
 [permissions]
 # Automatically choose ACP's AllowAlways option for every permission request.
