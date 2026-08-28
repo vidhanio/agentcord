@@ -405,9 +405,20 @@ async fn sync_tool_messages(
     ids: &mut Vec<MessageId>,
     state: &serde_json::Value,
 ) -> BotResult {
-    let text = render_tool_text(state);
-    let chunks = split_message(&text, MESSAGE_LIMIT);
-    sync_text_messages(ctx, thread, ids, &chunks).await
+    let text = truncate_tool_call(&render_tool_text(state));
+    sync_text_messages(ctx, thread, ids, &[text]).await
+}
+
+/// Caps one tool-call projection to Discord's single-message limit.
+fn truncate_tool_call(value: &str) -> String {
+    let marker = "\n… tool call truncated …";
+    if value.chars().count() <= MESSAGE_LIMIT {
+        return value.to_owned();
+    }
+    let keep = MESSAGE_LIMIT.saturating_sub(marker.chars().count());
+    let mut output = value.chars().take(keep).collect::<String>();
+    output.push_str(marker);
+    output
 }
 
 /// Chooses the specialized textual representation for a tool-call state.
@@ -861,6 +872,21 @@ mod tests {
         });
         let text = render_tool_text(&state);
         assert!(text.contains("```json\n{\n  \"pattern\": \"foo\",\n  \"path\": \"src\"\n}\n```"));
+    }
+
+    #[test]
+    /// Ensures large tool calls remain a single bounded Discord message.
+    fn tool_calls_are_truncated_to_one_message() {
+        let content = "x".repeat(MESSAGE_LIMIT + 100);
+        let state = json!({
+            "toolCallId": "tc_1",
+            "kind": "read",
+            "status": "completed",
+            "content": [{"type": "text", "text": content}]
+        });
+        let text = truncate_tool_call(&render_tool_text(&state));
+        assert_eq!(text.chars().count(), MESSAGE_LIMIT);
+        assert!(text.ends_with("… tool call truncated …"));
     }
 
     #[test]
