@@ -47,11 +47,46 @@
                 default = { };
                 description = "Configuration written to `agentcord/config.toml`.";
               };
+
+              environmentFile = lib.mkOption {
+                type = lib.types.nullOr lib.types.path;
+                default = null;
+                example = "/run/secrets/agentcord";
+                description = ''
+                  Path to a file containing environment variables for the agentcord
+                  service, in the format of an EnvironmentFile as described by
+                  {manpage}`systemd.exec(5)` (i.e. `KEY=VALUE` pairs, one per line).
+
+                  This can be used to keep secrets such as the Discord bot token
+                  out of the Nix store. Reference them from {option}`settings` using
+                  `''${NAME}` placeholders.
+                '';
+              };
             };
 
             config = lib.mkIf cfg.enable {
               home.packages = [ cfg.package ];
               xdg.configFile."agentcord/config.toml".source = toml.generate "agentcord-config.toml" cfg.settings;
+
+              systemd.user.services.agentcord = {
+                Unit = {
+                  Description = "Agentcord Discord client";
+                  After = [ "network.target" ];
+                };
+
+                Service = {
+                  ExecStart = lib.getExe cfg.package;
+                  Restart = "always";
+                  RestartSec = 5;
+                }
+                // lib.optionalAttrs ((cfg.environmentFile or null) != null) {
+                  EnvironmentFile = cfg.environmentFile;
+                };
+
+                Install = {
+                  WantedBy = [ "default.target" ];
+                };
+              };
             };
           };
 
@@ -148,6 +183,7 @@
                 commonArgs
                 // {
                   inherit cargoArtifacts;
+                  meta.mainProgram = "agentcord";
                 }
               );
 

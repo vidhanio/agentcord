@@ -46,9 +46,10 @@ See [config.example.toml](config.example.toml) for the complete schema.
   imports = [ inputs.agentcord.homeManagerModules.default ];
   programs.agentcord = {
     enable = true;
+    environmentFile = "/run/secrets/agentcord";
     settings = {
       discord = {
-        bot_token = "...";
+        bot_token = "\${DISCORD_TOKEN}";
         guild_id = 123;
         allowed_user_id = 456;
         forum_channel_id = 789;
@@ -63,3 +64,7 @@ See [config.example.toml](config.example.toml) for the complete schema.
   };
 }
 ```
+
+`environmentFile` is loaded by the systemd user service and should contain
+`KEY=VALUE` lines. Referencing `\${DISCORD_TOKEN}` from `settings` keeps the
+secret out of the Nix store.
