@@ -1,4 +1,4 @@
-use std::{fmt::Write, sync::Arc};
+use std::fmt::Write;
 
 use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, SessionUpdate, ToolCall, ToolCallUpdate,
@@ -24,47 +24,29 @@ struct OutputState {
 }
 
 impl Bot {
-    fn starter_ui(&self, thread: GenericChannelId) -> crate::acp::SessionUiState {
-        self.session_ui(thread).unwrap_or_default()
-    }
-
-    pub async fn render_update(
-        &self,
-        thread: GenericChannelId,
-        turn: u64,
-        update: SessionUpdate,
-    ) -> BotResult {
-        self.render_updates(
+    pub async fn render_updates(&self, updates: Vec<RenderUpdate>) -> BotResult {
+        let ctx = self.context()?;
+        let mut updates = updates.into_iter().peekable();
+        while let Some(RenderUpdate {
             thread,
             turn,
-            vec![RenderUpdate {
-                replay: false,
-                update,
-            }],
-        )
-        .await
-    }
-
-    pub async fn render_updates(
-        &self,
-        thread: GenericChannelId,
-        turn: u64,
-        updates: Vec<RenderUpdate>,
-    ) -> BotResult {
-        let ctx = self.context()?;
-        let lock = self.session_lock(thread);
-        let _guard = lock.lock().await;
-        let mut updates = updates.into_iter().peekable();
-        while let Some(RenderUpdate { replay, update }) = updates.next() {
+            replay,
+            ui,
+            update,
+        }) = updates.next()
+        {
             match update {
                 SessionUpdate::AgentThoughtChunk(first) => {
                     let mut chunks = vec![first];
                     while matches!(
                         updates.peek(),
                         Some(RenderUpdate {
+                            thread: same_thread,
+                            turn: same_turn,
                             replay: same_replay,
                             update: SessionUpdate::AgentThoughtChunk(_),
-                        }) if *same_replay == replay
+                            ..
+                        }) if *same_thread == thread && *same_turn == turn && *same_replay == replay
                     ) {
                         if let Some(RenderUpdate {
                             update: SessionUpdate::AgentThoughtChunk(chunk),
@@ -82,9 +64,12 @@ impl Bot {
                     while matches!(
                         updates.peek(),
                         Some(RenderUpdate {
+                            thread: same_thread,
+                            turn: same_turn,
                             replay: same_replay,
                             update: SessionUpdate::AgentMessageChunk(_),
-                        }) if *same_replay == replay
+                            ..
+                        }) if *same_thread == thread && *same_turn == turn && *same_replay == replay
                     ) {
                         if let Some(RenderUpdate {
                             update: SessionUpdate::AgentMessageChunk(chunk),
@@ -125,26 +110,13 @@ impl Bot {
                     self.render_tool_updates(ctx, thread, batch).await?;
                 }
                 SessionUpdate::UsageUpdate(usage) => {
-                    self.update_starter(thread, &self.starter_ui(thread), Some(&usage))
-                        .await?;
+                    self.update_starter(thread, &ui, Some(&usage)).await?;
                 }
                 SessionUpdate::CurrentModeUpdate(_) | SessionUpdate::ConfigOptionUpdate(_) => {
-                    self.update_starter(thread, &self.starter_ui(thread), None)
-                        .await?;
+                    self.update_starter(thread, &ui, None).await?;
                 }
                 SessionUpdate::SessionInfoUpdate(info) => {
-                    let value = serde_json::to_value(info).unwrap_or_default();
-                    let Some(title_value) = value.get("title") else {
-                        continue;
-                    };
-                    let title = title_value.as_str();
-                    let row = self.db.session(thread)?.ok_or_else(|| {
-                        crate::BotError::Other(
-                            "session disappeared while updating its title".into(),
-                        )
-                    })?;
-                    self.update_title(thread, &row.project_path, &row.session_id, title)
-                        .await?;
+                    self.render_session_info(thread, &info).await?;
                 }
                 other => {
                     self.render_metadata(ctx, thread, other).await?;
@@ -152,6 +124,22 @@ impl Bot {
             }
         }
         Ok(())
+    }
+
+    async fn render_session_info(
+        &self,
+        thread: GenericChannelId,
+        info: &(impl Serialize + Sync),
+    ) -> BotResult {
+        let value = serde_json::to_value(info).unwrap_or_default();
+        let Some(title) = value.get("title") else {
+            return Ok(());
+        };
+        let row = self.db.session(thread)?.ok_or_else(|| {
+            crate::BotError::Other("session disappeared while updating its title".into())
+        })?;
+        self.update_title(thread, &row.project_path, &row.session_id, title.as_str())
+            .await
     }
 
     async fn render_output_chunks(
@@ -306,15 +294,6 @@ impl Bot {
         sync_text_messages(ctx, thread, &mut row.discord_message_ids, &[body]).await?;
         row.state_json = value.to_string();
         self.db.upsert_render(thread, &row)
-    }
-
-    fn session_lock(&self, thread: GenericChannelId) -> Arc<tokio::sync::Mutex<()>> {
-        self.render_locks
-            .lock()
-            .expect("renderer lock map poisoned")
-            .entry(thread)
-            .or_default()
-            .clone()
     }
 }
 

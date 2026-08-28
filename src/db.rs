@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::Path, sync::Arc};
+use std::{collections::HashSet, path::Path};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serenity::all::{GenericChannelId, MessageId};
@@ -20,9 +20,9 @@ pub struct RenderRow {
     pub state_json: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Db {
-    connection: Arc<std::sync::Mutex<Connection>>,
+    connection: std::sync::Mutex<Connection>,
 }
 
 impl Db {
@@ -56,7 +56,7 @@ impl Db {
              PRAGMA foreign_keys = ON;",
         )?;
         Ok(Self {
-            connection: Arc::new(std::sync::Mutex::new(connection)),
+            connection: std::sync::Mutex::new(connection),
         })
     }
 
@@ -191,12 +191,20 @@ impl Db {
     /// Reserves the next turn's render row so concurrent turns cannot reuse
     /// its key, and returns the turn number.
     pub fn begin_turn(&self, thread_id: GenericChannelId) -> BotResult<u64> {
-        let turn = self.latest_turn(thread_id)? + 1;
-        self.connection()?.execute(
+        let connection = self.connection()?;
+        let latest: i64 = connection.query_row(
+            "SELECT COALESCE(MAX(CAST(substr(source_key, 6) AS INTEGER)), 0)
+             FROM renders WHERE thread_id = ?1 AND source_key LIKE 'turn:%'",
+            [thread_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let turn = u64::try_from(latest).unwrap_or_default() + 1;
+        connection.execute(
             "INSERT OR IGNORE INTO renders (thread_id, source_key, discord_message_ids, state_json)
              VALUES (?1, ?2, '[]', '{}')",
             params![thread_id.to_string(), format!("turn:{turn}:response")],
         )?;
+        drop(connection);
         Ok(turn)
     }
 
@@ -276,4 +284,50 @@ fn parse_snowflake(value: &str) -> rusqlite::Result<u64> {
             Box::new(error),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, Barrier},
+        thread,
+    };
+
+    use super::*;
+
+    #[test]
+    fn concurrent_turns_reserve_distinct_numbers() {
+        const WORKERS: usize = 8;
+
+        let db = Db::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let thread_id = GenericChannelId::new(1);
+        db.insert_session(&SessionRow {
+            thread_id,
+            session_id: "session".into(),
+            agent_key: "agent".into(),
+            project_path: "/project".into(),
+        })
+        .unwrap();
+        let barrier = Arc::new(Barrier::new(WORKERS));
+
+        let mut turns = thread::scope(|scope| {
+            let handles = (0..WORKERS)
+                .map(|_| {
+                    let db = &db;
+                    let barrier = Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        db.begin_turn(thread_id).unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        turns.sort_unstable();
+
+        assert_eq!(turns, (1..=WORKERS as u64).collect::<Vec<_>>());
+    }
 }

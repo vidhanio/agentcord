@@ -32,10 +32,6 @@ impl Bot {
     }
 
     /// Creates a session thread in the configured forum.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the starter message cache mutex is poisoned.
     pub async fn create_session_post(
         &self,
         metadata: &SessionMetadata,
@@ -72,17 +68,9 @@ impl Bot {
                 ),
             )
             .await?;
-        let starter_message_id = created
-            .base
-            .last_message_id
-            .ok_or_else(|| BotError::Other("new forum post has no starter message".into()))?;
         ThreadId::new(created.id.get())
             .edit(&ctx.http, EditThread::new().applied_tags(vec![tag]))
             .await?;
-        self.starter_messages
-            .lock()
-            .expect("starter message cache poisoned")
-            .insert(created.id.widen(), starter_message_id);
 
         Ok(SessionRow {
             thread_id: created.id.widen(),
@@ -90,35 +78,6 @@ impl Bot {
             agent_key: metadata.agent_key.clone(),
             project_path: metadata.cwd.clone(),
         })
-    }
-
-    /// The thread's first message, cached in memory and recovered from
-    /// Discord when the cache is cold (e.g. after a restart).
-    async fn starter_message_id(&self, thread: GenericChannelId) -> BotResult<MessageId> {
-        if let Some(id) = self
-            .starter_messages
-            .lock()
-            .expect("starter message cache poisoned")
-            .get(&thread)
-        {
-            return Ok(*id);
-        }
-        let ctx = self.context()?;
-        let messages = thread
-            .messages(
-                &ctx.http,
-                GetMessages::new().limit(1).after(MessageId::new(1)),
-            )
-            .await?;
-        let id = messages
-            .first()
-            .ok_or_else(|| BotError::Other("session thread has no starter message".into()))?
-            .id;
-        self.starter_messages
-            .lock()
-            .expect("starter message cache poisoned")
-            .insert(thread, id);
-        Ok(id)
     }
 
     pub async fn update_title(
@@ -175,7 +134,9 @@ impl Bot {
             .db
             .session(thread)?
             .ok_or_else(|| BotError::Other("session disappeared while updating usage".into()))?;
-        let starter = self.starter_message_id(thread).await?;
+        // Discord thread ids are the ids of their starter messages, including
+        // posts created in forum channels.
+        let starter = MessageId::new(thread.get());
         let usage = usage.map(usage_text);
         let content = starter_message(
             &row.session_id,

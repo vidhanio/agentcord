@@ -13,10 +13,8 @@ mod webhook;
 use std::{
     collections::HashMap,
     fmt::{self, Debug, Formatter},
-    sync::{
-        Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
+    ops::Deref,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 pub use config::Config;
@@ -24,34 +22,52 @@ use db::Db;
 pub use error::BotError;
 use projects::Project;
 use serenity::all::{
-    ClientBuilder, Context, EventHandler, FullEvent, GatewayIntents, GenericChannelId, HttpBuilder,
-    MessageId, Token, UserId, async_trait,
+    ClientBuilder, Context, EventHandler, FullEvent, GatewayIntents, HttpBuilder, Token, UserId,
+    Webhook, async_trait,
 };
 use tracing::{info, warn};
 
 pub type BotResult<T = ()> = Result<T, BotError>;
 
 #[derive(Clone)]
-pub struct Bot {
-    pub(crate) config: Arc<Config>,
+pub struct Bot(Arc<BotState>);
+
+#[doc(hidden)]
+pub struct BotState {
+    pub(crate) config: Config,
     pub(crate) db: Db,
-    context: Arc<OnceLock<Context>>,
-    pub(crate) active: Arc<Mutex<HashMap<GenericChannelId, acp::ActiveSession>>>,
-    pub(crate) render_locks: Arc<Mutex<HashMap<GenericChannelId, Arc<tokio::sync::Mutex<()>>>>>,
-    pub(crate) resume_locks: Arc<Mutex<HashMap<GenericChannelId, Arc<tokio::sync::Mutex<()>>>>>,
-    pub(crate) listings: Arc<Mutex<HashMap<String, acp::CachedListing>>>,
-    pub(crate) starter_messages: Arc<Mutex<HashMap<GenericChannelId, MessageId>>>,
-    pub(crate) restorable: Arc<Mutex<HashMap<String, bool>>>,
-    pub(crate) webhook_lock: Arc<tokio::sync::Mutex<()>>,
-    pub(crate) next_generation: Arc<AtomicU64>,
-    ready_started: Arc<AtomicBool>,
+    context: OnceLock<Context>,
+    pub(crate) sessions: acp::SessionRegistry,
+    pub(crate) listings: Mutex<HashMap<String, acp::CachedListing>>,
+    pub(crate) restorable: Mutex<HashMap<String, bool>>,
+    pub(crate) webhook: tokio::sync::Mutex<Option<Webhook>>,
+    ready_started: tokio::sync::OnceCell<()>,
+}
+
+impl Debug for BotState {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BotState")
+            .field("config", &self.config)
+            .field("db", &self.db)
+            .field("sessions", &self.sessions)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Deref for Bot {
+    type Target = BotState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl Debug for Bot {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Bot")
-            .field("config", &self.config)
+            .field("config", &self.0.config)
             .finish_non_exhaustive()
     }
 }
@@ -60,20 +76,16 @@ impl Bot {
     fn new(config: Config) -> BotResult<Self> {
         config.validate()?;
         let db = Db::open(&config::state_path())?;
-        Ok(Self {
-            config: Arc::new(config),
+        Ok(Self(Arc::new(BotState {
+            config,
             db,
-            context: Arc::default(),
-            active: Arc::default(),
-            render_locks: Arc::default(),
-            resume_locks: Arc::default(),
-            listings: Arc::default(),
-            starter_messages: Arc::default(),
-            restorable: Arc::default(),
-            webhook_lock: Arc::default(),
-            next_generation: Arc::new(AtomicU64::new(1)),
-            ready_started: Arc::new(AtomicBool::new(false)),
-        })
+            context: OnceLock::new(),
+            sessions: acp::SessionRegistry::default(),
+            listings: Mutex::default(),
+            restorable: Mutex::default(),
+            webhook: tokio::sync::Mutex::new(None),
+            ready_started: tokio::sync::OnceCell::new(),
+        })))
     }
 
     pub(crate) fn context(&self) -> BotResult<&Context> {
@@ -93,15 +105,18 @@ impl Bot {
 
     async fn handle_ready(&self, ctx: &Context) {
         let _ = self.context.set(ctx.clone());
-        if self.ready_started.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        if let Err(error) = self.validate_and_reconcile_forum().await {
-            self.ready_started.store(false, Ordering::Release);
+        let result = self
+            .ready_started
+            .get_or_try_init(|| async {
+                self.validate_and_reconcile_forum().await?;
+                self.restore_all().await;
+                Ok::<(), BotError>(())
+            })
+            .await;
+        if let Err(error) = result {
             warn!(?error, "configured Agentcord forum is unavailable");
             return;
         }
-        self.restore_all().await;
         info!("agentcord ready");
     }
 

@@ -42,6 +42,7 @@ impl Bot {
                     }
                     Err(error) => {
                         warn!(?error, "user webhook failed, falling back to a bot message");
+                        *self.webhook.lock().await = None;
                         break;
                     }
                 }
@@ -78,25 +79,38 @@ impl Bot {
         forum: serenity::all::ChannelId,
         profile: &UserProfile,
     ) -> Option<Webhook> {
-        let _guard = self.webhook_lock.lock().await;
-        let existing = forum
-            .webhooks(&ctx.http)
-            .await
-            .ok()?
-            .into_iter()
-            .find(|webhook| webhook.name.as_deref() == Some(profile.username.as_str()));
-        match existing {
-            Some(webhook) => Some(webhook),
-            None => match forum
-                .create_webhook(&ctx.http, CreateWebhook::new(&profile.username))
-                .await
-            {
-                Ok(webhook) => Some(webhook),
-                Err(error) => {
-                    warn!(?error, %forum, "failed to create user webhook");
-                    None
-                }
-            },
+        let mut cached = self.webhook.lock().await;
+        if let Some(webhook) = cached.as_ref() {
+            return Some(webhook.clone());
         }
+        let existing = match forum.webhooks(&ctx.http).await {
+            Ok(webhooks) => webhooks
+                .into_iter()
+                .find(|webhook| webhook.name.as_deref() == Some(profile.username.as_str())),
+            Err(error) => {
+                warn!(?error, %forum, "failed to list user webhooks");
+                return None;
+            }
+        };
+        let webhook = match existing {
+            Some(webhook) => Ok(webhook),
+            None => {
+                forum
+                    .create_webhook(&ctx.http, CreateWebhook::new(&profile.username))
+                    .await
+            }
+        };
+        let result = match webhook {
+            Ok(webhook) => {
+                *cached = Some(webhook.clone());
+                Some(webhook)
+            }
+            Err(error) => {
+                warn!(?error, %forum, "failed to find or create user webhook");
+                None
+            }
+        };
+        drop(cached);
+        result
     }
 }
