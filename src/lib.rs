@@ -25,7 +25,7 @@ pub use error::BotError;
 use projects::Project;
 use serenity::all::{
     ClientBuilder, Context, EventHandler, FullEvent, GatewayIntents, GenericChannelId, HttpBuilder,
-    Token, UserId, async_trait,
+    MessageId, Token, UserId, async_trait,
 };
 use tracing::{info, warn};
 
@@ -40,6 +40,8 @@ pub struct Bot {
     pub(crate) render_locks: Arc<Mutex<HashMap<GenericChannelId, Arc<tokio::sync::Mutex<()>>>>>,
     pub(crate) resume_locks: Arc<Mutex<HashMap<GenericChannelId, Arc<tokio::sync::Mutex<()>>>>>,
     pub(crate) listings: Arc<Mutex<HashMap<String, acp::CachedListing>>>,
+    pub(crate) starter_messages: Arc<Mutex<HashMap<GenericChannelId, MessageId>>>,
+    pub(crate) restorable: Arc<Mutex<HashMap<String, bool>>>,
     pub(crate) webhook_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) next_generation: Arc<AtomicU64>,
     ready_started: Arc<AtomicBool>,
@@ -66,6 +68,8 @@ impl Bot {
             render_locks: Arc::default(),
             resume_locks: Arc::default(),
             listings: Arc::default(),
+            starter_messages: Arc::default(),
+            restorable: Arc::default(),
             webhook_lock: Arc::default(),
             next_generation: Arc::new(AtomicU64::new(1)),
             ready_started: Arc::new(AtomicBool::new(false)),

@@ -20,6 +20,9 @@ emoji all come from configuration.
 - Messages in a session post are delivered as ACP prompts.
 - Streamed thoughts and tool-call content are kept visible in full; only shell
   output is tail-capped.
+- Sessions used outside Discord are pulled in on restore: `session/load`
+  replays the conversation and agentcord renders whatever the thread has not
+  seen yet, keyed by the agent's replay message ids.
 - Structured ACP tool calls, plans, modes, configuration, usage, titles,
   permission requests, and elicitation forms and URL consents are projected
   into Discord.

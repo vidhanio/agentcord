@@ -5,53 +5,17 @@ use serenity::all::{GenericChannelId, MessageId};
 
 use crate::{BotError, BotResult};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Availability {
-    Active,
-    Restorable,
-    Unavailable,
-}
-
-impl Availability {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Restorable => "restorable",
-            Self::Unavailable => "unavailable",
-        }
-    }
-
-    fn parse(value: &str) -> Self {
-        match value {
-            "active" => Self::Active,
-            "restorable" => Self::Restorable,
-            _ => Self::Unavailable,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct SessionRow {
     pub thread_id: GenericChannelId,
-    pub starter_message_id: MessageId,
     pub session_id: String,
     pub agent_key: String,
     pub project_path: String,
-    pub project_label: String,
-    pub title: Option<String>,
-    pub protocol_version: String,
-    pub capabilities_json: String,
-    pub restorable: bool,
-    pub availability: Availability,
-    pub turn: u64,
-    pub last_error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub struct RenderRow {
     pub source_key: String,
-    pub kind: String,
     pub discord_message_ids: Vec<MessageId>,
     pub state_json: String,
 }
@@ -70,59 +34,80 @@ impl Db {
     }
 
     fn from_connection(connection: Connection) -> BotResult<Self> {
+        // Legacy rows carry only derivable extras (availability, titles,
+        // capability caches); they are rewritten into the minimal shape.
+        connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        Self::migrate_legacy(&connection)?;
         connection.execute_batch(
-            "PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS sessions (
+            "CREATE TABLE IF NOT EXISTS sessions (
                thread_id TEXT PRIMARY KEY,
-               starter_message_id TEXT NOT NULL,
                session_id TEXT NOT NULL,
                agent_key TEXT NOT NULL,
                project_path TEXT NOT NULL,
-               project_label TEXT NOT NULL,
-               title TEXT,
-               protocol_version TEXT NOT NULL,
-               capabilities_json TEXT NOT NULL,
-               restorable INTEGER NOT NULL,
-               availability TEXT NOT NULL,
-               turn INTEGER NOT NULL DEFAULT 0,
-               last_error TEXT,
                UNIQUE(agent_key, session_id)
              );
              CREATE TABLE IF NOT EXISTS renders (
                thread_id TEXT NOT NULL REFERENCES sessions(thread_id) ON DELETE CASCADE,
                source_key TEXT NOT NULL,
-               kind TEXT NOT NULL,
                discord_message_ids TEXT NOT NULL,
                state_json TEXT NOT NULL,
                PRIMARY KEY(thread_id, source_key)
-             );",
+             );
+             PRAGMA foreign_keys = ON;",
         )?;
         Ok(Self {
             connection: Arc::new(std::sync::Mutex::new(connection)),
         })
     }
 
+    /// Rewrites databases from the schema that cached derivable session
+    /// fields (`availability`, `title`, `turn`, capability snapshots, ...)
+    /// into the minimal restore-tuple schema, preserving render state.
+    fn migrate_legacy(connection: &Connection) -> BotResult {
+        let legacy: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'availability'",
+            [],
+            |row| row.get(0),
+        )?;
+        if legacy == 0 {
+            return Ok(());
+        }
+        connection.execute_batch(
+            "ALTER TABLE renders RENAME TO renders_legacy;
+             ALTER TABLE sessions RENAME TO sessions_legacy;
+             CREATE TABLE sessions (
+               thread_id TEXT PRIMARY KEY,
+               session_id TEXT NOT NULL,
+               agent_key TEXT NOT NULL,
+               project_path TEXT NOT NULL,
+               UNIQUE(agent_key, session_id)
+             );
+             CREATE TABLE renders (
+               thread_id TEXT NOT NULL REFERENCES sessions(thread_id) ON DELETE CASCADE,
+               source_key TEXT NOT NULL,
+               discord_message_ids TEXT NOT NULL,
+               state_json TEXT NOT NULL,
+               PRIMARY KEY(thread_id, source_key)
+             );
+             INSERT INTO sessions (thread_id, session_id, agent_key, project_path)
+               SELECT thread_id, session_id, agent_key, project_path FROM sessions_legacy;
+             INSERT INTO renders (thread_id, source_key, discord_message_ids, state_json)
+               SELECT thread_id, source_key, discord_message_ids, state_json FROM renders_legacy;
+             DROP TABLE renders_legacy;
+             DROP TABLE sessions_legacy;",
+        )?;
+        Ok(())
+    }
+
     pub fn insert_session(&self, row: &SessionRow) -> BotResult {
         self.connection()?.execute(
-            "INSERT INTO sessions (
-               thread_id, starter_message_id, session_id, agent_key, project_path,
-               project_label, title, protocol_version, capabilities_json,
-               restorable, availability, turn, last_error
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO sessions (thread_id, session_id, agent_key, project_path)
+             VALUES (?1, ?2, ?3, ?4)",
             params![
                 row.thread_id.to_string(),
-                row.starter_message_id.to_string(),
                 row.session_id,
                 row.agent_key,
                 row.project_path,
-                row.project_label,
-                row.title,
-                row.protocol_version,
-                row.capabilities_json,
-                row.restorable,
-                row.availability.as_str(),
-                i64::try_from(row.turn).unwrap_or(i64::MAX),
-                row.last_error,
             ],
         )?;
         Ok(())
@@ -132,9 +117,7 @@ impl Db {
         let connection = self.connection()?;
         connection
             .query_row(
-                "SELECT thread_id, starter_message_id, session_id, agent_key,
-                        project_path, project_label, title, protocol_version,
-                        capabilities_json, restorable, availability, turn, last_error
+                "SELECT thread_id, session_id, agent_key, project_path
                  FROM sessions WHERE thread_id = ?1",
                 [thread_id.to_string()],
                 map_session,
@@ -146,9 +129,7 @@ impl Db {
     pub fn sessions(&self) -> BotResult<Vec<SessionRow>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT thread_id, starter_message_id, session_id, agent_key,
-                    project_path, project_label, title, protocol_version,
-                    capabilities_json, restorable, availability, turn, last_error
+            "SELECT thread_id, session_id, agent_key, project_path
              FROM sessions ORDER BY rowid",
         )?;
         let rows = statement.query_map([], map_session)?;
@@ -166,9 +147,7 @@ impl Db {
         let connection = self.connection()?;
         connection
             .query_row(
-                "SELECT thread_id, starter_message_id, session_id, agent_key,
-                        project_path, project_label, title, protocol_version,
-                        capabilities_json, restorable, availability, turn, last_error
+                "SELECT thread_id, session_id, agent_key, project_path
                  FROM sessions WHERE agent_key = ?1 AND session_id = ?2",
                 params![agent_key, session_id],
                 map_session,
@@ -188,40 +167,37 @@ impl Db {
         Ok(keys)
     }
 
-    pub fn set_availability(
-        &self,
-        thread_id: GenericChannelId,
-        availability: Availability,
-        error: Option<&str>,
-    ) -> BotResult {
+    pub fn delete_session(&self, thread_id: GenericChannelId) -> BotResult {
         self.connection()?.execute(
-            "UPDATE sessions SET availability = ?2, last_error = ?3 WHERE thread_id = ?1",
-            params![thread_id.to_string(), availability.as_str(), error],
-        )?;
-        Ok(())
-    }
-
-    pub fn set_title(&self, thread_id: GenericChannelId, title: Option<&str>) -> BotResult {
-        self.connection()?.execute(
-            "UPDATE sessions SET title = ?2 WHERE thread_id = ?1",
-            params![thread_id.to_string(), title],
-        )?;
-        Ok(())
-    }
-
-    pub fn begin_turn(&self, thread_id: GenericChannelId) -> BotResult<u64> {
-        let connection = self.connection()?;
-        connection.execute(
-            "UPDATE sessions SET turn = turn + 1 WHERE thread_id = ?1",
+            "DELETE FROM sessions WHERE thread_id = ?1",
             [thread_id.to_string()],
         )?;
-        let turn: i64 = connection.query_row(
-            "SELECT turn FROM sessions WHERE thread_id = ?1",
+        Ok(())
+    }
+
+    /// The highest turn number that already rendered for a thread.
+    pub fn latest_turn(&self, thread_id: GenericChannelId) -> BotResult<u64> {
+        let connection = self.connection()?;
+        let latest: i64 = connection.query_row(
+            "SELECT COALESCE(MAX(CAST(substr(source_key, 6) AS INTEGER)), 0)
+             FROM renders WHERE thread_id = ?1 AND source_key LIKE 'turn:%'",
             [thread_id.to_string()],
             |row| row.get(0),
         )?;
         drop(connection);
-        Ok(u64::try_from(turn).unwrap_or_default())
+        Ok(u64::try_from(latest).unwrap_or_default())
+    }
+
+    /// Reserves the next turn's render row so concurrent turns cannot reuse
+    /// its key, and returns the turn number.
+    pub fn begin_turn(&self, thread_id: GenericChannelId) -> BotResult<u64> {
+        let turn = self.latest_turn(thread_id)? + 1;
+        self.connection()?.execute(
+            "INSERT OR IGNORE INTO renders (thread_id, source_key, discord_message_ids, state_json)
+             VALUES (?1, ?2, '[]', '{}')",
+            params![thread_id.to_string(), format!("turn:{turn}:response")],
+        )?;
+        Ok(turn)
     }
 
     pub fn render(
@@ -232,11 +208,11 @@ impl Db {
         let connection = self.connection()?;
         connection
             .query_row(
-                "SELECT source_key, kind, discord_message_ids, state_json
+                "SELECT source_key, discord_message_ids, state_json
                  FROM renders WHERE thread_id = ?1 AND source_key = ?2",
                 params![thread_id.to_string(), source_key],
                 |row| {
-                    let ids: String = row.get(2)?;
+                    let ids: String = row.get(1)?;
                     let ids = serde_json::from_str::<Vec<u64>>(&ids)
                         .unwrap_or_default()
                         .into_iter()
@@ -244,9 +220,8 @@ impl Db {
                         .collect();
                     Ok(RenderRow {
                         source_key: row.get(0)?,
-                        kind: row.get(1)?,
                         discord_message_ids: ids,
-                        state_json: row.get(3)?,
+                        state_json: row.get(2)?,
                     })
                 },
             )
@@ -261,27 +236,17 @@ impl Db {
             .map(|id| id.get())
             .collect::<Vec<_>>();
         self.connection()?.execute(
-            "INSERT INTO renders (thread_id, source_key, kind, discord_message_ids, state_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO renders (thread_id, source_key, discord_message_ids, state_json)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(thread_id, source_key) DO UPDATE SET
-               kind = excluded.kind,
                discord_message_ids = excluded.discord_message_ids,
                state_json = excluded.state_json",
             params![
                 thread_id.to_string(),
                 row.source_key,
-                row.kind,
                 serde_json::to_string(&ids).expect("snowflake list serializes"),
                 row.state_json,
             ],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_session(&self, thread_id: GenericChannelId) -> BotResult {
-        self.connection()?.execute(
-            "DELETE FROM sessions WHERE thread_id = ?1",
-            [thread_id.to_string()],
         )?;
         Ok(())
     }
@@ -295,22 +260,11 @@ impl Db {
 
 fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     let thread: String = row.get(0)?;
-    let starter: String = row.get(1)?;
-    let availability: String = row.get(10)?;
     Ok(SessionRow {
         thread_id: GenericChannelId::new(parse_snowflake(&thread)?),
-        starter_message_id: MessageId::new(parse_snowflake(&starter)?),
-        session_id: row.get(2)?,
-        agent_key: row.get(3)?,
-        project_path: row.get(4)?,
-        project_label: row.get(5)?,
-        title: row.get(6)?,
-        protocol_version: row.get(7)?,
-        capabilities_json: row.get(8)?,
-        restorable: row.get(9)?,
-        availability: Availability::parse(&availability),
-        turn: u64::try_from(row.get::<_, i64>(11)?).unwrap_or_default(),
-        last_error: row.get(12)?,
+        session_id: row.get(1)?,
+        agent_key: row.get(2)?,
+        project_path: row.get(3)?,
     })
 }
 

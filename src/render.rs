@@ -6,16 +6,20 @@ use agent_client_protocol::schema::v1::{
 use serde::{Deserialize, Serialize};
 use serenity::all::{Context, CreateMessage, EditMessage, GenericChannelId, MessageId};
 
-use crate::{Bot, BotResult, db::RenderRow};
+use crate::{Bot, BotResult, acp::RenderUpdate, db::RenderRow};
 
 const MESSAGE_LIMIT: usize = 2000;
 const EXECUTE_OUTPUT_LIMIT: usize = 1900;
 
 #[derive(Default, Deserialize, Serialize)]
 struct OutputState {
+    #[serde(default)]
     thought: String,
+    #[serde(default)]
     final_text: String,
+    #[serde(default)]
     thought_message_count: usize,
+    #[serde(default)]
     thought_rendered: usize,
 }
 
@@ -30,43 +34,72 @@ impl Bot {
         turn: u64,
         update: SessionUpdate,
     ) -> BotResult {
-        self.render_updates(thread, turn, vec![update]).await
+        self.render_updates(
+            thread,
+            turn,
+            vec![RenderUpdate {
+                replay: false,
+                update,
+            }],
+        )
+        .await
     }
 
     pub async fn render_updates(
         &self,
         thread: GenericChannelId,
         turn: u64,
-        updates: Vec<SessionUpdate>,
+        updates: Vec<RenderUpdate>,
     ) -> BotResult {
         let ctx = self.context()?;
         let lock = self.session_lock(thread);
         let _guard = lock.lock().await;
         let mut updates = updates.into_iter().peekable();
-        while let Some(update) = updates.next() {
+        while let Some(RenderUpdate { replay, update }) = updates.next() {
             match update {
                 SessionUpdate::AgentThoughtChunk(first) => {
                     let mut chunks = vec![first];
-                    while matches!(updates.peek(), Some(SessionUpdate::AgentThoughtChunk(_))) {
-                        if let Some(SessionUpdate::AgentThoughtChunk(chunk)) = updates.next() {
+                    while matches!(
+                        updates.peek(),
+                        Some(RenderUpdate {
+                            replay: same_replay,
+                            update: SessionUpdate::AgentThoughtChunk(_),
+                        }) if *same_replay == replay
+                    ) {
+                        if let Some(RenderUpdate {
+                            update: SessionUpdate::AgentThoughtChunk(chunk),
+                            ..
+                        }) = updates.next()
+                        {
                             chunks.push(chunk);
                         }
                     }
-                    self.render_output_chunks(ctx, thread, turn, &chunks, true)
+                    self.render_output_chunks(ctx, thread, turn, &chunks, true, replay)
                         .await?;
                 }
                 SessionUpdate::AgentMessageChunk(first) => {
                     let mut chunks = vec![first];
-                    while matches!(updates.peek(), Some(SessionUpdate::AgentMessageChunk(_))) {
-                        if let Some(SessionUpdate::AgentMessageChunk(chunk)) = updates.next() {
+                    while matches!(
+                        updates.peek(),
+                        Some(RenderUpdate {
+                            replay: same_replay,
+                            update: SessionUpdate::AgentMessageChunk(_),
+                        }) if *same_replay == replay
+                    ) {
+                        if let Some(RenderUpdate {
+                            update: SessionUpdate::AgentMessageChunk(chunk),
+                            ..
+                        }) = updates.next()
+                        {
                             chunks.push(chunk);
                         }
                     }
-                    self.render_output_chunks(ctx, thread, turn, &chunks, false)
+                    self.render_output_chunks(ctx, thread, turn, &chunks, false, replay)
                         .await?;
                 }
-                // Discord-originated prompts are already visible. Ignoring user
-                // chunks prevents agents that echo prompt history from duplicating them.
+                // Discord-originated prompts are already visible, and replayed
+                // user messages cannot be told apart from them, so neither is
+                // rendered.
                 SessionUpdate::UserMessageChunk(_) => {}
                 SessionUpdate::ToolCall(call) => {
                     self.render_tool(ctx, thread, call).await?;
@@ -76,10 +109,16 @@ impl Bot {
                     let mut batch = vec![first];
                     while matches!(
                         updates.peek(),
-                        Some(SessionUpdate::ToolCallUpdate(update))
-                            if update.tool_call_id.to_string() == call_id
+                        Some(RenderUpdate {
+                            update: SessionUpdate::ToolCallUpdate(update),
+                            ..
+                        }) if update.tool_call_id.to_string() == call_id
                     ) {
-                        if let Some(SessionUpdate::ToolCallUpdate(update)) = updates.next() {
+                        if let Some(RenderUpdate {
+                            update: SessionUpdate::ToolCallUpdate(update),
+                            ..
+                        }) = updates.next()
+                        {
                             batch.push(update);
                         }
                     }
@@ -104,7 +143,8 @@ impl Bot {
                             "session disappeared while updating its title".into(),
                         )
                     })?;
-                    self.update_title(&row, title).await?;
+                    self.update_title(thread, &row.project_path, &row.session_id, title)
+                        .await?;
                 }
                 other => {
                     self.render_metadata(ctx, thread, other).await?;
@@ -121,11 +161,23 @@ impl Bot {
         turn: u64,
         chunks: &[ContentChunk],
         thought: bool,
+        replay: bool,
     ) -> BotResult {
-        let key = format!("turn:{turn}:response");
-        let mut row = self.db.render(thread, &key)?.unwrap_or_else(|| RenderRow {
+        // Chunks that carry a message id key their render state by message so
+        // replayed history deduplicates against what was already posted.
+        // Chunks without one fall back to the live turn's stream; a replayed
+        // chunk without an id cannot be deduplicated and is dropped.
+        let key = match chunks.first().and_then(|chunk| chunk.message_id.as_ref()) {
+            Some(id) => format!("msg:{id}"),
+            None if replay => return Ok(()),
+            None => format!("turn:{turn}:response"),
+        };
+        let row = self.db.render(thread, &key)?;
+        if replay && row.is_some() {
+            return Ok(());
+        }
+        let mut row = row.unwrap_or_else(|| RenderRow {
             source_key: key,
-            kind: "response".into(),
             discord_message_ids: vec![],
             state_json: serde_json::to_string(&OutputState::default()).unwrap(),
         });
@@ -178,13 +230,17 @@ impl Bot {
         let key = format!("tool:{call_id}");
         let mut row = self.db.render(thread, &key)?.unwrap_or_else(|| RenderRow {
             source_key: key,
-            kind: "tool".into(),
             discord_message_ids: vec![],
             state_json: "{}".into(),
         });
         let value = serde_json::to_value(call).unwrap_or_default();
-        row.state_json = serde_json::to_string(&value).expect("tool call serializes");
-        sync_tool_messages(ctx, thread, &mut row.discord_message_ids, &value).await?;
+        // Merging (rather than replacing) keeps replayed tool calls
+        // idempotent against the state that was already rendered.
+        let mut state: serde_json::Value =
+            serde_json::from_str(&row.state_json).unwrap_or_default();
+        merge_object(&mut state, &value);
+        row.state_json = serde_json::to_string(&state).expect("tool state serializes");
+        sync_tool_messages(ctx, thread, &mut row.discord_message_ids, &state).await?;
         self.db.upsert_render(thread, &row)
     }
 
@@ -202,7 +258,6 @@ impl Bot {
         let key = format!("tool:{call_id}");
         let mut row = self.db.render(thread, &key)?.unwrap_or_else(|| RenderRow {
             source_key: key,
-            kind: "tool".into(),
             discord_message_ids: vec![],
             state_json: serde_json::json!({
                 "toolCallId": call_id,
@@ -237,7 +292,6 @@ impl Bot {
         let key = format!("metadata:{kind}");
         let mut row = self.db.render(thread, &key)?.unwrap_or_else(|| RenderRow {
             source_key: key,
-            kind: "metadata".into(),
             discord_message_ids: vec![],
             state_json: String::new(),
         });

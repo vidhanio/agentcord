@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Write};
+use std::{collections::HashMap, fmt::Write, path::Path};
 
 use agent_client_protocol::schema::v1::{SessionConfigOptionCategory, UsageUpdate};
 use serenity::all::{
@@ -9,10 +9,7 @@ use serenity::all::{
 };
 
 use crate::{
-    Bot, BotError, BotResult,
-    acp::SessionUiState,
-    config::TagEmoji,
-    db::{Availability, SessionRow},
+    Bot, BotError, BotResult, acp::SessionUiState, config::TagEmoji, db::SessionRow, projects,
 };
 
 const THREAD_TITLE_LIMIT: usize = 100;
@@ -23,9 +20,6 @@ pub struct SessionMetadata {
     pub project_label: String,
     pub cwd: String,
     pub session_id: String,
-    pub protocol_version: String,
-    pub capabilities_json: String,
-    pub restorable: bool,
     pub title: Option<String>,
 }
 
@@ -37,6 +31,11 @@ impl Bot {
         Ok(())
     }
 
+    /// Creates a session thread in the configured forum.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the starter message cache mutex is poisoned.
     pub async fn create_session_post(
         &self,
         metadata: &SessionMetadata,
@@ -64,7 +63,12 @@ impl Bot {
                 &ctx.http,
                 CreateForumPost::new(
                     &title,
-                    CreateMessage::new().content(starter_message(metadata, ui, None)),
+                    CreateMessage::new().content(starter_message(
+                        &metadata.session_id,
+                        &metadata.cwd,
+                        ui,
+                        None,
+                    )),
                 ),
             )
             .await?;
@@ -75,65 +79,88 @@ impl Bot {
         ThreadId::new(created.id.get())
             .edit(&ctx.http, EditThread::new().applied_tags(vec![tag]))
             .await?;
+        self.starter_messages
+            .lock()
+            .expect("starter message cache poisoned")
+            .insert(created.id.widen(), starter_message_id);
 
         Ok(SessionRow {
             thread_id: created.id.widen(),
-            starter_message_id,
             session_id: metadata.session_id.clone(),
             agent_key: metadata.agent_key.clone(),
             project_path: metadata.cwd.clone(),
-            project_label: metadata.project_label.clone(),
-            title: metadata.title.clone(),
-            protocol_version: metadata.protocol_version.clone(),
-            capabilities_json: metadata.capabilities_json.clone(),
-            restorable: metadata.restorable,
-            availability: Availability::Active,
-            turn: 0,
-            last_error: None,
         })
     }
 
-    pub async fn update_title(&self, row: &SessionRow, title: Option<&str>) -> BotResult {
+    /// The thread's first message, cached in memory and recovered from
+    /// Discord when the cache is cold (e.g. after a restart).
+    async fn starter_message_id(&self, thread: GenericChannelId) -> BotResult<MessageId> {
+        if let Some(id) = self
+            .starter_messages
+            .lock()
+            .expect("starter message cache poisoned")
+            .get(&thread)
+        {
+            return Ok(*id);
+        }
         let ctx = self.context()?;
-        let name = post_title(&row.project_label, title, &row.session_id);
-        let channel = row
-            .thread_id
+        let messages = thread
+            .messages(
+                &ctx.http,
+                GetMessages::new().limit(1).after(MessageId::new(1)),
+            )
+            .await?;
+        let id = messages
+            .first()
+            .ok_or_else(|| BotError::Other("session thread has no starter message".into()))?
+            .id;
+        self.starter_messages
+            .lock()
+            .expect("starter message cache poisoned")
+            .insert(thread, id);
+        Ok(id)
+    }
+
+    pub async fn update_title(
+        &self,
+        thread: GenericChannelId,
+        project_path: &str,
+        session_id: &str,
+        title: Option<&str>,
+    ) -> BotResult {
+        let ctx = self.context()?;
+        let project = projects::adopt(&self.config.projects, Path::new(project_path));
+        let name = post_title(&project.label, title, session_id);
+        let channel = thread
             .to_channel(ctx, Some(self.config.discord.guild_id))
             .await?;
-        let Channel::GuildThread(thread) = channel else {
+        let Channel::GuildThread(guild_thread) = channel else {
             return Err(BotError::Other("session thread no longer exists".into()));
         };
-        if thread.base.name != name {
-            ThreadId::new(row.thread_id.get())
+        if guild_thread.base.name != name {
+            ThreadId::new(thread.get())
                 .edit(&ctx.http, EditThread::new().name(name))
                 .await?;
         }
-        self.db.set_title(row.thread_id, title)?;
         Ok(())
     }
 
-    pub async fn update_availability(
+    pub async fn set_thread_archived(
         &self,
-        row: &SessionRow,
-        availability: Availability,
-        error: Option<&str>,
+        thread: GenericChannelId,
+        agent_key: &str,
+        archived: bool,
     ) -> BotResult {
         let ctx = self.context()?;
-        let agent = self.config.agents.get(&row.agent_key);
-        let display_name = agent.map_or(row.agent_key.as_str(), |agent| &agent.display_name);
         let tags = self.tag_ids(ctx).await?;
-        let applied: Vec<_> = tags.get(&row.agent_key).copied().into_iter().collect();
-        ThreadId::new(row.thread_id.get())
+        let applied: Vec<_> = tags.get(agent_key).copied().into_iter().collect();
+        ThreadId::new(thread.get())
             .edit(
                 &ctx.http,
-                EditThread::new()
-                    .applied_tags(applied)
-                    .archived(availability != Availability::Active),
+                EditThread::new().applied_tags(applied).archived(archived),
             )
             .await?;
-        self.db
-            .set_availability(row.thread_id, availability, error)?;
-        tracing::debug!(agent = %display_name, session = %row.session_id, ?availability, "updated session availability");
+        tracing::debug!(%agent_key, ?thread, %archived, "updated session thread availability");
         Ok(())
     }
 
@@ -148,24 +175,16 @@ impl Bot {
             .db
             .session(thread)?
             .ok_or_else(|| BotError::Other("session disappeared while updating usage".into()))?;
-        let metadata = SessionMetadata {
-            agent_key: row.agent_key,
-            project_label: row.project_label,
-            cwd: row.project_path,
-            session_id: row.session_id,
-            protocol_version: row.protocol_version,
-            capabilities_json: row.capabilities_json,
-            restorable: row.restorable,
-            title: row.title,
-        };
+        let starter = self.starter_message_id(thread).await?;
         let usage = usage.map(usage_text);
-        let content = starter_message(&metadata, Some(ui), usage.as_deref());
-        row.thread_id
-            .edit_message(
-                &ctx.http,
-                row.starter_message_id,
-                EditMessage::new().content(content),
-            )
+        let content = starter_message(
+            &row.session_id,
+            &row.project_path,
+            Some(ui),
+            usage.as_deref(),
+        );
+        thread
+            .edit_message(&ctx.http, starter, EditMessage::new().content(content))
             .await?;
         Ok(())
     }
@@ -345,13 +364,14 @@ pub fn post_title(project: &str, title: Option<&str>, session_id: &str) -> Strin
 }
 
 fn starter_message(
-    metadata: &SessionMetadata,
+    session_id: &str,
+    cwd: &str,
     ui: Option<&SessionUiState>,
     usage: Option<&str>,
 ) -> String {
     let mut segments = vec![
-        format!("session `{}`", escape_inline(&metadata.session_id)),
-        format!("cwd `{}`", escape_inline(&metadata.cwd)),
+        format!("session `{}`", escape_inline(session_id)),
+        format!("cwd `{}`", escape_inline(cwd)),
     ];
     if let Some(ui) = ui {
         if let Some(mode) = ui.mode_label() {

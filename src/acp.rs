@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -31,7 +31,7 @@ use tracing::{error, warn};
 use crate::{
     Bot, BotError, BotResult,
     config::AgentConfig,
-    db::{Availability, SessionRow},
+    db::SessionRow,
     elicitation,
     forum::SessionMetadata,
     permission,
@@ -201,6 +201,7 @@ struct Binding {
     thread: AtomicU64,
     turn: AtomicU64,
     accept_updates: AtomicBool,
+    replaying: AtomicBool,
     ui: Arc<std::sync::Mutex<SessionUiState>>,
 }
 
@@ -210,6 +211,7 @@ impl Binding {
             thread: AtomicU64::new(thread.map_or(0, GenericChannelId::get)),
             turn: AtomicU64::new(turn),
             accept_updates: AtomicBool::new(false),
+            replaying: AtomicBool::new(false),
             ui: Arc::default(),
         }
     }
@@ -226,6 +228,14 @@ impl Binding {
     fn snapshot_ui(&self) -> SessionUiState {
         self.ui.lock().expect("session ui mutex poisoned").clone()
     }
+}
+
+/// A session update on its way to the renderer, tagged with whether it was
+/// replayed by `session/load` rather than streamed live.
+#[derive(Debug)]
+pub struct RenderUpdate {
+    pub replay: bool,
+    pub update: SessionUpdate,
 }
 
 type ReadySender = Arc<Mutex<Option<oneshot::Sender<Result<SessionMetadata, String>>>>>;
@@ -329,17 +339,20 @@ impl Bot {
             .db
             .session(thread)?
             .ok_or_else(|| BotError::Other("this is not an Agentcord session".into()))?;
-        if !row.restorable {
+        if self.restorable_memo(&row.agent_key) == Some(false) {
             return Err(BotError::Other(
                 "this ACP session cannot be restored by its agent".into(),
             ));
         }
         let ctx = self.context()?.clone();
         let mut pending = self.spawn(ctx, StartMode::Load(row.clone()))?;
-        self.await_ready(&mut pending).await?;
+        if let Err(error) = self.await_ready(&mut pending).await {
+            let _ = self.set_thread_archived(thread, &row.agent_key, true).await;
+            return Err(error);
+        }
         self.refresh_starter(thread, &pending.binding).await;
         self.activate(thread, pending);
-        self.update_availability(&row, Availability::Active, None)
+        self.set_thread_archived(thread, &row.agent_key, false)
             .await?;
         self.active(thread)
             .map(|active| active.commands)
@@ -371,16 +384,21 @@ impl Bot {
             }
         };
         for row in rows {
-            if !row.restorable || !self.config.agents.contains_key(&row.agent_key) {
+            if !self.config.agents.contains_key(&row.agent_key)
+                || self.restorable_memo(&row.agent_key) == Some(false)
+            {
                 let _ = self
-                    .update_availability(&row, Availability::Unavailable, None)
+                    .set_thread_archived(row.thread_id, &row.agent_key, true)
                     .await;
                 continue;
             }
             let mut pending = match self.spawn(ctx.clone(), StartMode::Load(row.clone())) {
                 Ok(pending) => pending,
                 Err(error) => {
-                    self.mark_restore_failure(&row, &error.to_string()).await;
+                    warn!(session = %row.session_id, ?error, "failed to restore ACP session");
+                    let _ = self
+                        .set_thread_archived(row.thread_id, &row.agent_key, true)
+                        .await;
                     continue;
                 }
             };
@@ -390,10 +408,15 @@ impl Bot {
                     self.activate(row.thread_id, pending);
                     self.refresh_starter(row.thread_id, &binding).await;
                     let _ = self
-                        .update_availability(&row, Availability::Active, None)
+                        .set_thread_archived(row.thread_id, &row.agent_key, false)
                         .await;
                 }
-                Err(error) => self.mark_restore_failure(&row, &error.to_string()).await,
+                Err(error) => {
+                    warn!(session = %row.session_id, ?error, "failed to restore ACP session");
+                    let _ = self
+                        .set_thread_archived(row.thread_id, &row.agent_key, true)
+                        .await;
+                }
             }
         }
     }
@@ -415,14 +438,13 @@ impl Bot {
         )?;
         let metadata = self.await_ready(&mut pending).await?;
         let ui = pending.binding.snapshot_ui();
-        let mut row = self.create_session_post(&metadata, Some(&ui)).await?;
-        row.availability = Availability::Restorable;
+        let row = self.create_session_post(&metadata, Some(&ui)).await?;
         if let Err(error) = self.db.insert_session(&row) {
             let _ = row.thread_id.delete(&ctx.http, None).await;
             return Err(error);
         }
         if let Err(error) = self
-            .update_availability(&row, Availability::Restorable, None)
+            .set_thread_archived(row.thread_id, &row.agent_key, true)
             .await
         {
             warn!(?error, thread = ?row.thread_id, "failed to archive imported session");
@@ -466,6 +488,10 @@ impl Bot {
     }
 
     pub(super) fn forget(&self, thread: GenericChannelId) {
+        self.starter_messages
+            .lock()
+            .expect("starter message cache poisoned")
+            .remove(&thread);
         let removed = self
             .active
             .lock()
@@ -489,7 +515,9 @@ impl Bot {
         let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
         let binding = Arc::new(match &mode {
             StartMode::New { .. } | StartMode::Import { .. } => Binding::new(None, 0),
-            StartMode::Load(row) => Binding::new(Some(row.thread_id), row.turn),
+            StartMode::Load(row) => {
+                Binding::new(Some(row.thread_id), self.db.latest_turn(row.thread_id)?)
+            }
         });
         let task = tokio::spawn(run_connection(
             Arc::new(self.clone()),
@@ -549,23 +577,17 @@ impl Bot {
                     .expect("active session map poisoned")
                     .remove(&thread);
             }
-            let detail = match result {
-                Ok(Ok(())) => None,
-                Ok(Err(error)) => Some(error.to_string()),
-                Err(error) => Some(error.to_string()),
+            if matches!(result, Ok(Ok(()))) {
+                return;
+            }
+            let Ok(Some(row)) = manager.db.session(thread) else {
+                return;
             };
-            if let Ok(Some(row)) = manager.db.session(thread) {
-                let availability = if row.restorable {
-                    Availability::Restorable
-                } else {
-                    Availability::Unavailable
-                };
-                if let Err(error) = manager
-                    .update_availability(&row, availability, detail.as_deref())
-                    .await
-                {
-                    warn!(?error, session = %row.session_id, "failed to mark ended ACP session");
-                }
+            if let Err(error) = manager
+                .set_thread_archived(thread, &row.agent_key, true)
+                .await
+            {
+                warn!(?error, session = %row.session_id, "failed to mark ended ACP session");
             }
         });
     }
@@ -589,6 +611,24 @@ impl Bot {
         Some(ui.lock().expect("session ui mutex poisoned").clone())
     }
 
+    /// Remembers whether an agent supports `session/load`, learned from the
+    /// first `initialize` exchange with it.
+    pub(crate) fn memoize_restorable(&self, agent_key: &str, restorable: bool) {
+        self.restorable
+            .lock()
+            .expect("restorable memo poisoned")
+            .insert(agent_key.to_owned(), restorable);
+    }
+
+    #[must_use]
+    pub(crate) fn restorable_memo(&self, agent_key: &str) -> Option<bool> {
+        self.restorable
+            .lock()
+            .expect("restorable memo poisoned")
+            .get(agent_key)
+            .copied()
+    }
+
     fn resume_lock(&self, thread: GenericChannelId) -> Arc<tokio::sync::Mutex<()>> {
         self.resume_locks
             .lock()
@@ -597,13 +637,6 @@ impl Bot {
             .or_default()
             .clone()
     }
-
-    async fn mark_restore_failure(&self, row: &SessionRow, error: &str) {
-        warn!(session = %row.session_id, %error, "failed to restore ACP session");
-        let _ = self
-            .update_availability(row, Availability::Restorable, Some(error))
-            .await;
-    }
 }
 
 /// Streams ACP session updates into the renderer, batching updates within the
@@ -611,7 +644,7 @@ impl Bot {
 fn spawn_render_task(
     bot: &Bot,
     binding: Arc<Binding>,
-    mut updates_rx: mpsc::UnboundedReceiver<SessionUpdate>,
+    mut updates_rx: mpsc::UnboundedReceiver<RenderUpdate>,
 ) {
     let render_bot = Arc::new(bot.clone());
     let edit_debounce = bot.config.timeouts.edit_debounce;
@@ -656,7 +689,7 @@ async fn run_connection(
             .args(agent.args)
             .envs(agent.env),
     );
-    let (updates_tx, updates_rx) = mpsc::unbounded_channel::<SessionUpdate>();
+    let (updates_tx, updates_rx) = mpsc::unbounded_channel::<RenderUpdate>();
     spawn_render_task(&bot, binding.clone(), updates_rx);
 
     let notification_binding = binding.clone();
@@ -677,7 +710,10 @@ async fn run_connection(
             async move |notification: SessionNotification, _connection| {
                 apply_ui_state(&notification_binding, &notification.update);
                 if notification_binding.accept_updates.load(Ordering::Acquire) {
-                    let _ = updates_tx.send(notification.update);
+                    let _ = updates_tx.send(RenderUpdate {
+                        replay: notification_binding.replaying.load(Ordering::Acquire),
+                        update: notification.update,
+                    });
                 }
                 Ok(())
             },
@@ -769,10 +805,12 @@ async fn initialize_session(
     binding: &Binding,
 ) -> Result<(SessionId, SessionMetadata), agent_client_protocol::Error> {
     let initialized = initialize(connection).await?;
-    let capabilities_json = serde_json::to_string(&initialized.agent_capabilities)
-        .map_err(agent_client_protocol::Error::into_internal_error)?;
     let restorable = initialized.agent_capabilities.load_session;
-    let protocol_version = initialized.protocol_version.to_string();
+    let agent_key = match mode {
+        StartMode::New { agent_key, .. } | StartMode::Import { agent_key, .. } => agent_key,
+        StartMode::Load(row) => &row.agent_key,
+    };
+    bot.memoize_restorable(agent_key, restorable);
     let record_session_state = |binding: &Binding, response: &NewSessionResponse| {
         let mut ui = binding.ui.lock().expect("session ui mutex poisoned");
         if let Some(modes) = response.modes.clone() {
@@ -795,9 +833,6 @@ async fn initialize_session(
                 project_label: project.label.clone(),
                 cwd: project.path.display().to_string(),
                 session_id: response.session_id.to_string(),
-                protocol_version,
-                capabilities_json,
-                restorable,
                 title: None,
             };
             Ok((response.session_id, metadata))
@@ -808,6 +843,10 @@ async fn initialize_session(
                     .data("agent no longer advertises session/load"));
             }
             let session_id = SessionId::new(row.session_id.clone());
+            // The agent streams the full conversation history before
+            // responding; tag it as replay so the renderer can deduplicate.
+            binding.accept_updates.store(true, Ordering::Release);
+            binding.replaying.store(true, Ordering::Release);
             let response = connection
                 .send_request(LoadSessionRequest::new(
                     session_id.clone(),
@@ -815,6 +854,7 @@ async fn initialize_session(
                 ))
                 .block_task()
                 .await?;
+            binding.replaying.store(false, Ordering::Release);
             {
                 let mut ui = binding.ui.lock().expect("session ui mutex poisoned");
                 if let Some(modes) = response.modes {
@@ -826,15 +866,12 @@ async fn initialize_session(
             }
             let metadata = SessionMetadata {
                 agent_key: row.agent_key.clone(),
-                project_label: row.project_label.clone(),
+                project_label: projects::adopt(&bot.config.projects, Path::new(&row.project_path))
+                    .label,
                 cwd: row.project_path.clone(),
                 session_id: row.session_id.clone(),
-                protocol_version,
-                capabilities_json,
-                restorable,
-                title: row.title.clone(),
+                title: None,
             };
-            binding.accept_updates.store(true, Ordering::Release);
             Ok((session_id, metadata))
         }
         StartMode::Import {
@@ -853,9 +890,6 @@ async fn initialize_session(
                 project_label: project.label,
                 cwd: project.path.display().to_string(),
                 session_id: session_id.clone(),
-                protocol_version,
-                capabilities_json,
-                restorable,
                 title: listed.title,
             };
             Ok((SessionId::new(session_id.clone()), metadata))
