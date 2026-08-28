@@ -362,13 +362,19 @@ fn render_tool_text(state: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("pending");
     let label = tool_label(kind);
-    let title = state
-        .get("title")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .unwrap_or(label.as_str());
-    let header = format!("{} {title} · {status}", tool_emoji(kind));
+    // The command fence carries an execute call's subject, so its header
+    // stays on the generic label instead of repeating the command.
+    let header = if kind == "execute" {
+        format!("{} {label} · {status}", tool_emoji(kind))
+    } else {
+        let title = state
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or(label.as_str());
+        format!("{} {title} · {status}", tool_emoji(kind))
+    };
     let body = match kind {
         "edit" => render_diff(state),
         "execute" => render_execute(state),
@@ -410,20 +416,13 @@ fn tool_label(kind: &str) -> String {
 }
 
 fn render_execute(state: &serde_json::Value) -> String {
-    let title = state.get("title").and_then(serde_json::Value::as_str);
     let command = state
         .get("rawInput")
         .and_then(|input| input.get("command").or_else(|| input.get("cmd")))
         .and_then(serde_json::Value::as_str)
-        .or(title)
+        .or_else(|| state.get("title").and_then(serde_json::Value::as_str))
         .unwrap_or("command");
-    // Agents commonly title an execute call with the command itself, in which
-    // case the header already shows it and the fence would duplicate it.
-    let mut body = if Some(command) == title {
-        String::new()
-    } else {
-        fence(command, "sh")
-    };
+    let mut body = fence(command, "sh");
     if let Some(output) = execute_output(state) {
         let output = keep_tail(
             &output,
@@ -708,13 +707,13 @@ mod tests {
             "rawOutput": {"stdout": output}
         });
         let text = render_tool_text(&state);
-        assert!(text.contains("⚙️ ls · completed\n```sh\ncargo test\n```"));
+        assert!(text.starts_with("⚙️ Execute · completed\n```sh\ncargo test\n```"));
         assert!(text.contains("```ansi\n… earlier output omitted …\n"));
         assert!(text.ends_with("\n```"));
     }
 
     #[test]
-    fn execute_does_not_repeat_a_command_used_as_the_title() {
+    fn execute_headers_stay_generic_when_the_title_is_the_command() {
         let state = json!({
             "toolCallId": "tc_1",
             "title": "cargo test",
@@ -723,19 +722,24 @@ mod tests {
             "rawInput": {"command": "cargo test"},
             "rawOutput": {"stdout": "ok"}
         });
-        let text = render_tool_text(&state);
-        assert_eq!(text, "⚙️ cargo test · completed\n```ansi\nok\n```");
+        assert_eq!(
+            render_tool_text(&state),
+            "⚙️ Execute · completed\n```sh\ncargo test\n```\n```ansi\nok\n```"
+        );
     }
 
     #[test]
-    fn execute_without_raw_input_reuses_the_title_without_duplicating_it() {
+    fn execute_without_raw_input_falls_back_to_the_title_for_the_command() {
         let state = json!({
             "toolCallId": "tc_1",
             "title": "deploy",
             "kind": "execute",
             "status": "in_progress"
         });
-        assert_eq!(render_tool_text(&state), "⚙️ deploy · in_progress");
+        assert_eq!(
+            render_tool_text(&state),
+            "⚙️ Execute · in_progress\n```sh\ndeploy\n```"
+        );
     }
 
     #[test]
