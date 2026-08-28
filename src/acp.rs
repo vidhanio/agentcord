@@ -14,13 +14,13 @@ use agent_client_protocol::{
         ProtocolVersion,
         v1::{
             AvailableCommand, AvailableCommandInput, CancelNotification, ContentBlock,
-            Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
-            LoadSessionRequest, NewSessionRequest, NewSessionResponse, PromptRequest,
-            RequestPermissionRequest, SessionConfigId, SessionConfigKind, SessionConfigOption,
-            SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOptions,
-            SessionId, SessionInfo, SessionModeId, SessionModeState, SessionNotification,
-            SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-            SetSessionModeRequest, SetSessionModeResponse,
+            CreateElicitationRequest, Implementation, InitializeRequest, InitializeResponse,
+            ListSessionsRequest, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
+            PromptRequest, RequestPermissionRequest, SessionConfigId, SessionConfigKind,
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
+            SessionConfigSelectOptions, SessionId, SessionInfo, SessionModeId, SessionModeState,
+            SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+            SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
         },
     },
 };
@@ -32,6 +32,7 @@ use crate::{
     Bot, BotError, BotResult,
     config::AgentConfig,
     db::{Availability, SessionRow},
+    elicitation,
     forum::SessionMetadata,
     permission,
     projects::{self, Project},
@@ -605,27 +606,18 @@ impl Bot {
     }
 }
 
-async fn run_connection(
-    bot: Arc<Bot>,
-    ctx: Context,
-    agent: AgentConfig,
-    mode: StartMode,
+/// Streams ACP session updates into the renderer, batching updates within the
+/// configured edit debounce window.
+fn spawn_render_task(
+    bot: &Bot,
     binding: Arc<Binding>,
-    command_rx: mpsc::UnboundedReceiver<SessionCommand>,
-    ready: ReadySender,
-) -> Result<(), agent_client_protocol::Error> {
-    let process = AcpAgent::new(
-        AcpAgentConfig::new(agent.command)
-            .args(agent.args)
-            .envs(agent.env),
-    );
-    let (updates_tx, mut updates_rx) = mpsc::unbounded_channel::<SessionUpdate>();
-    let render_binding = binding.clone();
-    let render_bot = bot.clone();
+    mut updates_rx: mpsc::UnboundedReceiver<SessionUpdate>,
+) {
+    let render_bot = Arc::new(bot.clone());
     let edit_debounce = bot.config.timeouts.edit_debounce;
     tokio::spawn(async move {
         while let Some(update) = updates_rx.recv().await {
-            let Some(thread) = render_binding.thread() else {
+            let Some(thread) = binding.thread() else {
                 continue;
             };
             let mut updates = vec![update];
@@ -642,16 +634,38 @@ async fn run_connection(
                     }
                 }
             }
-            let turn = render_binding.turn.load(Ordering::Acquire);
+            let turn = binding.turn.load(Ordering::Acquire);
             if let Err(error) = render_bot.render_updates(thread, turn, updates).await {
                 warn!(?error, ?thread, "failed to render ACP update");
             }
         }
     });
+}
+
+async fn run_connection(
+    bot: Arc<Bot>,
+    ctx: Context,
+    agent: AgentConfig,
+    mode: StartMode,
+    binding: Arc<Binding>,
+    command_rx: mpsc::UnboundedReceiver<SessionCommand>,
+    ready: ReadySender,
+) -> Result<(), agent_client_protocol::Error> {
+    let process = AcpAgent::new(
+        AcpAgentConfig::new(agent.command)
+            .args(agent.args)
+            .envs(agent.env),
+    );
+    let (updates_tx, updates_rx) = mpsc::unbounded_channel::<SessionUpdate>();
+    spawn_render_task(&bot, binding.clone(), updates_rx);
 
     let notification_binding = binding.clone();
     let permission_binding = binding.clone();
+    let elicitation_binding = binding.clone();
     let permission_ctx = ctx.clone();
+    let elicitation_ctx = ctx.clone();
+    let elicitation_bot = bot.clone();
+    let agent_display_name = agent.display_name.clone();
     let permission_user = bot.config.discord.allowed_user_id;
     let permission_timeout = bot.config.timeouts.permission;
     let permission_approve_all = bot.config.permissions.approve_all;
@@ -691,6 +705,21 @@ async fn run_connection(
             },
             agent_client_protocol::on_receive_request!(),
         )
+        .on_receive_request(
+            async move |request: CreateElicitationRequest, responder, connection| {
+                let Some(thread) = elicitation_binding.thread() else {
+                    return responder.respond(elicitation::declined_response());
+                };
+                let ctx = elicitation_ctx.clone();
+                let bot = elicitation_bot.clone();
+                let agent_name = agent_display_name.clone();
+                connection.spawn(async move {
+                    responder
+                        .respond(elicitation::handle(&bot, ctx, thread, &agent_name, request).await)
+                })
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
         .connect_with(process, |connection: ConnectionTo<Agent>| async move {
             let (session_id, metadata) =
                 initialize_session(&bot, &connection, &mode, &binding).await?;
@@ -708,10 +737,17 @@ async fn run_connection(
 async fn initialize(
     connection: &ConnectionTo<Agent>,
 ) -> Result<InitializeResponse, agent_client_protocol::Error> {
+    let capabilities = agent_client_protocol::schema::v1::ClientCapabilities::default()
+        .elicitation(
+            agent_client_protocol::schema::v1::ElicitationCapabilities::new()
+                .form(agent_client_protocol::schema::v1::ElicitationFormCapabilities::new())
+                .url(agent_client_protocol::schema::v1::ElicitationUrlCapabilities::new()),
+        );
     let initialized = connection
         .send_request(
             InitializeRequest::new(ProtocolVersion::V1)
-                .client_info(Implementation::new("agentcord", env!("CARGO_PKG_VERSION"))),
+                .client_info(Implementation::new("agentcord", env!("CARGO_PKG_VERSION")))
+                .client_capabilities(capabilities),
         )
         .block_task()
         .await?;

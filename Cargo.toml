@@ -7,7 +7,7 @@ license = "AGPL-3.0-or-later"
 publish = false
 
 [dependencies]
-agent-client-protocol = "2"
+agent-client-protocol = { version = "2", features = ["unstable_elicitation"] }
 clap = { version = "4", features = ["derive", "env"] }
 color-eyre = "0.6"
 config = { version = "0.15", default-features = false, features = ["toml"] }

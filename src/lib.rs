@@ -2,6 +2,7 @@ mod acp;
 mod commands;
 pub mod config;
 mod db;
+mod elicitation;
 mod error;
 mod forum;
 mod permission;

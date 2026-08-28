@@ -14,11 +14,15 @@ emoji all come from configuration.
   working directory, then creates an ACP session and sends its initial prompt.
 - `/import` binds an existing ACP session of a configured agent to a new forum
   post; imported posts stay archived until their first message restores them.
+- Inside a session post, `/mode`, `/model`, and `/command` change the session
+  mode, the model and thinking-level config options, and run the agent's
+  advertised slash commands — all with autocomplete fed by the session state.
 - Messages in a session post are delivered as ACP prompts.
-- Streamed thoughts are kept visible, while final output is appended and split
-  without truncation when it exceeds Discord's message limit.
-- Structured ACP tool calls, plans, modes, configuration, usage, titles, and
-  permission requests are projected into Discord.
+- Streamed thoughts and tool-call content are kept visible in full; only shell
+  output is tail-capped.
+- Structured ACP tool calls, plans, modes, configuration, usage, titles,
+  permission requests, and elicitation forms and URL consents are projected
+  into Discord.
 - Restorable sessions reconnect through `session/load` after a restart or when
   the allowed user sends a message to an inactive post.
 - Each ACP session owns an isolated, process-group-supervised subprocess.
