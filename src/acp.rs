@@ -13,14 +13,14 @@ use agent_client_protocol::{
     schema::{
         ProtocolVersion,
         v1::{
-            CancelNotification, ContentBlock, Implementation, InitializeRequest,
-            InitializeResponse, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
-            NewSessionResponse, PromptRequest, RequestPermissionRequest, SessionConfigId,
-            SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-            SessionConfigOptionValue, SessionConfigSelectOptions, SessionId, SessionInfo,
-            SessionModeId, SessionModeState, SessionNotification, SessionUpdate,
-            SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
-            SetSessionModeResponse,
+            AvailableCommand, AvailableCommandInput, CancelNotification, ContentBlock,
+            Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
+            LoadSessionRequest, NewSessionRequest, NewSessionResponse, PromptRequest,
+            RequestPermissionRequest, SessionConfigId, SessionConfigKind, SessionConfigOption,
+            SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOptions,
+            SessionId, SessionInfo, SessionModeId, SessionModeState, SessionNotification,
+            SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+            SetSessionModeRequest, SetSessionModeResponse,
         },
     },
 };
@@ -57,11 +57,13 @@ enum SessionCommand {
 }
 
 /// Agent-owned session UI state that agentcord projects into Discord:
-/// available modes and configuration options with their current values.
+/// available commands, modes and configuration options with their current
+/// values.
 #[derive(Clone, Debug, Default)]
 pub struct SessionUiState {
     pub modes: Option<SessionModeState>,
     pub config_options: Vec<SessionConfigOption>,
+    pub commands: Vec<AvailableCommand>,
 }
 
 impl SessionUiState {
@@ -71,6 +73,28 @@ impl SessionUiState {
 
     fn apply_config_options(&mut self, config_options: Vec<SessionConfigOption>) {
         self.config_options = config_options;
+    }
+
+    fn apply_commands(&mut self, commands: Vec<AvailableCommand>) {
+        self.commands = commands;
+    }
+
+    /// Human-readable hint text for an advertised command, if any.
+    #[must_use]
+    pub fn command_hint(&self, name: &str) -> Option<String> {
+        let command = self.commands.iter().find(|command| command.name == name)?;
+        Some(
+            command
+                .input
+                .as_ref()
+                .and_then(|input| match input {
+                    AvailableCommandInput::Unstructured(unstructured) => {
+                        Some(unstructured.hint.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| command.description.clone()),
+        )
     }
 
     fn apply_current_mode(&mut self, mode_id: SessionModeId) {
@@ -978,6 +1002,11 @@ async fn prompt_agent(
 /// update streaming is still gated off.
 fn apply_ui_state(binding: &Binding, update: &SessionUpdate) {
     match update {
+        SessionUpdate::AvailableCommandsUpdate(commands) => binding
+            .ui
+            .lock()
+            .expect("session ui mutex poisoned")
+            .apply_commands(commands.available_commands.clone()),
         SessionUpdate::CurrentModeUpdate(mode) => binding
             .ui
             .lock()

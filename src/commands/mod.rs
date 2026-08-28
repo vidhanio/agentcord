@@ -27,6 +27,7 @@ pub fn framework(bot: &Bot) -> BotFramework {
                 commands: vec![
                     agent::agent(),
                     import::import(),
+                    command::command(),
                     mode::mode(),
                     model::model(),
                 ],
@@ -100,6 +101,7 @@ fn on_error(error: FrameworkError<'_, Bot, BotError>) -> poise::BoxFuture<'_, ()
 }
 
 mod agent;
+mod command;
 mod import;
 mod mode;
 mod model;
