@@ -410,13 +410,20 @@ fn tool_label(kind: &str) -> String {
 }
 
 fn render_execute(state: &serde_json::Value) -> String {
+    let title = state.get("title").and_then(serde_json::Value::as_str);
     let command = state
         .get("rawInput")
         .and_then(|input| input.get("command").or_else(|| input.get("cmd")))
         .and_then(serde_json::Value::as_str)
-        .or_else(|| state.get("title").and_then(serde_json::Value::as_str))
+        .or(title)
         .unwrap_or("command");
-    let mut body = fence(command, "sh");
+    // Agents commonly title an execute call with the command itself, in which
+    // case the header already shows it and the fence would duplicate it.
+    let mut body = if Some(command) == title {
+        String::new()
+    } else {
+        fence(command, "sh")
+    };
     if let Some(output) = execute_output(state) {
         let output = keep_tail(
             &output,
@@ -424,7 +431,9 @@ fn render_execute(state: &serde_json::Value) -> String {
             "… earlier output omitted …\n",
         );
         if !output.trim().is_empty() {
-            body.push('\n');
+            if !body.is_empty() {
+                body.push('\n');
+            }
             body.push_str(&fence(&output, "ansi"));
         }
     }
@@ -699,9 +708,34 @@ mod tests {
             "rawOutput": {"stdout": output}
         });
         let text = render_tool_text(&state);
-        assert!(text.contains("```sh\ncargo test\n```"));
+        assert!(text.contains("⚙️ ls · completed\n```sh\ncargo test\n```"));
         assert!(text.contains("```ansi\n… earlier output omitted …\n"));
         assert!(text.ends_with("\n```"));
+    }
+
+    #[test]
+    fn execute_does_not_repeat_a_command_used_as_the_title() {
+        let state = json!({
+            "toolCallId": "tc_1",
+            "title": "cargo test",
+            "kind": "execute",
+            "status": "completed",
+            "rawInput": {"command": "cargo test"},
+            "rawOutput": {"stdout": "ok"}
+        });
+        let text = render_tool_text(&state);
+        assert_eq!(text, "⚙️ cargo test · completed\n```ansi\nok\n```");
+    }
+
+    #[test]
+    fn execute_without_raw_input_reuses_the_title_without_duplicating_it() {
+        let state = json!({
+            "toolCallId": "tc_1",
+            "title": "deploy",
+            "kind": "execute",
+            "status": "in_progress"
+        });
+        assert_eq!(render_tool_text(&state), "⚙️ deploy · in_progress");
     }
 
     #[test]
