@@ -3,6 +3,18 @@ use tracing::warn;
 
 use crate::{Bot, BotError};
 
+const CHOICE_LIMIT: usize = 25;
+
+#[must_use]
+fn truncate(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_owned();
+    }
+    let mut truncated = value.chars().take(limit - 1).collect::<String>();
+    truncated.push('…');
+    truncated
+}
+
 pub struct BotFramework {
     poise: poise::Framework<Bot, BotError>,
     guild_id: serenity::GuildId,
@@ -12,7 +24,12 @@ pub fn framework(bot: &Bot) -> BotFramework {
     BotFramework {
         poise: poise::Framework::builder()
             .options(poise::FrameworkOptions {
-                commands: vec![agent::agent(), import::import()],
+                commands: vec![
+                    agent::agent(),
+                    import::import(),
+                    mode::mode(),
+                    model::model(),
+                ],
                 on_error,
                 ..Default::default()
             })
@@ -84,3 +101,5 @@ fn on_error(error: FrameworkError<'_, Bot, BotError>) -> poise::BoxFuture<'_, ()
 
 mod agent;
 mod import;
+mod mode;
+mod model;

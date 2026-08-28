@@ -15,8 +15,12 @@ use agent_client_protocol::{
         v1::{
             CancelNotification, ContentBlock, Implementation, InitializeRequest,
             InitializeResponse, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
-            PromptRequest, RequestPermissionRequest, SessionId, SessionInfo, SessionNotification,
-            SessionUpdate,
+            NewSessionResponse, PromptRequest, RequestPermissionRequest, SessionConfigId,
+            SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+            SessionConfigOptionValue, SessionConfigSelectOptions, SessionId, SessionInfo,
+            SessionModeId, SessionModeState, SessionNotification, SessionUpdate,
+            SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+            SetSessionModeResponse,
         },
     },
 };
@@ -40,13 +44,100 @@ enum SessionCommand {
         prompt: String,
     },
     Prompt(String),
+    SetMode {
+        mode_id: SessionModeId,
+        done: oneshot::Sender<Result<(), agent_client_protocol::Error>>,
+    },
+    SetConfig {
+        config_id: SessionConfigId,
+        value: SessionConfigOptionValue,
+        done: oneshot::Sender<Result<(), agent_client_protocol::Error>>,
+    },
     Shutdown,
+}
+
+/// Agent-owned session UI state that agentcord projects into Discord:
+/// available modes and configuration options with their current values.
+#[derive(Clone, Debug, Default)]
+pub struct SessionUiState {
+    pub modes: Option<SessionModeState>,
+    pub config_options: Vec<SessionConfigOption>,
+}
+
+impl SessionUiState {
+    fn apply_modes(&mut self, modes: SessionModeState) {
+        self.modes = Some(modes);
+    }
+
+    fn apply_config_options(&mut self, config_options: Vec<SessionConfigOption>) {
+        self.config_options = config_options;
+    }
+
+    fn apply_current_mode(&mut self, mode_id: SessionModeId) {
+        match &mut self.modes {
+            Some(modes) => modes.current_mode_id = mode_id,
+            None => self.modes = Some(SessionModeState::new(mode_id, Vec::new())),
+        }
+    }
+
+    /// Human-readable label for the current session mode.
+    #[must_use]
+    pub fn mode_label(&self) -> Option<String> {
+        let modes = self.modes.as_ref()?;
+        let current = &modes.current_mode_id;
+        Some(
+            modes
+                .available_modes
+                .iter()
+                .find(|mode| &mode.id == current)
+                .map_or_else(|| current.to_string(), |mode| mode.name.clone()),
+        )
+    }
+
+    /// Human-readable label for the first option of a configuration category.
+    #[must_use]
+    pub fn config_label(&self, category: &SessionConfigOptionCategory) -> Option<String> {
+        let option = self
+            .config_options
+            .iter()
+            .find(|option| option.category.as_ref() == Some(category))?;
+        match &option.kind {
+            SessionConfigKind::Select(select) => {
+                let current = &select.current_value;
+                Some(
+                    select_options(select)
+                        .into_iter()
+                        .find(|candidate| &candidate.value == current)
+                        .map_or_else(|| current.to_string(), |candidate| candidate.name),
+                )
+            }
+            SessionConfigKind::Boolean(boolean) => {
+                Some(if boolean.current_value { "on" } else { "off" }.into())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Flattens a select option's (possibly grouped) value list.
+pub fn select_options(
+    select: &agent_client_protocol::schema::v1::SessionConfigSelect,
+) -> Vec<agent_client_protocol::schema::v1::SessionConfigSelectOption> {
+    match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options.clone(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter().cloned())
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct ActiveSession {
     generation: u64,
     commands: mpsc::UnboundedSender<SessionCommand>,
+    ui: Arc<std::sync::Mutex<SessionUiState>>,
 }
 
 #[derive(Debug)]
@@ -85,6 +176,7 @@ struct Binding {
     thread: AtomicU64,
     turn: AtomicU64,
     accept_updates: AtomicBool,
+    ui: Arc<std::sync::Mutex<SessionUiState>>,
 }
 
 impl Binding {
@@ -93,6 +185,7 @@ impl Binding {
             thread: AtomicU64::new(thread.map_or(0, GenericChannelId::get)),
             turn: AtomicU64::new(turn),
             accept_updates: AtomicBool::new(false),
+            ui: Arc::default(),
         }
     }
 
@@ -100,12 +193,21 @@ impl Binding {
         let value = self.thread.load(Ordering::Acquire);
         (value != 0).then(|| GenericChannelId::new(value))
     }
+
+    fn ui(&self) -> Arc<std::sync::Mutex<SessionUiState>> {
+        Arc::clone(&self.ui)
+    }
+
+    fn snapshot_ui(&self) -> SessionUiState {
+        self.ui.lock().expect("session ui mutex poisoned").clone()
+    }
 }
 
 type ReadySender = Arc<Mutex<Option<oneshot::Sender<Result<SessionMetadata, String>>>>>;
 
 struct PendingSession {
     commands: mpsc::UnboundedSender<SessionCommand>,
+    binding: Arc<Binding>,
     ready: Option<oneshot::Receiver<Result<SessionMetadata, String>>>,
     task: tokio::task::JoinHandle<Result<(), agent_client_protocol::Error>>,
 }
@@ -126,7 +228,8 @@ impl Bot {
             },
         )?;
         let metadata = self.await_ready(&mut pending).await?;
-        let row = self.create_session_post(&metadata).await?;
+        let ui = pending.binding.snapshot_ui();
+        let row = self.create_session_post(&metadata, Some(&ui)).await?;
         if let Err(error) = self.db.insert_session(&row) {
             let _ = row.thread_id.delete(&ctx.http, None).await;
             return Err(error);
@@ -143,20 +246,59 @@ impl Bot {
     }
 
     pub async fn submit(&self, thread: GenericChannelId, prompt: String) -> BotResult {
-        let ctx = self.context()?.clone();
+        let commands = self.ensure_active(thread).await?;
+        commands
+            .send(SessionCommand::Prompt(prompt))
+            .map_err(|_| BotError::Other("ACP session is no longer active".into()))
+    }
+
+    /// Makes sure the thread's ACP session is running, restoring it if needed.
+    pub async fn ensure_session(&self, thread: GenericChannelId) -> BotResult {
+        self.ensure_active(thread).await.map(|_| ())
+    }
+
+    /// Sets the session mode of the ACP session bound to a thread.
+    pub async fn set_mode(&self, thread: GenericChannelId, mode_id: SessionModeId) -> BotResult {
+        let commands = self.ensure_active(thread).await?;
+        let (done, result) = oneshot::channel();
+        commands
+            .send(SessionCommand::SetMode { mode_id, done })
+            .map_err(|_| BotError::Other("ACP session is no longer active".into()))?;
+        await_change(result, self.config.timeouts.startup).await
+    }
+
+    /// Sets one of the session's configuration options by id.
+    pub async fn set_config_option(
+        &self,
+        thread: GenericChannelId,
+        config_id: SessionConfigId,
+        value: SessionConfigOptionValue,
+    ) -> BotResult {
+        let commands = self.ensure_active(thread).await?;
+        let (done, result) = oneshot::channel();
+        commands
+            .send(SessionCommand::SetConfig {
+                config_id,
+                value,
+                done,
+            })
+            .map_err(|_| BotError::Other("ACP session is no longer active".into()))?;
+        await_change(result, self.config.timeouts.startup).await
+    }
+
+    /// Resolves the command channel for a thread's session, restoring the
+    /// persisted session on demand exactly like an incoming prompt would.
+    async fn ensure_active(
+        &self,
+        thread: GenericChannelId,
+    ) -> BotResult<mpsc::UnboundedSender<SessionCommand>> {
         if let Some(active) = self.active(thread) {
-            return active
-                .commands
-                .send(SessionCommand::Prompt(prompt))
-                .map_err(|_| BotError::Other("ACP session is no longer active".into()));
+            return Ok(active.commands);
         }
         let resume_lock = self.resume_lock(thread);
         let _resume = resume_lock.lock().await;
         if let Some(active) = self.active(thread) {
-            return active
-                .commands
-                .send(SessionCommand::Prompt(prompt))
-                .map_err(|_| BotError::Other("ACP session is no longer active".into()));
+            return Ok(active.commands);
         }
         let row = self
             .db
@@ -167,15 +309,29 @@ impl Bot {
                 "this ACP session cannot be restored by its agent".into(),
             ));
         }
-        let mut pending = self.spawn(ctx.clone(), StartMode::Load(row.clone()))?;
+        let ctx = self.context()?.clone();
+        let mut pending = self.spawn(ctx, StartMode::Load(row.clone()))?;
         self.await_ready(&mut pending).await?;
-        pending
-            .commands
-            .send(SessionCommand::Prompt(prompt))
-            .map_err(|_| BotError::Other("restored ACP session exited before prompting".into()))?;
+        self.refresh_starter(thread, &pending.binding).await;
         self.activate(thread, pending);
         self.update_availability(&row, Availability::Active, None)
-            .await
+            .await?;
+        self.active(thread)
+            .map(|active| active.commands)
+            .ok_or_else(|| BotError::Other("restored ACP session exited immediately".into()))
+    }
+
+    /// Re-renders a thread's starter message from the session's current UI
+    /// state, best effort.
+    async fn refresh_starter(&self, thread: GenericChannelId, binding: &Binding) {
+        let ui = binding.snapshot_ui();
+        if let Err(error) = self.update_starter(thread, &ui, None).await {
+            warn!(
+                ?error,
+                ?thread,
+                "failed to refresh the session starter message"
+            );
+        }
     }
 
     pub async fn restore_all(&self) {
@@ -205,7 +361,9 @@ impl Bot {
             };
             match self.await_ready(&mut pending).await {
                 Ok(_) => {
+                    let binding = pending.binding.clone();
                     self.activate(row.thread_id, pending);
+                    self.refresh_starter(row.thread_id, &binding).await;
                     let _ = self
                         .update_availability(&row, Availability::Active, None)
                         .await;
@@ -231,7 +389,8 @@ impl Bot {
             },
         )?;
         let metadata = self.await_ready(&mut pending).await?;
-        let mut row = self.create_session_post(&metadata).await?;
+        let ui = pending.binding.snapshot_ui();
+        let mut row = self.create_session_post(&metadata, Some(&ui)).await?;
         row.availability = Availability::Restorable;
         if let Err(error) = self.db.insert_session(&row) {
             let _ = row.thread_id.delete(&ctx.http, None).await;
@@ -312,12 +471,13 @@ impl Bot {
             ctx,
             agent.clone(),
             mode,
-            binding,
+            binding.clone(),
             command_rx,
             ready_tx,
         ));
         Ok(PendingSession {
             commands,
+            binding,
             ready: Some(ready),
             task,
         })
@@ -345,6 +505,7 @@ impl Bot {
                 ActiveSession {
                     generation,
                     commands: pending.commands,
+                    ui: pending.binding.ui(),
                 },
             );
         let manager = self.clone();
@@ -390,6 +551,17 @@ impl Bot {
             .expect("active session map poisoned")
             .get(&thread)
             .cloned()
+    }
+
+    /// Snapshot of the UI state an active session currently advertises.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the session UI mutex is poisoned.
+    #[must_use]
+    pub fn session_ui(&self, thread: GenericChannelId) -> Option<SessionUiState> {
+        let ui = self.active(thread)?.ui;
+        Some(ui.lock().expect("session ui mutex poisoned").clone())
     }
 
     fn resume_lock(&self, thread: GenericChannelId) -> Arc<tokio::sync::Mutex<()>> {
@@ -465,6 +637,7 @@ async fn run_connection(
         .name("agentcord")
         .on_receive_notification(
             async move |notification: SessionNotification, _connection| {
+                apply_ui_state(&notification_binding, &notification.update);
                 if notification_binding.accept_updates.load(Ordering::Acquire) {
                     let _ = updates_tx.send(notification.update);
                 }
@@ -540,6 +713,15 @@ async fn initialize_session(
         .map_err(agent_client_protocol::Error::into_internal_error)?;
     let restorable = initialized.agent_capabilities.load_session;
     let protocol_version = initialized.protocol_version.to_string();
+    let record_session_state = |binding: &Binding, response: &NewSessionResponse| {
+        let mut ui = binding.ui.lock().expect("session ui mutex poisoned");
+        if let Some(modes) = response.modes.clone() {
+            ui.apply_modes(modes);
+        }
+        if let Some(config_options) = response.config_options.clone() {
+            ui.apply_config_options(config_options);
+        }
+    };
 
     match mode {
         StartMode::New { agent_key, project } => {
@@ -547,6 +729,7 @@ async fn initialize_session(
                 .send_request(NewSessionRequest::new(project.path.clone()))
                 .block_task()
                 .await?;
+            record_session_state(binding, &response);
             let metadata = SessionMetadata {
                 agent_key: agent_key.clone(),
                 project_label: project.label.clone(),
@@ -565,13 +748,22 @@ async fn initialize_session(
                     .data("agent no longer advertises session/load"));
             }
             let session_id = SessionId::new(row.session_id.clone());
-            connection
+            let response = connection
                 .send_request(LoadSessionRequest::new(
                     session_id.clone(),
                     PathBuf::from(&row.project_path),
                 ))
                 .block_task()
                 .await?;
+            {
+                let mut ui = binding.ui.lock().expect("session ui mutex poisoned");
+                if let Some(modes) = response.modes {
+                    ui.apply_modes(modes);
+                }
+                if let Some(config_options) = response.config_options {
+                    ui.apply_config_options(config_options);
+                }
+            }
             let metadata = SessionMetadata {
                 agent_key: row.agent_key.clone(),
                 project_label: row.project_label.clone(),
@@ -710,6 +902,30 @@ async fn run_commands(
             SessionCommand::Prompt(prompt) => {
                 prompt_agent(bot, ctx, binding, &connection, &session_id, prompt).await;
             }
+            SessionCommand::SetMode { mode_id, done } => {
+                let result = connection
+                    .send_request(SetSessionModeRequest::new(session_id.clone(), mode_id))
+                    .block_task()
+                    .await
+                    .map(|_: SetSessionModeResponse| ());
+                let _ = done.send(result);
+            }
+            SessionCommand::SetConfig {
+                config_id,
+                value,
+                done,
+            } => {
+                let result = connection
+                    .send_request(SetSessionConfigOptionRequest::new(
+                        session_id.clone(),
+                        config_id,
+                        value,
+                    ))
+                    .block_task()
+                    .await
+                    .map(|_: SetSessionConfigOptionResponse| ());
+                let _ = done.send(result);
+            }
             SessionCommand::Shutdown => break,
         }
     }
@@ -757,9 +973,44 @@ async fn prompt_agent(
     }
 }
 
+/// Records UI-relevant session updates (modes, config options) so that
+/// slash-command autocomplete and the starter message can use them even when
+/// update streaming is still gated off.
+fn apply_ui_state(binding: &Binding, update: &SessionUpdate) {
+    match update {
+        SessionUpdate::CurrentModeUpdate(mode) => binding
+            .ui
+            .lock()
+            .expect("session ui mutex poisoned")
+            .apply_current_mode(mode.current_mode_id.clone()),
+        SessionUpdate::ConfigOptionUpdate(config) => binding
+            .ui
+            .lock()
+            .expect("session ui mutex poisoned")
+            .apply_config_options(config.config_options.clone()),
+        _ => {}
+    }
+}
+
 fn signal_ready(ready: &ReadySender, result: Result<SessionMetadata, String>) {
     let sender = ready.lock().expect("ready sender poisoned").take();
     if let Some(sender) = sender {
         let _ = sender.send(result);
+    }
+}
+
+async fn await_change(
+    result: oneshot::Receiver<Result<(), agent_client_protocol::Error>>,
+    timeout: Duration,
+) -> BotResult {
+    match tokio::time::timeout(timeout, result).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(error))) => Err(BotError::Other(error.to_string())),
+        Ok(Err(_)) => Err(BotError::Other(
+            "the ACP session exited before applying the change".into(),
+        )),
+        Err(_) => Err(BotError::Other(
+            "the change is queued and will apply once the current turn finishes".into(),
+        )),
     }
 }

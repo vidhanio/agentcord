@@ -20,6 +20,10 @@ struct OutputState {
 }
 
 impl Bot {
+    fn starter_ui(&self, thread: GenericChannelId) -> crate::acp::SessionUiState {
+        self.session_ui(thread).unwrap_or_default()
+    }
+
     pub async fn render_update(
         &self,
         thread: GenericChannelId,
@@ -82,7 +86,12 @@ impl Bot {
                     self.render_tool_updates(ctx, thread, batch).await?;
                 }
                 SessionUpdate::UsageUpdate(usage) => {
-                    self.update_usage(thread, &usage).await?;
+                    self.update_starter(thread, &self.starter_ui(thread), Some(&usage))
+                        .await?;
+                }
+                SessionUpdate::CurrentModeUpdate(_) | SessionUpdate::ConfigOptionUpdate(_) => {
+                    self.update_starter(thread, &self.starter_ui(thread), None)
+                        .await?;
                 }
                 SessionUpdate::SessionInfoUpdate(info) => {
                     let value = serde_json::to_value(info).unwrap_or_default();

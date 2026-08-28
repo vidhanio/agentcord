@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt::Write};
 
-use agent_client_protocol::schema::v1::UsageUpdate;
+use agent_client_protocol::schema::v1::{SessionConfigOptionCategory, UsageUpdate};
 use serenity::all::{
     Channel, ChannelType, Context, CreateForumPost, CreateForumTag, CreateMessage, EditChannel,
     EditMessage, EditThread, EmojiId, ForumEmoji, ForumTag, ForumTagId, GenericChannelId,
@@ -10,6 +10,7 @@ use serenity::all::{
 
 use crate::{
     Bot, BotError, BotResult,
+    acp::SessionUiState,
     config::TagEmoji,
     db::{Availability, SessionRow},
 };
@@ -36,7 +37,11 @@ impl Bot {
         Ok(())
     }
 
-    pub async fn create_session_post(&self, metadata: &SessionMetadata) -> BotResult<SessionRow> {
+    pub async fn create_session_post(
+        &self,
+        metadata: &SessionMetadata,
+        ui: Option<&SessionUiState>,
+    ) -> BotResult<SessionRow> {
         let ctx = self.context()?;
         let tags = self.tag_ids(ctx).await?;
         self.config
@@ -59,7 +64,7 @@ impl Bot {
                 &ctx.http,
                 CreateForumPost::new(
                     &title,
-                    CreateMessage::new().content(starter_message(metadata, None)),
+                    CreateMessage::new().content(starter_message(metadata, ui, None)),
                 ),
             )
             .await?;
@@ -132,7 +137,12 @@ impl Bot {
         Ok(())
     }
 
-    pub async fn update_usage(&self, thread: GenericChannelId, usage: &UsageUpdate) -> BotResult {
+    pub async fn update_starter(
+        &self,
+        thread: GenericChannelId,
+        ui: &SessionUiState,
+        usage: Option<&UsageUpdate>,
+    ) -> BotResult {
         let ctx = self.context()?;
         let row = self
             .db
@@ -148,8 +158,8 @@ impl Bot {
             restorable: row.restorable,
             title: row.title,
         };
-        let usage = usage_text(usage);
-        let content = starter_message(&metadata, Some(&usage));
+        let usage = usage.map(usage_text);
+        let content = starter_message(&metadata, Some(ui), usage.as_deref());
         row.thread_id
             .edit_message(
                 &ctx.http,
@@ -334,18 +344,30 @@ pub fn post_title(project: &str, title: Option<&str>, session_id: &str) -> Strin
     truncate_end(raw.trim(), THREAD_TITLE_LIMIT)
 }
 
-fn starter_message(metadata: &SessionMetadata, usage: Option<&str>) -> String {
-    let mut content = format!(
-        "session `{}` · cwd `{}`",
-        escape_inline(&metadata.session_id),
-        escape_inline(&metadata.cwd),
-    );
-    if let Some(usage) = usage {
-        content.push_str(" · usage `");
-        content.push_str(&escape_inline(usage));
-        content.push('`');
+fn starter_message(
+    metadata: &SessionMetadata,
+    ui: Option<&SessionUiState>,
+    usage: Option<&str>,
+) -> String {
+    let mut segments = vec![
+        format!("session `{}`", escape_inline(&metadata.session_id)),
+        format!("cwd `{}`", escape_inline(&metadata.cwd)),
+    ];
+    if let Some(ui) = ui {
+        if let Some(mode) = ui.mode_label() {
+            segments.push(format!("mode {}", escape_inline(&mode)));
+        }
+        if let Some(model) = ui.config_label(&SessionConfigOptionCategory::Model) {
+            segments.push(format!("model {}", escape_inline(&model)));
+        }
+        if let Some(thought) = ui.config_label(&SessionConfigOptionCategory::ThoughtLevel) {
+            segments.push(format!("thought {}", escape_inline(&thought)));
+        }
     }
-    content
+    if let Some(usage) = usage {
+        segments.push(format!("usage `{}`", escape_inline(usage)));
+    }
+    segments.join(" · ")
 }
 
 fn usage_text(usage: &UsageUpdate) -> String {
