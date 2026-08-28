@@ -400,7 +400,7 @@ fn render_command(state: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("pending");
     format!(
-        "**{status}**\n```sh\n{}\n```",
+        "*{status}*\n```sh\n{}\n```",
         cap(&command.replace("```", "`\u{200b}``"), 1900)
     )
 }

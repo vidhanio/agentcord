@@ -21,6 +21,8 @@ pub struct Config {
     pub projects: ProjectsConfig,
     pub agents: BTreeMap<String, AgentConfig>,
     #[serde(default)]
+    pub permissions: PermissionsConfig,
+    #[serde(default)]
     pub timeouts: Timeouts,
 }
 
@@ -52,6 +54,12 @@ pub struct AgentConfig {
 pub struct AgentTag {
     pub name: String,
     pub emoji: TagEmoji,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+pub struct PermissionsConfig {
+    #[serde(default)]
+    pub approve_all: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

@@ -364,6 +364,7 @@ async fn run_connection(
     let permission_ctx = ctx.clone();
     let permission_user = bot.config.discord.allowed_user_id;
     let permission_timeout = bot.config.timeouts.permission;
+    let permission_approve_all = bot.config.permissions.approve_all;
     let connection_ready = ready.clone();
     let result = agent_client_protocol::Client
         .builder()
@@ -379,6 +380,9 @@ async fn run_connection(
         )
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, connection| {
+                if permission_approve_all {
+                    return responder.respond(permission::approve_all(&request));
+                }
                 let Some(thread) = permission_binding.thread() else {
                     return responder.respond(
                         agent_client_protocol::schema::v1::RequestPermissionResponse::new(

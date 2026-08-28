@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome,
+    PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome,
 };
 use serenity::{
     all::{
@@ -112,6 +112,25 @@ pub async fn ask(
         )
         .await;
     cancelled()
+}
+
+pub fn approve_all(request: &RequestPermissionRequest) -> RequestPermissionResponse {
+    let option = request
+        .options
+        .iter()
+        .find(|option| option.kind == PermissionOptionKind::AllowAlways)
+        .or_else(|| {
+            request
+                .options
+                .iter()
+                .find(|option| option.kind == PermissionOptionKind::AllowOnce)
+        });
+    let Some(option) = option else {
+        return cancelled();
+    };
+    RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+        SelectedPermissionOutcome::new(option.option_id.clone()),
+    ))
 }
 
 fn cancelled() -> RequestPermissionResponse {

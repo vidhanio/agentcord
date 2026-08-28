@@ -23,6 +23,10 @@ command = "/opt/custom-agent/bin/acp"
 args = []
 tag = { name = "custom", emoji = { id = 123456789012345678, animated = false } }
 
+[permissions]
+# Automatically choose ACP's AllowAlways option for every permission request.
+approve_all = false
+
 # Integer values are seconds; human durations are also accepted.
 [timeouts]
 modal = "5m"
