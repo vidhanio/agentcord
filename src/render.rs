@@ -361,19 +361,22 @@ fn render_tool_text(state: &serde_json::Value) -> String {
         .get("status")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("pending");
-    let label = tool_label(kind);
+    let name = tool_label(kind);
     // The command fence carries an execute call's subject, so its header
-    // stays on the generic label instead of repeating the command.
+    // stays on the generic name instead of repeating the command.
     let header = if kind == "execute" {
-        format!("{} {label} · {status}", tool_emoji(kind))
+        format!("{} **{name}** · {status}", tool_emoji(kind))
     } else {
         let title = state
             .get("title")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|title| !title.is_empty())
-            .unwrap_or(label.as_str());
-        format!("{} {title} · {status}", tool_emoji(kind))
+            .map(header_title);
+        title.map_or_else(
+            || format!("{} **{name}** · {status}", tool_emoji(kind)),
+            |title| format!("{} **{name}** {title} · {status}", tool_emoji(kind)),
+        )
     };
     let body = match kind {
         "edit" => render_diff(state),
@@ -407,12 +410,17 @@ fn tool_emoji(kind: &str) -> &'static str {
 }
 
 fn tool_label(kind: &str) -> String {
-    let text = kind.replace('_', " ");
-    let mut characters = text.chars();
-    characters.next().map_or_else(
-        || "Tool".to_owned(),
-        |first| first.to_uppercase().collect::<String>() + characters.as_str(),
-    )
+    kind.replace('_', " ")
+}
+
+/// Titles that are file or directory paths render in backticks so they stand
+/// out from surrounding prose and survive Discord's markdown.
+fn header_title(title: &str) -> String {
+    if title.contains('/') || title.contains('\\') {
+        format!("`{}`", title.replace('`', "ˋ"))
+    } else {
+        title.to_owned()
+    }
 }
 
 fn render_execute(state: &serde_json::Value) -> String {
@@ -667,21 +675,40 @@ mod tests {
             "content": [{"type": "text", "text": "fn main() {}"}]
         });
         let text = render_tool_text(&state);
-        assert_eq!(text, "📖 src/lib.rs · completed\nfn main() {}");
+        assert_eq!(text, "📖 **read** `src/lib.rs` · completed\nfn main() {}");
     }
 
     #[test]
-    fn missing_title_falls_back_to_the_kind_label() {
+    fn headers_without_a_title_show_only_the_kind_name() {
         let state = json!({"toolCallId": "tc_1", "kind": "switch_mode", "status": "pending"});
         let text = render_tool_text(&state);
-        assert_eq!(text, "🔁 Switch mode · pending");
+        assert_eq!(text, "🔁 **switch mode** · pending");
+    }
+
+    #[test]
+    fn non_path_titles_stay_plain_while_paths_are_backticked() {
+        let mut state = json!({
+            "toolCallId": "tc_1",
+            "title": "apply patch",
+            "kind": "search",
+            "status": "completed"
+        });
+        assert_eq!(
+            render_tool_text(&state),
+            "🔍 **search** apply patch · completed"
+        );
+        state["title"] = json!("~/Projects/agentcord/src");
+        assert_eq!(
+            render_tool_text(&state),
+            "🔍 **search** `~/Projects/agentcord/src` · completed"
+        );
     }
 
     #[test]
     fn edits_render_diffs_and_new_files_use_dev_null() {
         let state = json!({
             "toolCallId": "tc_1",
-            "title": "edit",
+            "title": "apply patch",
             "kind": "edit",
             "status": "completed",
             "content": [
@@ -690,7 +717,7 @@ mod tests {
             ]
         });
         let text = render_tool_text(&state);
-        assert!(text.starts_with("✏️ edit · completed\n```diff\n"));
+        assert!(text.starts_with("✏️ **edit** apply patch · completed\n```diff\n"));
         assert!(text.contains("--- /dev/null\n+++ b//tmp/new.rs\n+fn a() {}\n"));
         assert!(text.contains("--- a//tmp/old.rs\n+++ b//tmp/old.rs\n-fn b() {}\n+fn c() {}\n"));
     }
@@ -707,7 +734,7 @@ mod tests {
             "rawOutput": {"stdout": output}
         });
         let text = render_tool_text(&state);
-        assert!(text.starts_with("⚙️ Execute · completed\n```sh\ncargo test\n```"));
+        assert!(text.starts_with("⚙️ **execute** · completed\n```sh\ncargo test\n```"));
         assert!(text.contains("```ansi\n… earlier output omitted …\n"));
         assert!(text.ends_with("\n```"));
     }
@@ -724,7 +751,7 @@ mod tests {
         });
         assert_eq!(
             render_tool_text(&state),
-            "⚙️ Execute · completed\n```sh\ncargo test\n```\n```ansi\nok\n```"
+            "⚙️ **execute** · completed\n```sh\ncargo test\n```\n```ansi\nok\n```"
         );
     }
 
@@ -738,7 +765,7 @@ mod tests {
         });
         assert_eq!(
             render_tool_text(&state),
-            "⚙️ Execute · in_progress\n```sh\ndeploy\n```"
+            "⚙️ **execute** · in_progress\n```sh\ndeploy\n```"
         );
     }
 
