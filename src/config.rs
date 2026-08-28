@@ -12,77 +12,112 @@ use serenity::all::{ChannelId, GuildId, UserId};
 
 use crate::{BotError, BotResult};
 
+/// Maximum tags Discord permits on a forum channel.
 const DISCORD_FORUM_TAG_LIMIT: usize = 20;
+/// Maximum options Discord permits in a select component.
 const DISCORD_SELECT_LIMIT: usize = 25;
 
+/// Complete configuration for one Agentcord process.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
+    /// Discord connection and projection settings.
     pub discord: DiscordConfig,
+    /// Project path resolution settings.
     pub projects: ProjectsConfig,
+    /// Configured ACP agents keyed by stable identifier.
     pub agents: BTreeMap<String, AgentConfig>,
+    /// Permission-response behavior.
     #[serde(default)]
     pub permissions: PermissionsConfig,
+    /// Operation time limits and render debounce interval.
     #[serde(default)]
     pub timeouts: Timeouts,
 }
 
+/// Discord account, guild, user, and forum identifiers.
 #[derive(Clone, Debug, Deserialize)]
 pub struct DiscordConfig {
+    /// Bot token used to authenticate with Discord.
     pub bot_token: String,
+    /// Guild containing the configured forum.
     pub guild_id: GuildId,
+    /// Sole user allowed to control Agentcord.
     pub allowed_user_id: UserId,
+    /// Forum where ACP sessions are projected as posts.
     pub forum_channel_id: ChannelId,
 }
 
+/// Filesystem settings used to resolve and label projects.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProjectsConfig {
+    /// Base path used to shorten project display labels.
     pub base_path: PathBuf,
 }
 
+/// Command and presentation settings for one ACP agent.
 #[derive(Clone, Debug, Deserialize)]
 pub struct AgentConfig {
+    /// Human-readable name shown in Discord.
     pub display_name: String,
+    /// Executable spawned directly for ACP communication.
     pub command: PathBuf,
+    /// Arguments passed directly to the executable.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Environment overrides passed to the subprocess.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Emoji used for the agent's forum tag.
     pub emoji: TagEmoji,
 }
 
+/// Global policy for ACP permission requests.
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 pub struct PermissionsConfig {
+    /// Whether every permission request should be approved automatically.
     #[serde(default)]
     pub approve_all: bool,
 }
 
+/// Unicode or custom Discord emoji used by an agent tag.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(untagged)]
 pub enum TagEmoji {
+    /// A Unicode emoji string.
     Unicode(String),
+    /// A guild-specific custom emoji.
     Custom {
+        /// Discord emoji snowflake.
         id: u64,
+        /// Whether Discord should render the custom emoji as animated.
         #[serde(default)]
         animated: bool,
     },
 }
 
+/// Time limits for user interaction, ACP calls, and Discord edits.
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(default)]
 pub struct Timeouts {
+    /// Time allowed for modal submission.
     #[serde(with = "duration")]
     pub modal: Duration,
+    /// Time allowed for agent startup and bounded renderer drain.
     #[serde(with = "duration")]
     pub startup: Duration,
+    /// Time allowed for an ACP prompt turn.
     #[serde(with = "duration")]
     pub prompt: Duration,
+    /// Time allowed for a permission response.
     #[serde(with = "duration")]
     pub permission: Duration,
+    /// Window used to batch adjacent ACP updates into fewer Discord edits.
     #[serde(with = "duration")]
     pub edit_debounce: Duration,
 }
 
 impl Default for Timeouts {
+    /// Supplies conservative defaults for Discord and ACP operations.
     fn default() -> Self {
         Self {
             modal: Duration::from_secs(300),
@@ -95,6 +130,7 @@ impl Default for Timeouts {
 }
 
 impl Config {
+    /// Loads, expands, and validates configuration from a TOML file.
     pub fn load(path: &Path) -> BotResult<Self> {
         let config =
             Self::from_source(File::from(path).format(FileFormat::Toml)).map_err(|error| {
@@ -104,10 +140,12 @@ impl Config {
         Ok(config)
     }
 
+    /// Parses configuration from an in-memory TOML string.
     pub fn parse(raw: &str) -> Result<Self, config::ConfigError> {
         Self::from_source(File::from_str(raw, FileFormat::Toml))
     }
 
+    /// Builds configuration from an arbitrary supported config source.
     fn from_source<S>(source: S) -> Result<Self, config::ConfigError>
     where
         S: config::Source + Send + Sync + 'static,
@@ -117,6 +155,7 @@ impl Config {
         settings.try_deserialize()
     }
 
+    /// Rejects invalid identifiers, paths, timeouts, and Discord settings.
     pub fn validate(&self) -> BotResult {
         if self.agents.is_empty() {
             return Err(BotError::Config(
@@ -167,6 +206,7 @@ impl Config {
 }
 
 #[must_use]
+/// Returns the user-specific Agentcord configuration path.
 pub fn config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from(".config"))
@@ -174,6 +214,7 @@ pub fn config_path() -> PathBuf {
 }
 
 #[must_use]
+/// Returns the user-specific SQLite state path.
 pub fn state_path() -> PathBuf {
     dirs::state_dir()
         .or_else(dirs::data_local_dir)
@@ -181,6 +222,7 @@ pub fn state_path() -> PathBuf {
         .join("agentcord/state.sqlite3")
 }
 
+/// Recursively expands environment references in configuration values.
 fn expand_value<F>(value: &mut Value, lookup: &F)
 where
     F: Fn(&str) -> Option<String>,
@@ -201,6 +243,7 @@ where
     }
 }
 
+/// Expands `${NAME}` references in one string.
 fn expand_string<F>(value: &str, lookup: &F) -> String
 where
     F: Fn(&str) -> Option<String>,
@@ -227,6 +270,7 @@ where
     output
 }
 
+/// Validates a candidate environment-variable name.
 fn valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some('_' | 'A'..='Z' | 'a'..='z'))
@@ -240,11 +284,15 @@ mod duration {
 
     #[derive(Deserialize)]
     #[serde(untagged)]
+    /// Accepted serialized duration representations.
     enum Repr {
+        /// Whole seconds.
         Seconds(u64),
+        /// A value parsed by `humantime`.
         Human(String),
     }
 
+    /// Deserializes either seconds or a human-readable duration.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
     where
         D: Deserializer<'de>,

@@ -5,13 +5,17 @@ use tracing::warn;
 
 use crate::{Bot, BotResult, render::split_message};
 
+/// Discord identity used when mirroring the allowed user's prompt.
 #[derive(Debug, Clone)]
 struct UserProfile {
+    /// Webhook username including the Agentcord attribution suffix.
     username: String,
+    /// Current user avatar, if Discord exposes one.
     avatar_url: Option<String>,
 }
 
 impl Bot {
+    /// Mirrors a prompt through the user's webhook, falling back to bot posts.
     pub async fn post_user_message(&self, thread: GenericChannelId, text: &str) -> BotResult {
         let ctx = self.context()?.clone();
         let chunks = split_message(text, serenity::constants::MESSAGE_CODE_LIMIT);
@@ -56,6 +60,7 @@ impl Bot {
         Ok(())
     }
 
+    /// Resolves the allowed user's current display name and avatar.
     async fn user_profile(&self, ctx: &serenity::all::Context) -> Option<UserProfile> {
         let user_id = self.config.discord.allowed_user_id;
         let user = ctx.http.get_user(user_id).await.ok()?;
@@ -73,6 +78,10 @@ impl Bot {
         })
     }
 
+    /// Reuses or creates the forum webhook used to mirror user prompts.
+    ///
+    /// Discovery is serialized to prevent duplicate webhook creation. Execute
+    /// failures clear the cache so a deleted webhook can be recovered.
     async fn user_webhook(
         &self,
         ctx: &serenity::all::Context,

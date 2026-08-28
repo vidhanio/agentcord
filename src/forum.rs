@@ -12,18 +12,26 @@ use crate::{
     Bot, BotError, BotResult, acp::SessionUiState, config::TagEmoji, db::SessionRow, projects,
 };
 
+/// Discord's maximum forum-thread title length.
 const THREAD_TITLE_LIMIT: usize = 100;
 
+/// Agent and project metadata needed to create a session post.
 #[derive(Clone, Debug)]
 pub struct SessionMetadata {
+    /// Configured agent key used for the forum tag.
     pub agent_key: String,
+    /// Short project label used in the thread title.
     pub project_label: String,
+    /// Session working directory shown in the starter message.
     pub cwd: String,
+    /// Agent-owned ACP session identifier.
     pub session_id: String,
+    /// Optional title reported by the agent.
     pub title: Option<String>,
 }
 
 impl Bot {
+    /// Verifies the configured forum and reconciles its agent tags.
     pub async fn validate_and_reconcile_forum(&self) -> BotResult {
         let ctx = self.context()?;
         self.channel(ctx).await?;
@@ -80,6 +88,7 @@ impl Bot {
         })
     }
 
+    /// Renames a session thread when its agent reports a new title.
     pub async fn update_title(
         &self,
         thread: GenericChannelId,
@@ -104,6 +113,7 @@ impl Bot {
         Ok(())
     }
 
+    /// Updates a thread's agent tag and archived availability state.
     pub async fn set_thread_archived(
         &self,
         thread: GenericChannelId,
@@ -123,6 +133,7 @@ impl Bot {
         Ok(())
     }
 
+    /// Refreshes the forum starter message with current UI state and usage.
     pub async fn update_starter(
         &self,
         thread: GenericChannelId,
@@ -150,6 +161,7 @@ impl Bot {
         Ok(())
     }
 
+    /// Deletes user-created forum posts that are not Agentcord sessions.
     pub async fn delete_manual_post(&self, thread: &GuildThread) -> BotResult {
         let ctx = self.context()?;
         if thread.parent_id != self.config.discord.forum_channel_id {
@@ -175,6 +187,7 @@ impl Bot {
         Ok(())
     }
 
+    /// Fetches and validates the configured Discord forum channel.
     async fn channel(&self, ctx: &Context) -> BotResult<GuildChannel> {
         let channel = self
             .config
@@ -192,6 +205,7 @@ impl Bot {
         }
     }
 
+    /// Reconciles forum tags and returns agent keys mapped to tag ids.
     async fn tag_ids(&self, ctx: &Context) -> BotResult<HashMap<String, ForumTagId>> {
         let mut channel = self.channel(ctx).await?;
         let configured_names = self
@@ -256,6 +270,7 @@ impl Bot {
     }
 }
 
+/// Copies an existing Discord forum tag into an edit builder.
 fn copy_tag(tag: &ForumTag) -> CreateForumTag<'_> {
     let mut created = CreateForumTag::new(&tag.name).moderated(tag.moderated);
     if let Some(emoji) = &tag.emoji {
@@ -275,6 +290,7 @@ fn copy_tag(tag: &ForumTag) -> CreateForumTag<'_> {
     created
 }
 
+/// Converts configured tag emoji data into a Discord reaction.
 fn reaction(emoji: &TagEmoji) -> ReactionType {
     match emoji {
         TagEmoji::Unicode(value) => ReactionType::Unicode(value.clone().trunc_into()),
@@ -286,6 +302,7 @@ fn reaction(emoji: &TagEmoji) -> ReactionType {
     }
 }
 
+/// Produces a comparable key for a Discord forum emoji.
 fn emoji_key(emoji: Option<&ForumEmoji>) -> String {
     match emoji {
         Some(ForumEmoji::Id(id)) => format!("id:{}", id.get()),
@@ -295,6 +312,7 @@ fn emoji_key(emoji: Option<&ForumEmoji>) -> String {
     }
 }
 
+/// Produces a comparable key for a configured forum emoji.
 fn configured_emoji_key(emoji: &TagEmoji) -> String {
     match emoji {
         TagEmoji::Unicode(value) => format!("unicode:{value}"),
@@ -303,6 +321,7 @@ fn configured_emoji_key(emoji: &TagEmoji) -> String {
 }
 
 #[must_use]
+/// Builds a bounded Discord thread title from project and session metadata.
 pub fn post_title(project: &str, title: Option<&str>, session_id: &str) -> String {
     let fallback = format!(
         "session {}",
@@ -324,6 +343,7 @@ pub fn post_title(project: &str, title: Option<&str>, session_id: &str) -> Strin
     truncate_end(raw.trim(), THREAD_TITLE_LIMIT)
 }
 
+/// Renders the session metadata, UI controls, and usage shown in a starter.
 fn starter_message(
     session_id: &str,
     cwd: &str,
@@ -351,6 +371,7 @@ fn starter_message(
     segments.join(" · ")
 }
 
+/// Formats token usage for the session starter message.
 fn usage_text(usage: &UsageUpdate) -> String {
     let mut content = format!("{} / {} tokens", usage.used, usage.size);
     if let Some(cost) = &usage.cost {
@@ -359,10 +380,12 @@ fn usage_text(usage: &UsageUpdate) -> String {
     content
 }
 
+/// Escapes Markdown-sensitive characters in inline values.
 fn escape_inline(value: &str) -> String {
     truncate_end(&value.replace('`', "ˋ").replace(['\n', '\r'], " "), 300)
 }
 
+/// Truncates the end of a string without splitting Unicode characters.
 pub fn truncate_end(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         return value.to_owned();

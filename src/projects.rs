@@ -2,12 +2,16 @@ use std::path::{Path, PathBuf};
 
 use crate::{BotError, BotResult, config::ProjectsConfig};
 
+/// A resolved project with a display label and canonical working directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Project {
+    /// Short human-readable project label.
     pub label: String,
+    /// Working directory supplied to the ACP agent.
     pub path: PathBuf,
 }
 
+/// Resolves a configured project name or an allowed filesystem path.
 pub fn resolve(config: &ProjectsConfig, input: &str) -> BotResult<Project> {
     let path = canonicalize(&expand_home(Path::new(input))?, "project directory")?;
     let display_base = canonicalize(&expand_home(&config.base_path)?, "display base")?;
@@ -31,6 +35,7 @@ pub fn adopt(config: &ProjectsConfig, reported: &Path) -> Project {
     Project { label, path }
 }
 
+/// Canonicalizes a path and rejects targets that are not directories.
 fn canonicalize(path: &Path, description: &str) -> BotResult<PathBuf> {
     let canonical = path.canonicalize().map_err(|error| {
         BotError::Config(format!(
@@ -47,6 +52,7 @@ fn canonicalize(path: &Path, description: &str) -> BotResult<PathBuf> {
     Ok(canonical)
 }
 
+/// Expands a leading home-directory component in a project path.
 fn expand_home(path: &Path) -> BotResult<PathBuf> {
     let text = path.to_string_lossy();
     if text == "~" || text.starts_with("~/") {
@@ -61,6 +67,7 @@ fn expand_home(path: &Path) -> BotResult<PathBuf> {
     Ok(path.to_owned())
 }
 
+/// Produces the shortest useful label relative to configured roots or home.
 fn display_label(path: &Path, base: &Path, home: Option<&Path>) -> String {
     if let Ok(relative) = path.strip_prefix(base)
         && !relative.as_os_str().is_empty()

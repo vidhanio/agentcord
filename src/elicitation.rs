@@ -22,12 +22,18 @@ use serenity::{
 
 use crate::{Bot, render::split_message};
 
+/// Message budget leaving room for elicitation formatting.
 const MESSAGE_LIMIT: usize = 1900;
+/// Maximum number of inputs supported by a Discord modal.
 const MODAL_FIELDS_LIMIT: usize = 5;
+/// Maximum Discord modal-title length.
 const MODAL_TITLE_LIMIT: usize = 45;
+/// Maximum Discord modal-field label length.
 const FIELD_LABEL_LIMIT: usize = 45;
+/// Prefix used for elicitation status messages.
 const FOOTER: &str = "📋 **elicitation** — ";
 
+/// Process-local nonce source for unique interaction component ids.
 static ELICITATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Presents an `elicitation/create` request to the allowed user and maps their
@@ -60,6 +66,7 @@ pub async fn handle(
     }
 }
 
+/// Presents a supported elicitation schema as a Discord modal.
 async fn present_form(
     bot: &Bot,
     ctx: Context,
@@ -141,6 +148,7 @@ async fn present_form(
     cancelled()
 }
 
+/// Validates submitted modal values and accepts the elicitation.
 async fn accept_modal(
     ctx: &Context,
     thread: GenericChannelId,
@@ -211,6 +219,7 @@ async fn accept_modal(
     ))
 }
 
+/// Explains a field-validation failure and cancels the elicitation.
 async fn invalid_field(
     ctx: &Context,
     thread: GenericChannelId,
@@ -230,6 +239,7 @@ async fn invalid_field(
     cancelled()
 }
 
+/// Presents a secure URL elicitation and waits for accept or decline.
 async fn present_url(
     bot: &Bot,
     ctx: Context,
@@ -339,6 +349,7 @@ async fn allowed_interaction(
     None
 }
 
+/// Marks an elicitation message as timed out on a best-effort basis.
 async fn timeout_edit(ctx: &Context, thread: GenericChannelId, message: MessageId) {
     let _ = thread
         .edit_message(
@@ -351,6 +362,7 @@ async fn timeout_edit(ctx: &Context, thread: GenericChannelId, message: MessageI
         .await;
 }
 
+/// Reports why an unsupported form schema was declined.
 async fn reject_schema(
     ctx: Context,
     thread: GenericChannelId,
@@ -379,32 +391,51 @@ async fn reject_schema(
     declined()
 }
 
+/// A Discord-compatible input derived from an ACP schema property.
 enum FieldInput {
+    /// A free-form short text input.
     Text {
+        /// Hint describing the expected primitive type.
         placeholder: Placeholder,
+        /// Optional initial field value.
         default: Option<String>,
     },
+    /// A bounded string-selection input.
     Select {
+        /// Display-label and submitted-value pairs.
         options: Vec<(String, String)>,
+        /// Optional initially selected value.
         default: Option<String>,
     },
 }
 
+/// Placeholder semantics for text-backed primitive fields.
 enum Placeholder {
+    /// No type hint is needed.
     None,
+    /// The value must parse as an integer.
     Integer,
+    /// The value must parse as a finite or non-finite floating-point number.
     Number,
 }
 
+/// A validated Discord modal derived from an elicitation schema.
 struct ModalSpec {
+    /// Bounded modal title.
     title: String,
+    /// Fields in schema presentation order.
     fields: Vec<ModalField>,
 }
 
+/// One validated field in an elicitation modal.
 struct ModalField {
+    /// Schema property name used as the component id.
     custom_id: String,
+    /// Human-readable Discord label.
     label: String,
+    /// Whether the schema requires a submitted value.
     required: bool,
+    /// Discord component representation for the property.
     input: FieldInput,
 }
 
@@ -466,6 +497,7 @@ fn modal_spec(schema: &ElicitationSchema) -> Option<ModalSpec> {
     })
 }
 
+/// Extracts select-menu options from a string enum schema.
 fn string_options(
     string: &agent_client_protocol::schema::v1::StringPropertySchema,
 ) -> Option<Vec<(String, String)>> {
@@ -485,6 +517,7 @@ fn string_options(
     })
 }
 
+/// Builds Discord modal components from a validated modal specification.
 fn build_modal<'a>(modal_id: &'a str, spec: &'a ModalSpec) -> CreateModal<'a> {
     let components: Vec<CreateModalComponent> = spec
         .fields
@@ -527,6 +560,7 @@ fn build_modal<'a>(modal_id: &'a str, spec: &'a ModalSpec) -> CreateModal<'a> {
     CreateModal::new(modal_id, &spec.title).components(components)
 }
 
+/// Extracts submitted modal field values by schema property name.
 fn parse_modal(data: &ModalInteractionData) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
     for component in &data.components {
@@ -548,10 +582,12 @@ fn parse_modal(data: &ModalInteractionData) -> BTreeMap<String, String> {
     values
 }
 
+/// Builds the Discord message that introduces a form elicitation.
 fn form_message(agent_name: &str, message: &str) -> CreateMessage<'static> {
     CreateMessage::new().content(format!("📋 **{agent_name} needs input** — {message}"))
 }
 
+/// Builds a declined elicitation response without user content.
 fn declined() -> CreateElicitationResponse {
     CreateElicitationResponse::new(ElicitationAction::Decline)
 }
@@ -561,14 +597,17 @@ pub fn declined_response() -> CreateElicitationResponse {
     declined()
 }
 
+/// Builds a cancelled elicitation response without user content.
 fn cancelled() -> CreateElicitationResponse {
     CreateElicitationResponse::new(ElicitationAction::Cancel)
 }
 
+/// Removes mention and code-span characters from agent-provided labels.
 fn sanitize(value: &str) -> String {
     value.replace(['@', '`'], "")
 }
 
+/// Truncates elicitation labels without splitting Unicode characters.
 fn truncate(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         return value.to_owned();
@@ -578,11 +617,14 @@ fn truncate(value: &str, limit: usize) -> String {
     truncated
 }
 
+/// Provides a common title accessor across supported property variants.
 trait PropertyTitle {
+    /// Returns the property's optional human-readable title.
     fn title(&self) -> Option<&str>;
 }
 
 impl PropertyTitle for ElicitationPropertySchema {
+    /// Reads a title only from property variants rendered by Agentcord.
     fn title(&self) -> Option<&str> {
         match self {
             Self::String(property) => property.title.as_deref(),

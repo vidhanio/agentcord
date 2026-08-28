@@ -8,22 +8,30 @@ use serenity::all::{Context, CreateMessage, EditMessage, GenericChannelId, Messa
 
 use crate::{Bot, BotResult, acp::RenderUpdate, db::RenderRow};
 
+/// Maximum content length for a normal Discord message.
 const MESSAGE_LIMIT: usize = 2000;
+/// Output budget that leaves room for execute formatting and fences.
 const EXECUTE_OUTPUT_LIMIT: usize = 1900;
 
+/// Accumulated thought and final text for one streamed response source.
 #[derive(Default, Deserialize, Serialize)]
 struct OutputState {
+    /// Thought text received before final answer text begins.
     #[serde(default)]
     thought: String,
+    /// User-visible final response text.
     #[serde(default)]
     final_text: String,
+    /// Prefix of Discord message ids reserved for thought rendering.
     #[serde(default)]
     thought_message_count: usize,
+    /// Byte offset through thought text already emitted as completed chunks.
     #[serde(default)]
     thought_rendered: usize,
 }
 
 impl Bot {
+    /// Applies an ordered batch of coherent ACP updates to Discord.
     pub async fn render_updates(&self, updates: Vec<RenderUpdate>) -> BotResult {
         let ctx = self.context()?;
         let mut updates = updates.into_iter().peekable();
@@ -126,6 +134,7 @@ impl Bot {
         Ok(())
     }
 
+    /// Applies an agent-reported title update to the session thread.
     async fn render_session_info(
         &self,
         thread: GenericChannelId,
@@ -142,6 +151,11 @@ impl Bot {
             .await
     }
 
+    /// Accumulates streamed thought or answer chunks and synchronizes messages.
+    ///
+    /// Replay uses protocol message ids for idempotence. Replayed unkeyed
+    /// chunks are dropped because they cannot be distinguished from prior
+    /// live output.
     async fn render_output_chunks(
         &self,
         ctx: &Context,
@@ -208,6 +222,7 @@ impl Bot {
         self.db.upsert_render(thread, &row)
     }
 
+    /// Creates or merges the initial projection for a tool call.
     async fn render_tool(
         &self,
         ctx: &Context,
@@ -232,6 +247,7 @@ impl Bot {
         self.db.upsert_render(thread, &row)
     }
 
+    /// Merges a batch of updates into an existing tool-call projection.
     async fn render_tool_updates(
         &self,
         ctx: &Context,
@@ -266,6 +282,7 @@ impl Bot {
         self.db.upsert_render(thread, &row)
     }
 
+    /// Renders otherwise unsupported ACP metadata as bounded JSON.
     async fn render_metadata(
         &self,
         ctx: &Context,
@@ -297,6 +314,7 @@ impl Bot {
     }
 }
 
+/// Converts an ACP content block into a compact text representation.
 fn content_text(content: &ContentBlock) -> String {
     match content {
         ContentBlock::Text(text) => text.text.clone(),
@@ -314,6 +332,7 @@ fn content_text(content: &ContentBlock) -> String {
     }
 }
 
+/// Edits, creates, or removes Discord messages to match an exact text list.
 async fn sync_text_messages(
     ctx: &Context,
     thread: GenericChannelId,
@@ -348,6 +367,7 @@ async fn sync_text_messages(
     Ok(())
 }
 
+/// Streams thought text while preserving already completed Discord chunks.
 async fn sync_thought_messages(
     ctx: &Context,
     thread: GenericChannelId,
@@ -374,6 +394,7 @@ async fn sync_thought_messages(
     Ok(())
 }
 
+/// Renders and synchronizes the current merged tool-call state.
 async fn sync_tool_messages(
     ctx: &Context,
     thread: GenericChannelId,
@@ -385,6 +406,7 @@ async fn sync_tool_messages(
     sync_text_messages(ctx, thread, ids, &chunks).await
 }
 
+/// Chooses the specialized textual representation for a tool-call state.
 fn render_tool_text(state: &serde_json::Value) -> String {
     let kind = state
         .get("kind")
@@ -419,6 +441,7 @@ fn render_tool_text(state: &serde_json::Value) -> String {
     join_header_body(&header, &body)
 }
 
+/// Joins a tool header and optional body with consistent spacing.
 fn join_header_body(header: &str, body: &str) -> String {
     if body.trim().is_empty() {
         header.to_owned()
@@ -427,6 +450,7 @@ fn join_header_body(header: &str, body: &str) -> String {
     }
 }
 
+/// Maps ACP tool kinds to compact visual markers.
 fn tool_emoji(kind: &str) -> &'static str {
     match kind {
         "read" => "📖",
@@ -442,6 +466,7 @@ fn tool_emoji(kind: &str) -> &'static str {
     }
 }
 
+/// Converts an ACP tool kind into a human-readable fallback label.
 fn tool_label(kind: &str) -> String {
     kind.replace('_', " ")
 }
@@ -456,6 +481,7 @@ fn header_title(title: &str) -> String {
     }
 }
 
+/// Formats execute-tool command and output without duplicating its title.
 fn render_execute(state: &serde_json::Value) -> String {
     let command = state
         .get("rawInput")
@@ -480,6 +506,7 @@ fn render_execute(state: &serde_json::Value) -> String {
     body
 }
 
+/// Extracts and bounds the most useful output from an execute tool call.
 fn execute_output(state: &serde_json::Value) -> Option<String> {
     if let Some(output) = state.get("rawOutput") {
         match output {
@@ -519,6 +546,7 @@ fn execute_output(state: &serde_json::Value) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// Returns the tool-call content array or an empty slice.
 fn tool_content(state: &serde_json::Value) -> &[serde_json::Value] {
     state
         .get("content")
@@ -577,6 +605,7 @@ fn tool_block_text(entry: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Renders all supported content blocks attached to a tool call.
 fn render_tool_content(state: &serde_json::Value) -> String {
     let mut body = String::new();
     for entry in tool_content(state) {
@@ -594,6 +623,7 @@ fn render_tool_content(state: &serde_json::Value) -> String {
     body
 }
 
+/// Formats file-edit content as one or more unified diffs.
 fn render_diff(state: &serde_json::Value) -> String {
     let mut body = String::new();
     for diff in tool_content(state)
@@ -608,6 +638,7 @@ fn render_diff(state: &serde_json::Value) -> String {
     fence(&body, "diff")
 }
 
+/// Appends one file diff with correct new/deleted-file headers.
 fn append_diff(diff: &serde_json::Value, body: &mut String) {
     let path = diff
         .get("path")
@@ -631,16 +662,19 @@ fn append_diff(diff: &serde_json::Value, body: &mut String) {
     }
 }
 
+/// Serializes non-empty raw tool input as a JSON fallback.
 fn raw_json(state: &serde_json::Value) -> Option<String> {
     state
         .get("rawInput")
         .map(|input| serde_json::to_string_pretty(input).unwrap_or_default())
 }
 
+/// Wraps a body in a Markdown code fence.
 fn fence(body: &str, language: &str) -> String {
     format!("```{language}\n{}\n```", body.replace("```", "`\u{200b}``"))
 }
 
+/// Recursively merges object fields while replacing non-object values.
 fn merge_object(target: &mut serde_json::Value, update: &serde_json::Value) {
     let (Some(target), Some(update)) = (target.as_object_mut(), update.as_object()) else {
         return;
@@ -652,6 +686,7 @@ fn merge_object(target: &mut serde_json::Value, update: &serde_json::Value) {
     }
 }
 
+/// Keeps a Unicode-safe tail and prefixes a truncation marker when needed.
 fn keep_tail(value: &str, limit: usize, marker: &str) -> String {
     if value.chars().count() <= limit {
         return value.to_owned();
@@ -665,6 +700,7 @@ fn keep_tail(value: &str, limit: usize, marker: &str) -> String {
 }
 
 #[must_use]
+/// Splits text into Discord-sized chunks without splitting Unicode characters.
 pub fn split_message(value: &str, limit: usize) -> Vec<String> {
     if value.is_empty() {
         return vec![String::new()];
@@ -683,6 +719,7 @@ pub fn split_message(value: &str, limit: usize) -> Vec<String> {
     chunks
 }
 
+/// Caps text to a Unicode-safe limit and appends an ellipsis.
 fn cap(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         return value.to_owned();
@@ -699,6 +736,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Covers header/body rendering for embedded and fetched content.
     fn embed_kinds_render_a_headered_text_body() {
         let state = json!({
             "toolCallId": "tc_1",
@@ -712,6 +750,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers fallback headers when agents omit a tool title.
     fn headers_without_a_title_show_only_the_kind_name() {
         let state = json!({"toolCallId": "tc_1", "kind": "switch_mode", "status": "pending"});
         let text = render_tool_text(&state);
@@ -719,6 +758,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers path-specific title quoting without quoting ordinary titles.
     fn non_path_titles_stay_plain_while_paths_are_backticked() {
         let mut state = json!({
             "toolCallId": "tc_1",
@@ -738,6 +778,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers unified-diff headers for edits and newly created files.
     fn edits_render_diffs_and_new_files_use_dev_null() {
         let state = json!({
             "toolCallId": "tc_1",
@@ -756,6 +797,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers execute command rendering and bounded output tails.
     fn execute_renders_command_and_capped_output_tail() {
         let output = "x".repeat(3000);
         let state = json!({
@@ -773,6 +815,7 @@ mod tests {
     }
 
     #[test]
+    /// Prevents execute commands from being repeated in their headers.
     fn execute_headers_stay_generic_when_the_title_is_the_command() {
         let state = json!({
             "toolCallId": "tc_1",
@@ -789,6 +832,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers the title fallback when execute raw input omits a command.
     fn execute_without_raw_input_falls_back_to_the_title_for_the_command() {
         let state = json!({
             "toolCallId": "tc_1",
@@ -803,6 +847,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers raw-input fallback for otherwise empty tool calls.
     fn tools_without_content_fall_back_to_raw_input_json() {
         let state = json!({
             "toolCallId": "tc_1",
@@ -815,6 +860,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers Markdown projection of ACP resource links.
     fn resource_links_render_as_markdown() {
         let state = json!({
             "toolCallId": "tc_1",
@@ -827,6 +873,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers removal of obsolete Discord message ids after content shrinks.
     fn surplus_messages_are_dropped_from_the_id_list() {
         let mut ids = vec![MessageId::new(1), MessageId::new(2), MessageId::new(3)];
         ids.drain(2..);

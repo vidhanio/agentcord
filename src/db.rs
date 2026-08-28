@@ -5,27 +5,39 @@ use serenity::all::{GenericChannelId, MessageId};
 
 use crate::{BotError, BotResult};
 
+/// Minimal persisted tuple needed to restore a session-thread binding.
 #[derive(Clone, Debug)]
 pub struct SessionRow {
+    /// Discord forum thread that represents the session.
     pub thread_id: GenericChannelId,
+    /// Agent-owned ACP session identifier.
     pub session_id: String,
+    /// Configured agent key used to spawn the correct executable.
     pub agent_key: String,
+    /// Working directory used to load the session.
     pub project_path: String,
 }
 
+/// Persisted mapping from one ACP source to its Discord projection.
 #[derive(Clone, Debug)]
 pub struct RenderRow {
+    /// Stable logical key for a message, turn, tool call, or metadata item.
     pub source_key: String,
+    /// Discord messages currently representing this source.
     pub discord_message_ids: Vec<MessageId>,
+    /// Renderer-specific accumulated source state.
     pub state_json: String,
 }
 
+/// Serialized access to Agentcord's SQLite state database.
 #[derive(Debug)]
 pub struct Db {
+    /// Single rusqlite connection shared by application tasks.
     connection: std::sync::Mutex<Connection>,
 }
 
 impl Db {
+    /// Opens the state database and creates its parent directory if needed.
     pub fn open(path: &Path) -> BotResult<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -33,6 +45,7 @@ impl Db {
         Self::from_connection(Connection::open(path)?)
     }
 
+    /// Initializes schema and migrations for an existing SQLite connection.
     fn from_connection(connection: Connection) -> BotResult<Self> {
         // Legacy rows carry only derivable extras (availability, titles,
         // capability caches); they are rewritten into the minimal shape.
@@ -99,6 +112,7 @@ impl Db {
         Ok(())
     }
 
+    /// Persists the irreducible tuple needed to restore an ACP session.
     pub fn insert_session(&self, row: &SessionRow) -> BotResult {
         self.connection()?.execute(
             "INSERT INTO sessions (thread_id, session_id, agent_key, project_path)
@@ -113,6 +127,7 @@ impl Db {
         Ok(())
     }
 
+    /// Looks up the session bound to a Discord thread.
     pub fn session(&self, thread_id: GenericChannelId) -> BotResult<Option<SessionRow>> {
         let connection = self.connection()?;
         connection
@@ -126,6 +141,7 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Lists every persisted session in insertion order.
     pub fn sessions(&self) -> BotResult<Vec<SessionRow>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
@@ -139,6 +155,7 @@ impl Db {
         Ok(sessions)
     }
 
+    /// Looks up a session by agent key and ACP session id.
     pub fn agent_session(
         &self,
         agent_key: &str,
@@ -156,6 +173,7 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Returns all agent/session pairs already imported into Discord.
     pub fn session_keys(&self) -> BotResult<HashSet<(String, String)>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare("SELECT agent_key, session_id FROM sessions")?;
@@ -167,6 +185,7 @@ impl Db {
         Ok(keys)
     }
 
+    /// Deletes a session and its cascading render state.
     pub fn delete_session(&self, thread_id: GenericChannelId) -> BotResult {
         self.connection()?.execute(
             "DELETE FROM sessions WHERE thread_id = ?1",
@@ -208,6 +227,7 @@ impl Db {
         Ok(turn)
     }
 
+    /// Loads the persisted Discord projection for one logical source.
     pub fn render(
         &self,
         thread_id: GenericChannelId,
@@ -237,6 +257,7 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Inserts or replaces the Discord projection for one logical source.
     pub fn upsert_render(&self, thread_id: GenericChannelId, row: &RenderRow) -> BotResult {
         let ids = row
             .discord_message_ids
@@ -259,6 +280,7 @@ impl Db {
         Ok(())
     }
 
+    /// Acquires the single-process SQLite serialization boundary.
     fn connection(&self) -> BotResult<std::sync::MutexGuard<'_, Connection>> {
         self.connection
             .lock()
@@ -266,6 +288,7 @@ impl Db {
     }
 }
 
+/// Maps a SQLite row into the minimal persisted session representation.
 fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     let thread: String = row.get(0)?;
     Ok(SessionRow {
@@ -276,6 +299,7 @@ fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     })
 }
 
+/// Parses a Discord snowflake stored as decimal text.
 fn parse_snowflake(value: &str) -> rusqlite::Result<u64> {
     value.parse().map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -296,7 +320,9 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Ensures concurrent callers cannot reserve the same render turn.
     fn concurrent_turns_reserve_distinct_numbers() {
+        /// Number of simultaneous turn reservations exercised by the test.
         const WORKERS: usize = 8;
 
         let db = Db::from_connection(Connection::open_in_memory().unwrap()).unwrap();

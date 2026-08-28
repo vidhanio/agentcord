@@ -35,22 +35,36 @@ use crate::{
     projects::{self, Project},
 };
 
+/// Commands serialized by the task that owns one ACP connection.
 #[derive(Debug)]
 enum SessionCommand {
+    /// Binds a newly created ACP session to its Discord thread and first
+    /// prompt.
     Bind {
+        /// Newly created Discord forum thread.
         thread: GenericChannelId,
+        /// Initial user prompt to mirror and send.
         prompt: String,
     },
+    /// Sends another prompt through an already bound session.
     Prompt(String),
+    /// Changes the session mode and reports protocol completion.
     SetMode {
+        /// Agent-advertised mode identifier.
         mode_id: SessionModeId,
+        /// Completion channel returned to the Discord command.
         done: oneshot::Sender<Result<(), agent_client_protocol::Error>>,
     },
+    /// Changes one advertised session configuration option.
     SetConfig {
+        /// Agent-advertised configuration identifier.
         config_id: SessionConfigId,
+        /// New typed option value.
         value: SessionConfigOptionValue,
+        /// Completion channel returned to the Discord command.
         done: oneshot::Sender<Result<(), agent_client_protocol::Error>>,
     },
+    /// Stops the session command loop and ACP subprocess.
     Shutdown,
 }
 
@@ -59,20 +73,26 @@ enum SessionCommand {
 /// values.
 #[derive(Clone, Debug, Default)]
 pub struct SessionUiState {
+    /// Advertised modes and current selection.
     pub modes: Option<SessionModeState>,
+    /// Advertised session configuration options and values.
     pub config_options: Vec<SessionConfigOption>,
+    /// Slash-like commands advertised by the agent.
     pub commands: Vec<AvailableCommand>,
 }
 
 impl SessionUiState {
+    /// Replaces the advertised mode state with a protocol snapshot.
     fn apply_modes(&mut self, modes: SessionModeState) {
         self.modes = Some(modes);
     }
 
+    /// Replaces the advertised configuration-option snapshot.
     fn apply_config_options(&mut self, config_options: Vec<SessionConfigOption>) {
         self.config_options = config_options;
     }
 
+    /// Replaces the advertised command snapshot.
     fn apply_commands(&mut self, commands: Vec<AvailableCommand>) {
         self.commands = commands;
     }
@@ -95,6 +115,7 @@ impl SessionUiState {
         )
     }
 
+    /// Applies a current-mode update even if the full mode list is absent.
     fn apply_current_mode(&mut self, mode_id: SessionModeId) {
         match &mut self.modes {
             Some(modes) => modes.current_mode_id = mode_id,
@@ -155,35 +176,50 @@ pub fn select_options(
     }
 }
 
+/// Cloneable command and UI handle for one running ACP session.
 #[derive(Clone, Debug)]
 struct ActiveSession {
+    /// Serialized command input for the connection owner.
     commands: mpsc::UnboundedSender<SessionCommand>,
+    /// Latest coherent projection state for synchronous readers.
     state: watch::Receiver<SessionState>,
 }
 
+/// Waiters sharing one in-flight session restoration.
 #[derive(Debug, Default)]
 struct SessionStartup {
+    /// Callers waiting for the startup owner to publish a result.
     waiters: Mutex<Vec<oneshot::Sender<Result<ActiveSession, String>>>>,
 }
 
+/// Lifecycle state for one Discord thread in the session registry.
 #[derive(Debug)]
 enum SessionEntry {
+    /// Exactly one caller owns startup while others wait.
     Starting(Arc<SessionStartup>),
+    /// A live session handle is ready for commands and UI reads.
     Running(ActiveSession),
 }
 
+/// Single source of truth for starting and active sessions by Discord thread.
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
+    /// Short-held lifecycle map; no asynchronous work occurs under this lock.
     entries: Mutex<HashMap<GenericChannelId, SessionEntry>>,
 }
 
+/// Result of consulting the singleflight session registry.
 enum RegistryAction {
+    /// Reuse an already running session.
     Running(ActiveSession),
+    /// Become the owner of a newly inserted startup.
     Start(Arc<SessionStartup>),
+    /// Await the existing startup owner.
     Wait(oneshot::Receiver<Result<ActiveSession, String>>),
 }
 
 impl SessionRegistry {
+    /// Returns a running handle, startup ownership, or a startup waiter.
     fn access(&self, thread: GenericChannelId) -> RegistryAction {
         let mut entries = self.entries.lock().expect("session registry poisoned");
         let action = match entries.get_mut(&thread) {
@@ -207,6 +243,7 @@ impl SessionRegistry {
         action
     }
 
+    /// Publishes a startup only if its identity still owns the registry entry.
     fn publish(
         &self,
         thread: GenericChannelId,
@@ -223,6 +260,7 @@ impl SessionRegistry {
         }
     }
 
+    /// Removes a failed startup without disturbing a replacement startup.
     fn remove_starting(&self, thread: GenericChannelId, startup: &Arc<SessionStartup>) -> bool {
         let mut entries = self.entries.lock().expect("session registry poisoned");
         if matches!(entries.get(&thread), Some(SessionEntry::Starting(current)) if Arc::ptr_eq(current, startup))
@@ -234,6 +272,7 @@ impl SessionRegistry {
         }
     }
 
+    /// Removes a stopped session only if the command channel still matches.
     fn remove_running(&self, thread: GenericChannelId, active: &ActiveSession) -> bool {
         let mut entries = self.entries.lock().expect("session registry poisoned");
         if matches!(entries.get(&thread), Some(SessionEntry::Running(current)) if current.commands.same_channel(&active.commands))
@@ -246,14 +285,20 @@ impl SessionRegistry {
     }
 }
 
+/// Cancellation guard that prevents abandoned `Starting` entries.
 struct StartupLease<'a> {
+    /// Registry containing the guarded startup entry.
     registry: &'a SessionRegistry,
+    /// Discord thread whose startup is guarded.
     thread: GenericChannelId,
+    /// Identity token for the guarded startup.
     startup: Arc<SessionStartup>,
+    /// Whether dropping the lease should cancel the startup.
     armed: bool,
 }
 
 impl<'a> StartupLease<'a> {
+    /// Arms a cancellation guard for a newly owned startup.
     const fn new(
         registry: &'a SessionRegistry,
         thread: GenericChannelId,
@@ -267,12 +312,14 @@ impl<'a> StartupLease<'a> {
         }
     }
 
+    /// Marks a startup path as having published or failed explicitly.
     const fn finish(&mut self) {
         self.armed = false;
     }
 }
 
 impl Drop for StartupLease<'_> {
+    /// Removes and notifies an abandoned startup when its owner is cancelled.
     fn drop(&mut self) {
         if self.armed && self.registry.remove_starting(self.thread, &self.startup) {
             notify_startup(
@@ -283,15 +330,23 @@ impl Drop for StartupLease<'_> {
     }
 }
 
+/// Requested operation for a newly spawned ACP connection.
 #[derive(Debug)]
 enum StartMode {
+    /// Create a fresh agent session for a project.
     New {
+        /// Configured agent key.
         agent_key: String,
+        /// Resolved project directory and label.
         project: Project,
     },
+    /// Restore an existing Discord/session binding.
     Load(SessionRow),
+    /// Inspect an external session before creating an archived Discord binding.
     Import {
+        /// Configured agent key.
         agent_key: String,
+        /// Agent-owned session identifier.
         session_id: String,
     },
 }
@@ -299,43 +354,63 @@ enum StartMode {
 /// A session known to a harness through `session/list`, not yet imported.
 #[derive(Clone, Debug)]
 pub struct ListedSession {
+    /// Agent-owned session identifier.
     pub session_id: String,
+    /// Optional agent-reported title.
     pub title: Option<String>,
+    /// Optional agent-reported last-update timestamp.
     pub updated_at: Option<String>,
 }
 
+/// Shared completion cell for one cached `session/list` request.
 type ListingCell = OnceCell<Result<Vec<ListedSession>, String>>;
 
+/// Time-bounded cached listing for one configured agent.
 #[derive(Clone, Debug)]
 pub struct CachedListing {
+    /// Time at which this cache entry was installed.
     listed_at: Instant,
+    /// Shared fetch result for concurrent autocomplete calls.
     listing: Arc<ListingCell>,
 }
 
+/// Maximum age of an ACP session-list result.
 const LISTING_TTL: Duration = Duration::from_secs(60);
 
+/// Discord binding and current turn captured for rendering.
 #[derive(Clone, Copy, Debug)]
 struct BoundSession {
+    /// Discord thread receiving the projection.
     thread: GenericChannelId,
+    /// Persisted turn number for unkeyed streamed output.
     turn: u64,
 }
 
+/// Controls whether notifications are hidden, replayed, or live.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum UpdatePhase {
+    /// Record UI state but do not render notifications yet.
     #[default]
     Muted,
+    /// Render load history with replay deduplication semantics.
     Replay,
+    /// Render notifications as live session output.
     Live,
 }
 
+/// Coherent session state shared through a Tokio watch channel.
 #[derive(Clone, Debug, Default)]
 struct SessionState {
+    /// Optional Discord binding and current turn.
     bound: Option<BoundSession>,
+    /// Current notification projection phase.
     phase: UpdatePhase,
+    /// Latest agent-advertised UI state.
     ui: SessionUiState,
 }
 
 impl SessionState {
+    /// Creates initial muted state for an optional existing binding.
     fn new(thread: Option<GenericChannelId>, turn: u64) -> Self {
         Self {
             bound: thread.map(|thread| BoundSession { thread, turn }),
@@ -344,6 +419,7 @@ impl SessionState {
         }
     }
 
+    /// Returns the Discord thread once the session has been bound.
     fn thread(&self) -> Option<GenericChannelId> {
         self.bound.map(|bound| bound.thread)
     }
@@ -353,23 +429,35 @@ impl SessionState {
 /// applied when it arrived.
 #[derive(Debug)]
 pub struct RenderUpdate {
+    /// Discord thread that was bound when the update arrived.
     pub thread: GenericChannelId,
+    /// Turn that was current when the update arrived.
     pub turn: u64,
+    /// Whether the update originated from `session/load` replay.
     pub replay: bool,
+    /// UI snapshot after applying this update.
     pub ui: SessionUiState,
+    /// Original ACP update to project.
     pub update: SessionUpdate,
 }
 
+/// Cloneable startup-result sender shared by connection exit paths.
 type ReadySender = mpsc::UnboundedSender<Result<SessionMetadata, String>>;
 
+/// Spawned connection waiting to become an active Discord session.
 struct PendingSession {
+    /// Command input retained when the session becomes active.
     commands: mpsc::UnboundedSender<SessionCommand>,
+    /// Projection-state reader retained for UI snapshots.
     state: watch::Receiver<SessionState>,
+    /// First initialization success or failure.
     ready: mpsc::UnboundedReceiver<Result<SessionMetadata, String>>,
+    /// Supervised ACP connection task.
     task: tokio::task::JoinHandle<Result<(), agent_client_protocol::Error>>,
 }
 
 impl Bot {
+    /// Creates a fresh ACP session, Discord post, and active registry entry.
     pub async fn launch(
         &self,
         agent_key: &str,
@@ -402,6 +490,7 @@ impl Bot {
         Ok(row.thread_id)
     }
 
+    /// Queues a prompt, restoring the session first when necessary.
     pub async fn submit(&self, thread: GenericChannelId, prompt: String) -> BotResult {
         let commands = self.ensure_active(thread).await?;
         commands
@@ -478,6 +567,7 @@ impl Bot {
         }
     }
 
+    /// Restores one persisted session as the singleflight startup owner.
     async fn restore_session(&self, thread: GenericChannelId) -> BotResult<PendingSession> {
         let row = self
             .db
@@ -525,6 +615,8 @@ impl Bot {
         }
     }
 
+    /// Eagerly restores every persisted session through the normal registry
+    /// path.
     pub async fn restore_all(&self) {
         if self.context().is_err() {
             return;
@@ -554,6 +646,7 @@ impl Bot {
         }
     }
 
+    /// Creates an archived Discord binding for an externally created session.
     pub async fn import(&self, agent_key: &str, session_id: &str) -> BotResult<GenericChannelId> {
         let ctx = self.context()?.clone();
         if let Some(row) = self.db.agent_session(agent_key, session_id)? {
@@ -620,6 +713,7 @@ impl Bot {
         listed.clone().map_err(BotError::Other)
     }
 
+    /// Removes a deleted thread from the registry and stops its session.
     pub(super) fn forget(&self, thread: GenericChannelId) {
         let removed = self
             .sessions
@@ -638,6 +732,7 @@ impl Bot {
         }
     }
 
+    /// Spawns the configured executable and its supervised ACP connection task.
     fn spawn(&self, ctx: Context, mode: StartMode) -> BotResult<PendingSession> {
         let agent_key = match &mode {
             StartMode::New { agent_key, .. } | StartMode::Import { agent_key, .. } => agent_key,
@@ -671,6 +766,7 @@ impl Bot {
         })
     }
 
+    /// Waits once for ACP initialization, aborting the task on timeout.
     async fn await_ready(&self, pending: &mut PendingSession) -> BotResult<SessionMetadata> {
         match tokio::time::timeout(self.config.timeouts.startup, pending.ready.recv()).await {
             Ok(Some(result)) => result.map_err(BotError::Other),
@@ -682,6 +778,7 @@ impl Bot {
         }
     }
 
+    /// Registers a newly launched session and starts its exit monitor.
     fn activate(&self, thread: GenericChannelId, pending: PendingSession) -> ActiveSession {
         let active = ActiveSession {
             commands: pending.commands.clone(),
@@ -696,6 +793,7 @@ impl Bot {
         active
     }
 
+    /// Publishes a restored session only if its startup still owns the entry.
     fn activate_started(
         &self,
         thread: GenericChannelId,
@@ -718,11 +816,14 @@ impl Bot {
         Ok(active)
     }
 
+    /// Removes a failed startup and gives every waiter the same error.
     fn fail_start(&self, thread: GenericChannelId, startup: &Arc<SessionStartup>, error: String) {
         self.sessions.remove_starting(thread, startup);
         notify_startup(startup, &Err(error));
     }
 
+    /// Removes an exited session by identity and archives only that current
+    /// entry.
     fn monitor_session(
         &self,
         thread: GenericChannelId,
@@ -748,6 +849,7 @@ impl Bot {
         });
     }
 
+    /// Returns a snapshot handle only for a fully running session.
     fn active(&self, thread: GenericChannelId) -> Option<ActiveSession> {
         let entries = self
             .sessions
@@ -775,6 +877,7 @@ impl Bot {
             .insert(agent_key.to_owned(), restorable);
     }
 
+    /// Reads the learned `session/load` support for an agent.
     #[must_use]
     pub(crate) fn restorable_memo(&self, agent_key: &str) -> Option<bool> {
         self.restorable
@@ -785,6 +888,7 @@ impl Bot {
     }
 }
 
+/// Completes and drains every caller waiting on one session startup.
 fn notify_startup(startup: &SessionStartup, result: &Result<ActiveSession, String>) {
     for waiter in startup
         .waiters
@@ -796,10 +900,12 @@ fn notify_startup(startup: &SessionStartup, result: &Result<ActiveSession, Strin
     }
 }
 
+/// Abort-on-drop wrapper for the ordered session renderer.
 #[derive(Debug)]
 struct RenderTask(Option<tokio::task::JoinHandle<()>>);
 
 impl RenderTask {
+    /// Drains queued rendering within a bound before aborting remaining work.
     async fn finish(mut self, timeout: Duration) {
         if let Some(mut task) = self.0.take()
             && tokio::time::timeout(timeout, &mut task).await.is_err()
@@ -810,6 +916,7 @@ impl RenderTask {
 }
 
 impl Drop for RenderTask {
+    /// Prevents a cancelled connection task from leaving a detached renderer.
     fn drop(&mut self) {
         if let Some(task) = self.0.take() {
             task.abort();
@@ -849,6 +956,7 @@ fn spawn_render_task(
     })))
 }
 
+/// Owns one ACP subprocess, protocol connection, callbacks, and command loop.
 async fn run_connection(
     bot: Bot,
     ctx: Context,
@@ -954,6 +1062,7 @@ async fn run_connection(
     result
 }
 
+/// Negotiates ACP v1 and advertises only implemented client capabilities.
 async fn initialize(
     connection: &ConnectionTo<Agent>,
 ) -> Result<InitializeResponse, agent_client_protocol::Error> {
@@ -982,6 +1091,10 @@ async fn initialize(
     Ok(initialized)
 }
 
+/// Creates, loads, or inspects a session after protocol initialization.
+///
+/// Load notifications are marked as replay until `session/load` responds; ACP
+/// callback ordering guarantees earlier history retains that classification.
 async fn initialize_session(
     bot: &Bot,
     connection: &ConnectionTo<Agent>,
@@ -1081,6 +1194,7 @@ async fn initialize_session(
     }
 }
 
+/// Follows ACP pagination until every listed session has been collected.
 async fn list_all_sessions(
     connection: &ConnectionTo<Agent>,
 ) -> Result<Vec<SessionInfo>, agent_client_protocol::Error> {
@@ -1097,6 +1211,7 @@ async fn list_all_sessions(
     }
 }
 
+/// Finds one agent session by id, returning a protocol error when absent.
 async fn find_listed_session(
     connection: &ConnectionTo<Agent>,
     session_id: &str,
@@ -1111,6 +1226,7 @@ async fn find_listed_session(
         })
 }
 
+/// Reuses a fresh listing cell or installs one for a new fetch.
 fn cached_listing(
     listings: &mut HashMap<String, CachedListing>,
     agent_key: &str,
@@ -1128,6 +1244,7 @@ fn cached_listing(
     cached.listing
 }
 
+/// Opens a short-lived agent connection and executes `session/list`.
 async fn fetch(agent: AgentConfig) -> Result<Vec<ListedSession>, agent_client_protocol::Error> {
     let process = AcpAgent::new(
         AcpAgentConfig::new(agent.command)
@@ -1159,6 +1276,7 @@ async fn fetch(agent: AgentConfig) -> Result<Vec<ListedSession>, agent_client_pr
         .await
 }
 
+/// Serially executes commands against one initialized ACP connection.
 async fn run_commands(
     bot: &Bot,
     ctx: &Context,
@@ -1212,6 +1330,7 @@ async fn run_commands(
     Ok(())
 }
 
+/// Reserves a turn, sends one prompt, and cancels it on timeout.
 async fn prompt_agent(
     bot: &Bot,
     ctx: &Context,
@@ -1275,6 +1394,7 @@ fn apply_ui_state(ui: &mut SessionUiState, update: &SessionUpdate) {
     }
 }
 
+/// Waits for a queued mode or configuration change with a bounded response.
 async fn await_change(
     result: oneshot::Receiver<Result<(), agent_client_protocol::Error>>,
     timeout: Duration,
@@ -1295,6 +1415,7 @@ async fn await_change(
 mod tests {
     use super::*;
 
+    /// Builds a minimal active handle for registry identity tests.
     fn active_session() -> ActiveSession {
         let (commands, _command_rx) = mpsc::unbounded_channel();
         let (_state_tx, state) = watch::channel(SessionState::default());
@@ -1302,6 +1423,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Verifies concurrent callers join one startup and receive one handle.
     async fn concurrent_registry_access_shares_one_startup() {
         let registry = SessionRegistry::default();
         let thread = GenericChannelId::new(1);
@@ -1325,6 +1447,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Verifies cancellation releases waiters and permits a later retry.
     async fn cancelled_startup_releases_waiters_and_allows_retry() {
         let registry = SessionRegistry::default();
         let thread = GenericChannelId::new(1);
@@ -1343,6 +1466,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies stale startup/task identities cannot disturb replacements.
     fn stale_startup_cannot_replace_or_remove_a_new_session() {
         let registry = SessionRegistry::default();
         let thread = GenericChannelId::new(1);

@@ -13,6 +13,7 @@ use serenity::{
     futures::StreamExt,
 };
 
+/// Presents an ACP permission request in Discord and returns the user's choice.
 pub async fn ask(
     ctx: Context,
     channel: GenericChannelId,
@@ -114,6 +115,7 @@ pub async fn ask(
     cancelled()
 }
 
+/// Selects the first affirmative option for automatic approval mode.
 pub fn approve_all(request: &RequestPermissionRequest) -> RequestPermissionResponse {
     let option = request
         .options
@@ -133,10 +135,12 @@ pub fn approve_all(request: &RequestPermissionRequest) -> RequestPermissionRespo
     ))
 }
 
+/// Builds a cancelled ACP permission response.
 fn cancelled() -> RequestPermissionResponse {
     RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
 }
 
+/// Truncates user-facing permission text without splitting Unicode characters.
 fn truncate(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         return value.to_owned();

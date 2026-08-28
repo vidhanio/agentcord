@@ -6,7 +6,9 @@ use tracing::warn;
 
 use crate::{Bot, BotError, BotResult, acp::ListedSession, forum::truncate_end};
 
+/// Maximum autocomplete choices Discord accepts.
 const CHOICE_LIMIT: usize = 25;
+/// Maximum length of an autocomplete choice label.
 const CHOICE_NAME_LIMIT: usize = 100;
 
 /// Import an existing ACP session from a harness into a new forum post
@@ -46,6 +48,7 @@ pub async fn import(
     clippy::unused_async,
     reason = "poise autocomplete callbacks must be async functions"
 )]
+/// Suggests configured agents that can list importable sessions.
 async fn harness_choices<'a>(
     ctx: poise::Context<'a, Bot, BotError>,
     partial: &'a str,
@@ -66,6 +69,7 @@ async fn harness_choices<'a>(
     CreateAutocompleteResponse::new().set_choices(choices)
 }
 
+/// Suggests sessions exposed by the selected ACP agent.
 async fn session_choices<'a>(
     ctx: poise::Context<'a, Bot, BotError>,
     partial: &'a str,
@@ -91,6 +95,7 @@ async fn session_choices<'a>(
     }
 }
 
+/// Extracts the selected agent key from resolved command arguments.
 fn harness_argument<'a>(args: &'a [serenity::ResolvedOption<'a>]) -> Option<&'a str> {
     args.iter()
         .find(|option| option.name == "harness")
@@ -100,6 +105,7 @@ fn harness_argument<'a>(args: &'a [serenity::ResolvedOption<'a>]) -> Option<&'a 
         })
 }
 
+/// Filters listed sessions down to those not already imported.
 fn importable_choices(
     harness: &str,
     listed: Vec<ListedSession>,
@@ -126,6 +132,7 @@ fn importable_choices(
         .collect()
 }
 
+/// Builds a compact autocomplete label for a listed ACP session.
 fn choice_name(session: &ListedSession) -> String {
     let fallback = format!(
         "session {}",

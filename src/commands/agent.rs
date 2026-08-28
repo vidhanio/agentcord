@@ -9,8 +9,11 @@ use tracing::warn;
 
 use crate::{Bot, BotError, BotResult};
 
+/// Component id for the agent selector.
 const AGENT_SELECT_ID: &str = "agent";
+/// Component id for the project path input.
 const PROJECT_INPUT_ID: &str = "project";
+/// Component id for the initial prompt input.
 const PROMPT_INPUT_ID: &str = "prompt";
 
 /// Launch a new ACP session with a configured agent
@@ -72,6 +75,7 @@ pub async fn agent(ctx: poise::ApplicationContext<'_, Bot, BotError>) -> Result<
     Ok(())
 }
 
+/// Builds the modal used to choose an agent, project, and initial prompt.
 fn build_modal<'a>(bot: &'a Bot, custom_id: &'a str) -> CreateModal<'a> {
     let agent_options = bot
         .config
@@ -100,12 +104,17 @@ fn build_modal<'a>(bot: &'a Bot, custom_id: &'a str) -> CreateModal<'a> {
     ])
 }
 
+/// Values extracted from the agent-launch modal.
 struct Selection {
+    /// Selected configured agent key.
     agent: Option<String>,
+    /// User-entered project path.
     project: Option<String>,
+    /// User-entered initial prompt.
     prompt: Option<String>,
 }
 
+/// Extracts the user's agent and project selections from the launch modal.
 fn parse_modal(data: &ModalInteractionData) -> Selection {
     let mut selection = Selection {
         agent: None,
@@ -132,6 +141,7 @@ fn parse_modal(data: &ModalInteractionData) -> Selection {
     selection
 }
 
+/// Sends a short ephemeral response to the submitted launch modal.
 async fn reply(submit: &ModalInteraction, http: &serenity::Http, content: &str) -> BotResult {
     submit
         .create_response(

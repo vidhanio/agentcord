@@ -60,6 +60,7 @@ pub async fn model(
     Ok(())
 }
 
+/// Reports the active session's current model and thinking configuration.
 async fn status(
     ctx: poise::ApplicationContext<'_, Bot, BotError>,
     bot: &Bot,
@@ -150,6 +151,7 @@ fn resolve_value(
     }
 }
 
+/// Builds autocomplete choices for one ACP configuration category.
 fn category_choices<'a>(
     ui: Option<crate::acp::SessionUiState>,
     category: &SessionConfigOptionCategory,
@@ -192,6 +194,7 @@ fn category_choices<'a>(
     clippy::unused_async,
     reason = "poise autocomplete callbacks must be async functions"
 )]
+/// Suggests advertised model values for the current session.
 async fn model_choices<'a>(
     ctx: poise::Context<'a, Bot, BotError>,
     partial: &'a str,
@@ -207,6 +210,7 @@ async fn model_choices<'a>(
     clippy::unused_async,
     reason = "poise autocomplete callbacks must be async functions"
 )]
+/// Suggests advertised thought-level values for the current session.
 async fn thinking_choices<'a>(
     ctx: poise::Context<'a, Bot, BotError>,
     partial: &'a str,

@@ -35,6 +35,7 @@ pub async fn mode(
     clippy::unused_async,
     reason = "poise autocomplete callbacks must be async functions"
 )]
+/// Suggests modes advertised by the current ACP session.
 async fn mode_choices<'a>(
     ctx: poise::Context<'a, Bot, BotError>,
     partial: &'a str,
@@ -65,6 +66,7 @@ async fn mode_choices<'a>(
     CreateAutocompleteResponse::new().set_choices(choices)
 }
 
+/// Resolves a mode by either its protocol id or display name.
 fn resolve_mode(
     bot: &Bot,
     thread: serenity::all::GenericChannelId,

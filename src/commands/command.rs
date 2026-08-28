@@ -40,6 +40,7 @@ pub async fn command(
     clippy::unused_async,
     reason = "poise autocomplete callbacks must be async functions"
 )]
+/// Suggests slash commands advertised by the active ACP session.
 async fn command_choices<'a>(
     ctx: poise::Context<'a, Bot, BotError>,
     partial: &'a str,

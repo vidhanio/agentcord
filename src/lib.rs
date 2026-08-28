@@ -1,3 +1,6 @@
+//! Discord projection and supervision for arbitrary Agent Client Protocol
+//! agents.
+
 mod acp;
 mod commands;
 pub mod config;
@@ -27,24 +30,39 @@ use serenity::all::{
 };
 use tracing::{info, warn};
 
+/// Result type used by Agentcord operations.
 pub type BotResult<T = ()> = Result<T, BotError>;
 
+/// Cheaply cloneable handle to the shared application state.
 #[derive(Clone)]
-pub struct Bot(Arc<BotState>);
+pub struct Bot(
+    /// Single shared ownership boundary for application state.
+    Arc<BotState>,
+);
 
+/// Shared application dependencies and runtime coordination state.
 #[doc(hidden)]
 pub struct BotState {
+    /// Immutable validated configuration.
     pub(crate) config: Config,
+    /// Persistent session and render mappings.
     pub(crate) db: Db,
+    /// Discord context installed by the first ready event.
     context: OnceLock<Context>,
+    /// Singleflight registry for starting and active ACP sessions.
     pub(crate) sessions: acp::SessionRegistry,
+    /// Short-lived per-agent session-list cache.
     pub(crate) listings: Mutex<HashMap<String, acp::CachedListing>>,
+    /// Learned `session/load` support keyed by agent.
     pub(crate) restorable: Mutex<HashMap<String, bool>>,
+    /// Recoverable cached webhook used to mirror user prompts.
     pub(crate) webhook: tokio::sync::Mutex<Option<Webhook>>,
+    /// Retryable one-time startup and restoration gate.
     ready_started: tokio::sync::OnceCell<()>,
 }
 
 impl Debug for BotState {
+    /// Formats only stable, useful state and omits runtime handles.
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BotState")
@@ -56,14 +74,17 @@ impl Debug for BotState {
 }
 
 impl Deref for Bot {
+    /// Shared state exposed through the lightweight bot handle.
     type Target = BotState;
 
+    /// Exposes the shared application state to crate modules.
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
 impl Debug for Bot {
+    /// Formats the bot without leaking tokens or noisy runtime state.
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Bot")
@@ -73,6 +94,7 @@ impl Debug for Bot {
 }
 
 impl Bot {
+    /// Validates configuration and constructs the shared application state.
     fn new(config: Config) -> BotResult<Self> {
         config.validate()?;
         let db = Db::open(&config::state_path())?;
@@ -88,21 +110,28 @@ impl Bot {
         })))
     }
 
+    /// Returns the Discord context after the first ready event.
     pub(crate) fn context(&self) -> BotResult<&Context> {
         self.context
             .get()
             .ok_or_else(|| BotError::Other("Discord is not ready".into()))
     }
 
+    /// Reports whether a Discord user may interact with the bot.
     #[must_use]
     pub fn is_allowed(&self, user: UserId) -> bool {
         user == self.config.discord.allowed_user_id
     }
 
+    /// Resolves user-supplied project input against configured project roots.
     pub(crate) fn resolve_project(&self, input: &str) -> BotResult<Project> {
         projects::resolve(&self.config.projects, input)
     }
 
+    /// Performs one-time forum reconciliation and session restoration.
+    ///
+    /// Concurrent ready events share the same initialization attempt, while a
+    /// failed attempt remains retryable on a later gateway reconnect.
     async fn handle_ready(&self, ctx: &Context) {
         let _ = self.context.set(ctx.clone());
         let result = self
@@ -120,6 +149,7 @@ impl Bot {
         info!("agentcord ready");
     }
 
+    /// Routes an allowed Discord message to its thread's ACP session.
     async fn handle_message(&self, message: &serenity::all::Message) {
         let Ok(ctx) = self.context() else {
             return;
@@ -146,6 +176,7 @@ impl Bot {
 
 #[async_trait]
 impl EventHandler for Bot {
+    /// Projects relevant Discord gateway events into application operations.
     async fn dispatch(&self, ctx: &Context, event: &FullEvent) {
         match event {
             FullEvent::Ready { .. } => self.handle_ready(ctx).await,
@@ -169,6 +200,7 @@ impl EventHandler for Bot {
     }
 }
 
+/// Builds and runs the Discord client until it shuts down or fails.
 pub async fn run(config: Config) -> BotResult {
     let bot = Arc::new(Bot::new(config)?);
     let token: Token = bot
