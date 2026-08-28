@@ -442,6 +442,7 @@ fn render_tool_text(state: &serde_json::Value) -> String {
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|title| !title.is_empty())
+            .filter(|title| !title.replace('_', " ").eq_ignore_ascii_case(&name))
             .map(header_title);
         title.map_or_else(
             || format!("{} **{name}** · {status}", tool_emoji(kind)),
@@ -770,6 +771,18 @@ mod tests {
         let state = json!({"toolCallId": "tc_1", "kind": "switch_mode", "status": "pending"});
         let text = render_tool_text(&state);
         assert_eq!(text, "🔁 **switch mode** · pending");
+    }
+
+    #[test]
+    /// Omits a title that only repeats the tool kind.
+    fn redundant_tool_titles_are_not_rendered() {
+        let state = json!({
+            "toolCallId": "tc_1",
+            "title": "Switch_Mode",
+            "kind": "switch_mode",
+            "status": "pending"
+        });
+        assert_eq!(render_tool_text(&state), "🔁 **switch mode** · pending");
     }
 
     #[test]
