@@ -20,6 +20,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+use config::AgentKey;
 pub use config::Config;
 use db::Db;
 pub use error::BotError;
@@ -52,9 +53,9 @@ pub struct BotState {
     /// Singleflight registry for starting and active ACP sessions.
     pub(crate) sessions: acp::SessionRegistry,
     /// Short-lived per-agent session-list cache.
-    pub(crate) listings: Mutex<HashMap<String, acp::CachedListing>>,
+    pub(crate) listings: Mutex<HashMap<AgentKey, acp::CachedListing>>,
     /// Learned `session/load` support keyed by agent.
-    pub(crate) restorable: Mutex<HashMap<String, bool>>,
+    pub(crate) restorable: Mutex<HashMap<AgentKey, bool>>,
     /// Recoverable cached webhook used to mirror user prompts.
     pub(crate) webhook: tokio::sync::Mutex<Option<Webhook>>,
     /// Retryable one-time startup and restoration gate.

@@ -7,7 +7,7 @@ use serenity::{
 };
 use tracing::warn;
 
-use crate::{Bot, BotError, BotResult};
+use crate::{Bot, BotError, BotResult, config::AgentKey};
 
 /// Component id for the agent selector.
 const AGENT_SELECT_ID: &str = "agent";
@@ -83,7 +83,8 @@ fn build_modal<'a>(bot: &'a Bot, custom_id: &'a str) -> CreateModal<'a> {
         .iter()
         .enumerate()
         .map(|(index, (key, agent))| {
-            CreateSelectMenuOption::new(&agent.display_name, key).default_selection(index == 0)
+            CreateSelectMenuOption::new(&agent.display_name, key.to_string())
+                .default_selection(index == 0)
         })
         .collect();
     let agent = CreateSelectMenu::new(
@@ -107,7 +108,7 @@ fn build_modal<'a>(bot: &'a Bot, custom_id: &'a str) -> CreateModal<'a> {
 /// Values extracted from the agent-launch modal.
 struct Selection {
     /// Selected configured agent key.
-    agent: Option<String>,
+    agent: Option<AgentKey>,
     /// User-entered project path.
     project: Option<String>,
     /// User-entered initial prompt.
@@ -127,7 +128,7 @@ fn parse_modal(data: &ModalInteractionData) -> Selection {
         };
         match &label.component {
             LabelComponent::SelectMenu(select) if select.custom_id.as_str() == AGENT_SELECT_ID => {
-                selection.agent = select.values.as_slice().first().cloned();
+                selection.agent = select.values.as_slice().first().cloned().map(AgentKey::new);
             }
             LabelComponent::InputText(text) if text.custom_id.as_str() == PROJECT_INPUT_ID => {
                 selection.project = Some(text.value.as_str().to_owned());

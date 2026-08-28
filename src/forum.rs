@@ -1,15 +1,23 @@
-use std::{collections::HashMap, fmt::Write, path::Path};
+use std::{
+    collections::HashMap,
+    fmt::Write,
+    path::{Path, PathBuf},
+};
 
-use agent_client_protocol::schema::v1::{SessionConfigOptionCategory, UsageUpdate};
+use agent_client_protocol::schema::v1::{SessionConfigOptionCategory, SessionId, UsageUpdate};
 use serenity::all::{
     Channel, ChannelType, Context, CreateForumPost, CreateForumTag, CreateMessage, EditChannel,
-    EditMessage, EditThread, EmojiId, ForumEmoji, ForumTag, ForumTagId, GenericChannelId,
-    GetMessages, GuildChannel, GuildThread, MessageId, ReactionType, ThreadId,
+    EditMessage, EditThread, ForumEmoji, ForumTag, ForumTagId, GenericChannelId, GetMessages,
+    GuildChannel, GuildThread, MessageId, ReactionType, ThreadId,
     small_fixed_array::TruncatingInto,
 };
 
 use crate::{
-    Bot, BotError, BotResult, acp::SessionUiState, config::TagEmoji, db::SessionRow, projects,
+    Bot, BotError, BotResult,
+    acp::SessionUiState,
+    config::{AgentKey, TagEmoji},
+    db::SessionRow,
+    projects,
 };
 
 /// Discord's maximum forum-thread title length.
@@ -19,13 +27,13 @@ const THREAD_TITLE_LIMIT: usize = 100;
 #[derive(Clone, Debug)]
 pub struct SessionMetadata {
     /// Configured agent key used for the forum tag.
-    pub agent_key: String,
+    pub agent_key: AgentKey,
     /// Short project label used in the thread title.
     pub project_label: String,
     /// Session working directory shown in the starter message.
-    pub cwd: String,
+    pub cwd: PathBuf,
     /// Agent-owned ACP session identifier.
-    pub session_id: String,
+    pub session_id: SessionId,
     /// Optional title reported by the agent.
     pub title: Option<String>,
 }
@@ -92,12 +100,12 @@ impl Bot {
     pub async fn update_title(
         &self,
         thread: GenericChannelId,
-        project_path: &str,
-        session_id: &str,
+        project_path: &Path,
+        session_id: &SessionId,
         title: Option<&str>,
     ) -> BotResult {
         let ctx = self.context()?;
-        let project = projects::adopt(&self.config.projects, Path::new(project_path));
+        let project = projects::adopt(&self.config.projects, project_path);
         let name = post_title(&project.label, title, session_id);
         let channel = thread
             .to_channel(ctx, Some(self.config.discord.guild_id))
@@ -117,7 +125,7 @@ impl Bot {
     pub async fn set_thread_archived(
         &self,
         thread: GenericChannelId,
-        agent_key: &str,
+        agent_key: &AgentKey,
         archived: bool,
     ) -> BotResult {
         let ctx = self.context()?;
@@ -206,13 +214,13 @@ impl Bot {
     }
 
     /// Reconciles forum tags and returns agent keys mapped to tag ids.
-    async fn tag_ids(&self, ctx: &Context) -> BotResult<HashMap<String, ForumTagId>> {
+    async fn tag_ids(&self, ctx: &Context) -> BotResult<HashMap<AgentKey, ForumTagId>> {
         let mut channel = self.channel(ctx).await?;
         let configured_names = self
             .config
             .agents
             .keys()
-            .map(String::as_str)
+            .map(AsRef::as_ref)
             .collect::<Vec<_>>();
         let mut desired = channel
             .available_tags
@@ -221,10 +229,9 @@ impl Bot {
             .map(copy_tag)
             .collect::<Vec<_>>();
         desired.extend(
-            self.config
-                .agents
-                .iter()
-                .map(|(key, agent)| CreateForumTag::new(key).emoji(reaction(&agent.emoji))),
+            self.config.agents.iter().map(|(key, agent)| {
+                CreateForumTag::new(key.as_ref()).emoji(reaction(&agent.emoji))
+            }),
         );
         if desired.len() > 20 {
             return Err(BotError::Config(format!(
@@ -242,7 +249,7 @@ impl Bot {
             .config
             .agents
             .iter()
-            .map(|(key, agent)| (key.clone(), configured_emoji_key(&agent.emoji)))
+            .map(|(key, agent)| (key.to_string(), configured_emoji_key(&agent.emoji)))
             .collect::<Vec<_>>();
         let needs_update = wanted
             .iter()
@@ -263,7 +270,7 @@ impl Bot {
                 channel
                     .available_tags
                     .iter()
-                    .find(|tag| &tag.name == key)
+                    .find(|tag| tag.name == key.as_ref())
                     .map(|tag| (key.clone(), tag.id))
             })
             .collect())
@@ -296,7 +303,7 @@ fn reaction(emoji: &TagEmoji) -> ReactionType {
         TagEmoji::Unicode(value) => ReactionType::Unicode(value.clone().trunc_into()),
         TagEmoji::Custom { id, animated } => ReactionType::Custom {
             animated: *animated,
-            id: EmojiId::new(*id),
+            id: *id,
             name: None,
         },
     }
@@ -322,10 +329,10 @@ fn configured_emoji_key(emoji: &TagEmoji) -> String {
 
 #[must_use]
 /// Builds a bounded Discord thread title from project and session metadata.
-pub fn post_title(project: &str, title: Option<&str>, session_id: &str) -> String {
+pub fn post_title(project: &str, title: Option<&str>, session_id: &SessionId) -> String {
     let fallback = format!(
         "session {}",
-        session_id.chars().take(12).collect::<String>()
+        session_id.to_string().chars().take(12).collect::<String>()
     );
     let title = title
         .filter(|title| !title.trim().is_empty())
@@ -345,14 +352,14 @@ pub fn post_title(project: &str, title: Option<&str>, session_id: &str) -> Strin
 
 /// Renders the session metadata, UI controls, and usage shown in a starter.
 fn starter_message(
-    session_id: &str,
-    cwd: &str,
+    session_id: &SessionId,
+    cwd: &Path,
     ui: Option<&SessionUiState>,
     usage: Option<&str>,
 ) -> String {
     let mut segments = vec![
-        format!("session `{}`", escape_inline(session_id)),
-        format!("cwd `{}`", escape_inline(cwd)),
+        format!("session `{}`", escape_inline(&session_id.to_string())),
+        format!("cwd `{}`", escape_inline(&cwd.display().to_string())),
     ];
     if let Some(ui) = ui {
         if let Some(mode) = ui.mode_label() {

@@ -6,7 +6,11 @@ use agent_client_protocol::schema::v1::{
 use serde::{Deserialize, Serialize};
 use serenity::all::{Context, CreateMessage, EditMessage, GenericChannelId, MessageId};
 
-use crate::{Bot, BotResult, acp::RenderUpdate, db::RenderRow};
+use crate::{
+    Bot, BotResult,
+    acp::RenderUpdate,
+    db::{RenderRow, RenderSourceKey, TurnNumber},
+};
 
 /// Maximum content length for a normal Discord message.
 const MESSAGE_LIMIT: usize = 2000;
@@ -160,7 +164,7 @@ impl Bot {
         &self,
         ctx: &Context,
         thread: GenericChannelId,
-        turn: u64,
+        turn: TurnNumber,
         chunks: &[ContentChunk],
         thought: bool,
         replay: bool,
@@ -170,9 +174,9 @@ impl Bot {
         // Chunks without one fall back to the live turn's stream; a replayed
         // chunk without an id cannot be deduplicated and is dropped.
         let key = match chunks.first().and_then(|chunk| chunk.message_id.as_ref()) {
-            Some(id) => format!("msg:{id}"),
+            Some(id) => RenderSourceKey::new(format!("msg:{id}")),
             None if replay => return Ok(()),
-            None => format!("turn:{turn}:response"),
+            None => RenderSourceKey::new(format!("turn:{turn}:response")),
         };
         let row = self.db.render(thread, &key)?;
         if replay && row.is_some() {
@@ -230,7 +234,7 @@ impl Bot {
         call: ToolCall,
     ) -> BotResult {
         let call_id = call.tool_call_id.to_string();
-        let key = format!("tool:{call_id}");
+        let key = RenderSourceKey::new(format!("tool:{call_id}"));
         let mut row = self.db.render(thread, &key)?.unwrap_or_else(|| RenderRow {
             source_key: key,
             discord_message_ids: vec![],
@@ -259,7 +263,7 @@ impl Bot {
             .expect("tool update batch is non-empty")
             .tool_call_id
             .to_string();
-        let key = format!("tool:{call_id}");
+        let key = RenderSourceKey::new(format!("tool:{call_id}"));
         let mut row = self.db.render(thread, &key)?.unwrap_or_else(|| RenderRow {
             source_key: key,
             discord_message_ids: vec![],
@@ -294,7 +298,7 @@ impl Bot {
             .get("sessionUpdate")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("update");
-        let key = format!("metadata:{kind}");
+        let key = RenderSourceKey::new(format!("metadata:{kind}"));
         let mut row = self.db.render(thread, &key)?.unwrap_or_else(|| RenderRow {
             source_key: key,
             discord_message_ids: vec![],

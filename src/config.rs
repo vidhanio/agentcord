@@ -7,8 +7,9 @@ use std::{
 };
 
 use config::{Config as Settings, File, FileFormat, Value, ValueKind};
+use nutype::nutype;
 use serde::Deserialize;
-use serenity::all::{ChannelId, GuildId, UserId};
+use serenity::all::{ChannelId, EmojiId, GuildId, UserId};
 
 use crate::{BotError, BotResult};
 
@@ -16,6 +17,25 @@ use crate::{BotError, BotResult};
 const DISCORD_FORUM_TAG_LIMIT: usize = 20;
 /// Maximum options Discord permits in a select component.
 const DISCORD_SELECT_LIMIT: usize = 25;
+
+/// Stable configuration key identifying one ACP agent.
+#[nutype(derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Display,
+    AsRef,
+    Deref,
+    Borrow,
+    From,
+    Serialize,
+    Deserialize
+))]
+pub struct AgentKey(String);
 
 /// Complete configuration for one Agentcord process.
 #[derive(Clone, Debug, Deserialize)]
@@ -25,7 +45,7 @@ pub struct Config {
     /// Project path resolution settings.
     pub projects: ProjectsConfig,
     /// Configured ACP agents keyed by stable identifier.
-    pub agents: BTreeMap<String, AgentConfig>,
+    pub agents: BTreeMap<AgentKey, AgentConfig>,
     /// Permission-response behavior.
     #[serde(default)]
     pub permissions: PermissionsConfig,
@@ -88,7 +108,7 @@ pub enum TagEmoji {
     /// A guild-specific custom emoji.
     Custom {
         /// Discord emoji snowflake.
-        id: u64,
+        id: EmojiId,
         /// Whether Discord should render the custom emoji as animated.
         #[serde(default)]
         animated: bool,
@@ -195,7 +215,7 @@ impl Config {
                     "agent `{key}` has an empty tag emoji"
                 )));
             }
-            if matches!(agent.emoji, TagEmoji::Custom { id: 0, .. }) {
+            if matches!(agent.emoji, TagEmoji::Custom { id, .. } if id.get() == 0) {
                 return Err(BotError::Config(format!(
                     "agent `{key}` has an invalid custom emoji id"
                 )));
