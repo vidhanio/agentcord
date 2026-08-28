@@ -5,6 +5,7 @@ use agent_client_protocol::schema::v1::{
 };
 use serde::{Deserialize, Serialize};
 use serenity::all::{Context, CreateMessage, EditMessage, GenericChannelId, MessageId};
+use text_splitter::{ChunkConfig, MarkdownSplitter};
 
 use crate::{
     Bot, BotResult,
@@ -431,11 +432,12 @@ fn render_tool_text(state: &serde_json::Value) -> String {
         .get("status")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("pending");
+    let status = tool_status_suffix(status);
     let name = tool_label(kind);
     // The command fence carries an execute call's subject, so its header
     // stays on the generic name instead of repeating the command.
     let header = if kind == "execute" {
-        format!("{} **{name}** · {status}", tool_emoji(kind))
+        format!("{} **{name}**{status}", tool_emoji(kind))
     } else {
         let title = state
             .get("title")
@@ -445,8 +447,8 @@ fn render_tool_text(state: &serde_json::Value) -> String {
             .filter(|title| !title.replace('_', " ").eq_ignore_ascii_case(&name))
             .map(header_title);
         title.map_or_else(
-            || format!("{} **{name}** · {status}", tool_emoji(kind)),
-            |title| format!("{} **{name}** {title} · {status}", tool_emoji(kind)),
+            || format!("{} **{name}**{status}", tool_emoji(kind)),
+            |title| format!("{} **{name}** {title}{status}", tool_emoji(kind)),
         )
     };
     let body = match kind {
@@ -455,6 +457,17 @@ fn render_tool_text(state: &serde_json::Value) -> String {
         _ => render_tool_content(state),
     };
     join_header_body(&header, &body)
+}
+
+/// Formats the compact state suffix shown on an active tool call.
+fn tool_status_suffix(status: &str) -> String {
+    if status.eq_ignore_ascii_case("completed") || status.trim().is_empty() {
+        String::new()
+    } else if status.eq_ignore_ascii_case("pending") {
+        " · *pending*".to_owned()
+    } else {
+        format!(" · {status}")
+    }
 }
 
 /// Joins a tool header and optional body with consistent spacing.
@@ -716,11 +729,223 @@ fn keep_tail(value: &str, limit: usize, marker: &str) -> String {
 }
 
 #[must_use]
-/// Splits text into Discord-sized chunks without splitting Unicode characters.
+/// Splits Markdown into Discord-sized semantic chunks without breaking fences.
 pub fn split_message(value: &str, limit: usize) -> Vec<String> {
     if value.is_empty() {
         return vec![String::new()];
     }
+    if limit == 0 {
+        return vec![String::new()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for segment in markdown_segments(value) {
+        match segment {
+            MarkdownSegment::Text(text) => {
+                append_markdown_text(&text, &mut current, &mut chunks, limit);
+            }
+            MarkdownSegment::Code(block) => {
+                append_code_block(&block, &mut current, &mut chunks, limit);
+            }
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+/// A Markdown region that can be packed independently of fenced code.
+enum MarkdownSegment {
+    /// Plain Markdown text to split semantically.
+    Text(String),
+    /// A complete fenced code block, including its delimiters.
+    Code(FencedCodeBlock),
+}
+
+/// The parts of one fenced code block needed to recreate complete chunks.
+struct FencedCodeBlock {
+    /// Opening fence and optional language info.
+    opening: String,
+    /// Code between the opening and closing fences.
+    body: String,
+    /// Closing fence line.
+    closing: String,
+}
+
+/// Fence marker metadata used while scanning Markdown lines.
+#[derive(Clone, Copy)]
+struct Fence {
+    /// Backtick or tilde marker.
+    marker: char,
+    /// Number of marker characters in the opening fence.
+    length: usize,
+}
+
+/// Splits Markdown into plain regions and complete fenced code blocks.
+fn markdown_segments(value: &str) -> Vec<MarkdownSegment> {
+    let mut segments = Vec::new();
+    let mut plain_start = 0;
+    let mut line_start = 0;
+    let mut open = None;
+
+    while line_start < value.len() {
+        let line_end = value[line_start..]
+            .find('\n')
+            .map_or(value.len(), |offset| line_start + offset + 1);
+        let line = &value[line_start..line_end];
+        if let Some((start, fence, body_start)) = open {
+            if is_closing_fence(line, fence) {
+                if plain_start < start {
+                    segments.push(MarkdownSegment::Text(value[plain_start..start].to_owned()));
+                }
+                segments.push(MarkdownSegment::Code(FencedCodeBlock {
+                    opening: value[start..body_start].to_owned(),
+                    body: value[body_start..line_start].to_owned(),
+                    closing: line.to_owned(),
+                }));
+                plain_start = line_end;
+                open = None;
+            }
+        } else if let Some(fence) = opening_fence(line) {
+            open = Some((line_start, fence, line_end));
+        }
+        line_start = line_end;
+    }
+
+    if let Some((start, fence, body_start)) = open {
+        if plain_start < start {
+            segments.push(MarkdownSegment::Text(value[plain_start..start].to_owned()));
+        }
+        let mut closing = fence.marker.to_string().repeat(fence.length);
+        closing.push('\n');
+        segments.push(MarkdownSegment::Code(FencedCodeBlock {
+            opening: value[start..body_start].to_owned(),
+            body: value[body_start..].to_owned(),
+            closing,
+        }));
+        plain_start = value.len();
+    }
+
+    if plain_start < value.len() {
+        segments.push(MarkdownSegment::Text(value[plain_start..].to_owned()));
+    }
+    segments
+}
+
+/// Identifies a fenced-code opening line with a CommonMark-compatible indent.
+fn opening_fence(line: &str) -> Option<Fence> {
+    let trimmed = line.trim_start_matches(' ');
+    let marker = trimmed.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+    let length = trimmed
+        .chars()
+        .take_while(|character| *character == marker)
+        .count();
+    (length >= 3).then_some(Fence { marker, length })
+}
+
+/// Checks whether a line closes a fence of the same marker and length.
+fn is_closing_fence(line: &str, fence: Fence) -> bool {
+    let trimmed = line.trim_start_matches(' ');
+    let length = trimmed
+        .chars()
+        .take_while(|character| *character == fence.marker)
+        .count();
+    length >= fence.length && trimmed[length..].trim().is_empty()
+}
+
+/// Splits plain Markdown with text-splitter's semantic boundaries.
+fn append_markdown_text(text: &str, current: &mut String, chunks: &mut Vec<String>, limit: usize) {
+    let splitter = MarkdownSplitter::new(ChunkConfig::new(limit).with_trim(false));
+    let mut emitted = false;
+    for chunk in splitter.chunks(text) {
+        emitted = true;
+        append_piece(chunk, current, chunks, limit);
+    }
+    if !emitted && !text.is_empty() {
+        append_piece(text, current, chunks, limit);
+    }
+}
+
+/// Packs one complete code block or its complete fenced fragments.
+fn append_code_block(
+    block: &FencedCodeBlock,
+    current: &mut String,
+    chunks: &mut Vec<String>,
+    limit: usize,
+) {
+    let code_chunks = fenced_code_chunks(block, limit);
+    if code_chunks.len() == 1 {
+        append_piece(&code_chunks[0], current, chunks, limit);
+        return;
+    }
+
+    if !current.is_empty() {
+        chunks.push(std::mem::take(current));
+    }
+    for code in code_chunks {
+        if !current.is_empty() {
+            chunks.push(std::mem::take(current));
+        }
+        *current = code;
+    }
+}
+
+/// Produces complete fenced messages for an oversized code block.
+fn fenced_code_chunks(block: &FencedCodeBlock, limit: usize) -> Vec<String> {
+    let opening = ensure_line_end(&block.opening);
+    let closing = block.closing.clone();
+    let whole = format!("{opening}{}{closing}", block.body);
+    if whole.chars().count() <= limit {
+        return vec![whole];
+    }
+
+    let overhead = opening.chars().count() + closing.chars().count() + 1;
+    if overhead >= limit {
+        return vec![cap(&whole, limit)];
+    }
+    let body_limit = limit - overhead;
+    let splitter = MarkdownSplitter::new(ChunkConfig::new(body_limit).with_trim(false));
+    let body_chunks = splitter.chunks(&block.body).collect::<Vec<_>>();
+    if body_chunks.is_empty() {
+        return vec![whole];
+    }
+    body_chunks
+        .into_iter()
+        .map(|body| {
+            let mut chunk = opening.clone();
+            chunk.push_str(body);
+            if !chunk.ends_with('\n') {
+                chunk.push('\n');
+            }
+            chunk.push_str(&closing);
+            chunk
+        })
+        .collect()
+}
+
+/// Appends one semantic piece or falls back to Unicode-safe hard splitting.
+fn append_piece(piece: &str, current: &mut String, chunks: &mut Vec<String>, limit: usize) {
+    if piece.chars().count() > limit {
+        for chunk in hard_split(piece, limit) {
+            append_piece(&chunk, current, chunks, limit);
+        }
+    } else if current.chars().count() + piece.chars().count() <= limit {
+        current.push_str(piece);
+    } else {
+        if !current.is_empty() {
+            chunks.push(std::mem::take(current));
+        }
+        current.push_str(piece);
+    }
+}
+
+/// Splits an unavoidable oversized fragment without breaking Unicode.
+fn hard_split(value: &str, limit: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
     for character in value.chars() {
@@ -733,6 +958,15 @@ pub fn split_message(value: &str, limit: usize) -> Vec<String> {
         chunks.push(current);
     }
     chunks
+}
+
+/// Ensures a fence opener is separated from its body by a line break.
+fn ensure_line_end(value: &str) -> String {
+    if value.ends_with('\n') {
+        value.to_owned()
+    } else {
+        format!("{value}\n")
+    }
 }
 
 /// Caps text to a Unicode-safe limit and appends an ellipsis.
@@ -762,7 +996,7 @@ mod tests {
             "content": [{"type": "text", "text": "fn main() {}"}]
         });
         let text = render_tool_text(&state);
-        assert_eq!(text, "📖 **read** `src/lib.rs` · completed\nfn main() {}");
+        assert_eq!(text, "📖 **read** `src/lib.rs`\nfn main() {}");
     }
 
     #[test]
@@ -770,7 +1004,7 @@ mod tests {
     fn headers_without_a_title_show_only_the_kind_name() {
         let state = json!({"toolCallId": "tc_1", "kind": "switch_mode", "status": "pending"});
         let text = render_tool_text(&state);
-        assert_eq!(text, "🔁 **switch mode** · pending");
+        assert_eq!(text, "🔁 **switch mode** · *pending*");
     }
 
     #[test]
@@ -782,7 +1016,7 @@ mod tests {
             "kind": "switch_mode",
             "status": "pending"
         });
-        assert_eq!(render_tool_text(&state), "🔁 **switch mode** · pending");
+        assert_eq!(render_tool_text(&state), "🔁 **switch mode** · *pending*");
     }
 
     #[test]
@@ -794,14 +1028,11 @@ mod tests {
             "kind": "search",
             "status": "completed"
         });
-        assert_eq!(
-            render_tool_text(&state),
-            "🔍 **search** apply patch · completed"
-        );
+        assert_eq!(render_tool_text(&state), "🔍 **search** apply patch");
         state["title"] = json!("~/Projects/agentcord/src");
         assert_eq!(
             render_tool_text(&state),
-            "🔍 **search** `~/Projects/agentcord/src` · completed"
+            "🔍 **search** `~/Projects/agentcord/src`"
         );
     }
 
@@ -819,7 +1050,7 @@ mod tests {
             ]
         });
         let text = render_tool_text(&state);
-        assert!(text.starts_with("✏️ **edit** apply patch · completed\n```diff\n"));
+        assert!(text.starts_with("✏️ **edit** apply patch\n```diff\n"));
         assert!(text.contains("--- /dev/null\n+++ b//tmp/new.rs\n+fn a() {}\n"));
         assert!(text.contains("--- a//tmp/old.rs\n+++ b//tmp/old.rs\n-fn b() {}\n+fn c() {}\n"));
     }
@@ -837,7 +1068,7 @@ mod tests {
             "rawOutput": {"stdout": output}
         });
         let text = render_tool_text(&state);
-        assert!(text.starts_with("⚙️ **execute** · completed\n```sh\ncargo test\n```"));
+        assert!(text.starts_with("⚙️ **execute**\n```sh\ncargo test\n```"));
         assert!(text.contains("```ansi\n… earlier output omitted …\n"));
         assert!(text.ends_with("\n```"));
     }
@@ -855,7 +1086,7 @@ mod tests {
         });
         assert_eq!(
             render_tool_text(&state),
-            "⚙️ **execute** · completed\n```sh\ncargo test\n```\n```ansi\nok\n```"
+            "⚙️ **execute**\n```sh\ncargo test\n```\n```ansi\nok\n```"
         );
     }
 
@@ -900,6 +1131,74 @@ mod tests {
         let text = truncate_tool_call(&render_tool_text(&state));
         assert_eq!(text.chars().count(), MESSAGE_LIMIT);
         assert!(text.ends_with("… tool call truncated …"));
+    }
+
+    #[test]
+    /// Splits long Markdown at semantic boundaries while preserving its text.
+    fn markdown_splits_at_boundaries_without_losing_text() {
+        let text = "First sentence is here. Second sentence is here.\n\nA new paragraph follows.";
+        let chunks = split_message(text, 32);
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 32));
+        assert_eq!(chunks.concat(), text);
+        assert!(chunks[0].trim_end().ends_with('.'));
+    }
+
+    #[test]
+    /// Keeps a fenced code block complete when surrounding Markdown is split.
+    fn code_blocks_move_to_a_new_message_before_splitting() {
+        let text = "intro\n\n```rust\nfn one() {}\n```\n\noutro";
+        let chunks = split_message(text, 32);
+        assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 32));
+        assert_eq!(chunks.concat(), text);
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.contains("```rust\nfn one() {}\n```"))
+        );
+        assert!(
+            chunks
+                .iter()
+                .filter(|chunk| chunk.contains("```"))
+                .all(|chunk| chunk.matches("```").count() == 2)
+        );
+    }
+
+    #[test]
+    /// Reopens oversized fences so every code-message fragment stays valid.
+    fn oversized_code_blocks_are_split_into_complete_fences() {
+        let body = "fn one() {}\n".repeat(20);
+        let text = format!("before\n```rust\n{body}```\nafter");
+        let chunks = split_message(&text, 60);
+        assert!(chunks.len() > 2);
+        assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 60));
+        let fenced = chunks
+            .iter()
+            .filter(|chunk| chunk.contains("```"))
+            .collect::<Vec<_>>();
+        assert!(
+            fenced.iter().all(|chunk| {
+                chunk.starts_with("```rust\n") && chunk.matches("```").count() == 2
+            })
+        );
+        assert!(chunks.last().is_some_and(|chunk| chunk.contains("after")));
+    }
+
+    #[test]
+    /// Keeps the thinking-message italics around every fenced fragment.
+    fn thinking_code_blocks_keep_italics_per_message() {
+        let body = "let answer = 42;\n".repeat(20);
+        let text = format!("```rust\n{body}```");
+        let chunks = split_message(&text, 60)
+            .into_iter()
+            .map(|chunk| format!("*{chunk}*"))
+            .collect::<Vec<_>>();
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.starts_with('*') && chunk.ends_with('*'))
+        );
+        assert!(chunks.iter().all(|chunk| chunk.matches("```").count() == 2));
     }
 
     #[test]
