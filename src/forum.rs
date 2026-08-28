@@ -355,13 +355,13 @@ fn starter_message(
     ];
     if let Some(ui) = ui {
         if let Some(mode) = ui.mode_label() {
-            segments.push(format!("mode {}", escape_inline(&mode)));
+            segments.push(format!("mode `{}`", escape_inline(&mode)));
         }
         if let Some(model) = ui.config_label(&SessionConfigOptionCategory::Model) {
-            segments.push(format!("model {}", escape_inline(&model)));
+            segments.push(format!("model `{}`", escape_inline(&model)));
         }
         if let Some(thought) = ui.config_label(&SessionConfigOptionCategory::ThoughtLevel) {
-            segments.push(format!("thought {}", escape_inline(&thought)));
+            segments.push(format!("thought `{}`", escape_inline(&thought)));
         }
     }
     if let Some(usage) = usage {
