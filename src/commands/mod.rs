@@ -5,11 +5,14 @@ use tracing::warn;
 
 use crate::{Bot, BotError};
 
+/// Maximum number of choices Discord accepts in one autocomplete response.
 const CHOICE_LIMIT: usize = 25;
 
 /// Serenity framework adapter around the Poise command set.
 pub struct BotFramework {
+    /// Poise framework that parses and dispatches slash commands.
     poise: poise::Framework<Bot, BotError>,
+    /// Guild where the commands are registered.
     guild_id: serenity::GuildId,
 }
 
@@ -29,10 +32,12 @@ pub fn framework(bot: &Bot) -> BotFramework {
 
 #[serenity::async_trait]
 impl serenity::Framework for BotFramework {
+    /// Initializes Poise with the Discord client.
     async fn init(&mut self, client: &serenity::Client) {
         self.poise.init(client).await;
     }
 
+    /// Registers commands on ready and forwards all gateway events to Poise.
     async fn dispatch(&self, context: &serenity::Context, event: &serenity::FullEvent) {
         if let serenity::FullEvent::Ready { data_about_bot, .. } = event {
             context

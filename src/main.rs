@@ -14,6 +14,7 @@ struct Cli {
 }
 
 #[tokio::main]
+/// Loads configuration, initializes logging, and starts the Discord client.
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();

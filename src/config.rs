@@ -40,7 +40,10 @@ const DISCORD_SELECT_LIMIT: usize = 25;
     Serialize,
     Deserialize
 ))]
-pub struct AgentKey(String);
+pub struct AgentKey(
+    /// Stable text key used to select the configured agent.
+    String,
+);
 
 /// Complete configuration for one Agentcord process.
 #[derive(Clone, Deserialize)]
@@ -394,6 +397,7 @@ mod tests {
 
     use super::{AgentKey, Config, Timeouts, config_path, expand_string, expand_value, state_path};
 
+    /// Returns the smallest valid configuration used by parser tests.
     fn minimal_config() -> &'static str {
         r#"
             [discord]
@@ -412,6 +416,7 @@ mod tests {
         "#
     }
 
+    /// Verifies defaults and both supported duration formats.
     #[test]
     fn parses_schema_defaults_and_duration_forms() {
         let config = Config::parse(
@@ -452,6 +457,7 @@ mod tests {
         config.validate().expect("valid configuration");
     }
 
+    /// Verifies environment expansion traverses nested values.
     #[test]
     fn expands_string_leaves_in_nested_tables_and_arrays() {
         let raw = r#"
@@ -477,6 +483,7 @@ mod tests {
         assert_eq!(value["nested"]["more"]["value"], "replacement/suffix");
     }
 
+    /// Verifies expansion is single-pass and preserves invalid placeholders.
     #[test]
     fn expansion_is_single_pass_and_leaves_invalid_placeholders() {
         let expanded = expand_string("${NESTED}-${bad}-${UNFINISHED", &|name| match name {
@@ -486,6 +493,7 @@ mod tests {
         assert_eq!(expanded, "${OTHER}-${bad}-${UNFINISHED");
     }
 
+    /// Verifies validation rejects configurations without agents.
     #[test]
     fn validation_rejects_missing_agents() {
         let mut config = Config::parse(minimal_config()).expect("valid configuration");
@@ -493,6 +501,7 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
+    /// Verifies debug output redacts secret configuration values.
     #[test]
     fn debug_redacts_discord_and_agent_environment_secrets() {
         let mut config = Config::parse(minimal_config()).expect("valid configuration");
@@ -514,12 +523,15 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
     }
 
+    /// Verifies configuration and state paths stay under their application
+    /// directories.
     #[test]
     fn paths_are_scoped_to_agentcord() {
         assert!(config_path().ends_with("agentcord/config.toml"));
         assert!(state_path().ends_with("agentcord/state.sqlite3"));
     }
 
+    /// Verifies loading a TOML file performs parsing and validation.
     #[test]
     fn load_reads_and_validates_a_toml_file() {
         let suffix = SystemTime::now()

@@ -10,7 +10,9 @@ use crate::{Bot, BotResult, render::split_message};
 /// Display identity used for webhook-authored prompt messages.
 #[derive(Clone, Debug)]
 struct UserProfile {
+    /// Name shown on webhook-authored messages.
     username: String,
+    /// Optional avatar URL copied from the Discord user.
     avatar_url: Option<String>,
 }
 
@@ -86,6 +88,7 @@ impl Bot {
         Ok(())
     }
 
+    /// Finds or creates the forum webhook used for mirrored prompts.
     async fn user_webhook(
         &self,
         context: &serenity::all::Context,

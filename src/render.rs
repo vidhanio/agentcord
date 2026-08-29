@@ -13,6 +13,7 @@ use text_splitter::{ChunkConfig, MarkdownSplitter};
 use crate::{Bot, BotError, BotResult, db::RenderProjection};
 
 /// Discord's maximum normal message length.
+/// Maximum number of Unicode characters Discord accepts in one message.
 const MESSAGE_LIMIT: usize = serenity::constants::MESSAGE_CODE_LIMIT;
 
 /// An ACP update together with the Discord session it belongs to.
@@ -131,6 +132,7 @@ impl Bot {
 /// Renderer-owned state for a text source.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct TextState {
+    /// Complete text accumulated for the current ACP message.
     text: String,
 }
 
@@ -145,6 +147,7 @@ fn source_key(event: &ProjectionEvent) -> Option<(&'static str, String)> {
     }
 }
 
+/// Decodes renderer state, treating an empty value as the type's default.
 fn parse_state<T>(state: &str) -> BotResult<T>
 where
     T: Default + for<'de> Deserialize<'de>,
@@ -157,6 +160,7 @@ where
     }
 }
 
+/// Converts supported ACP content blocks into renderable text.
 fn content_text(content: &ContentBlock) -> String {
     match content {
         ContentBlock::Text(text) => text.text.clone(),
@@ -176,6 +180,7 @@ fn content_text(content: &ContentBlock) -> String {
     }
 }
 
+/// Turns persisted renderer state into bounded Discord message chunks.
 fn render_projection(projection: &RenderProjection) -> BotResult<Vec<String>> {
     let value: serde_json::Value = serde_json::from_str(&projection.state_json)
         .map_err(|error| BotError::Projection(format!("invalid source state: {error}")))?;
@@ -266,9 +271,12 @@ async fn sync_messages(
     Ok(current)
 }
 
+/// Captures progress and the error from a failed Discord synchronization.
 #[derive(Debug)]
 struct SyncFailure {
+    /// Message IDs known to exist after the partial operation.
     message_ids: Vec<MessageId>,
+    /// Discord error that stopped synchronization.
     error: BotError,
 }
 
@@ -289,6 +297,7 @@ pub fn split_message(value: &str, limit: usize) -> Vec<String> {
     }
 }
 
+/// Splits one already Markdown-aware chunk at a hard character boundary.
 fn hard_split(value: &str, limit: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -313,6 +322,7 @@ mod tests {
 
     use super::*;
 
+    /// Wraps an ACP update in a synthetic live projection event.
     fn event(update: SessionUpdate) -> ProjectionEvent {
         ProjectionEvent {
             thread_id: GenericChannelId::new(1),
@@ -322,6 +332,7 @@ mod tests {
         }
     }
 
+    /// Verifies chunks for one ACP message append in order.
     #[test]
     fn text_chunks_accumulate_by_protocol_message_id() {
         let first = event(SessionUpdate::AgentMessageChunk(
@@ -343,6 +354,7 @@ mod tests {
         assert_eq!(state.state_json, r#"{"text":"hello world"}"#);
     }
 
+    /// Verifies replay ignores unkeyed history while live output uses its turn.
     #[test]
     fn unkeyed_replay_is_ignored_but_live_text_uses_the_turn() {
         let mut replay = event(SessionUpdate::AgentMessageChunk(ContentChunk::new(
@@ -360,6 +372,7 @@ mod tests {
         assert_eq!(state.source_id, "turn:2");
     }
 
+    /// Verifies a new ACP message ID starts a separate projection source.
     #[test]
     fn a_new_protocol_message_id_starts_a_new_source() {
         let first = event(SessionUpdate::AgentMessageChunk(
@@ -380,6 +393,7 @@ mod tests {
         assert_eq!(second.state_json, r#"{"text":"second"}"#);
     }
 
+    /// Verifies an identical replay chunk is idempotently ignored.
     #[test]
     fn an_already_rendered_replay_chunk_is_ignored() {
         let live = event(SessionUpdate::AgentMessageChunk(
@@ -397,6 +411,7 @@ mod tests {
         );
     }
 
+    /// Verifies replay deduplication works across multiple chunks.
     #[test]
     fn already_rendered_multi_chunk_replay_is_ignored() {
         let first = event(SessionUpdate::AgentMessageChunk(
@@ -428,6 +443,7 @@ mod tests {
         );
     }
 
+    /// Verifies message splitting respects Unicode boundaries and limits.
     #[test]
     fn message_chunks_are_unicode_safe_and_bounded() {
         let chunks = split_message(&"🙂".repeat(20), 7);
@@ -435,6 +451,7 @@ mod tests {
         assert_eq!(chunks.concat(), "🙂".repeat(20));
     }
 
+    /// Verifies planning edits, appends, and suffix deletions preserves order.
     #[test]
     fn message_plan_preserves_order_when_appending_and_deleting() {
         let previous = vec![MessageId::new(1), MessageId::new(2), MessageId::new(3)];

@@ -69,6 +69,7 @@ pub enum BotError {
 }
 
 impl From<serenity::Error> for BotError {
+    /// Wraps a Serenity error without exposing it as a public dependency type.
     fn from(error: serenity::Error) -> Self {
         Self::Serenity(Box::new(error))
     }
@@ -76,7 +77,10 @@ impl From<serenity::Error> for BotError {
 
 /// Cheaply cloneable handle to the process-wide application state.
 #[derive(Clone)]
-pub struct Bot(Arc<BotState>);
+pub struct Bot(
+    /// Shared application state used by every event and command task.
+    Arc<BotState>,
+);
 
 /// Durable dependencies shared by Agentcord tasks.
 pub struct BotState {
@@ -249,6 +253,7 @@ impl Bot {
 }
 
 impl fmt::Debug for Bot {
+    /// Formats stable state without leaking runtime handles or secrets.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Bot")
@@ -260,6 +265,7 @@ impl fmt::Debug for Bot {
 }
 
 impl fmt::Debug for BotState {
+    /// Formats stable dependencies while omitting synchronization internals.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BotState")
@@ -272,6 +278,7 @@ impl fmt::Debug for BotState {
 
 #[async_trait]
 impl EventHandler for Bot {
+    /// Installs the Discord context and dispatches message events.
     async fn dispatch(&self, context: &Context, event: &FullEvent) {
         let _ = self.0.context.set(context.clone());
         if let FullEvent::Message { new_message, .. } = event
@@ -283,6 +290,7 @@ impl EventHandler for Bot {
 }
 
 impl Bot {
+    /// Handles one gateway message that may be a user prompt.
     async fn handle_message(&self, message: &serenity::all::Message) -> BotResult {
         let context = self.context()?.clone();
         if message.author.id != self.config().discord.allowed_user_id

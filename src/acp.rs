@@ -33,32 +33,42 @@ use tracing::warn;
 
 use crate::{Bot, BotError, BotResult, PromptOrigin, db::SessionRow, render::ProjectionEvent};
 
+/// Maximum number of prompts waiting behind an active turn.
 const COMMAND_QUEUE_CAPACITY: usize = 32;
+/// Maximum number of ACP updates waiting for the renderer.
 const UPDATE_QUEUE_CAPACITY: usize = 128;
+/// Grace period after asking ACP to cancel a timed-out prompt.
 const PROMPT_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
+/// One-shot notification used to stop an actor or report a queue fault.
 #[derive(Debug)]
 struct Signal {
+    /// Atomic state checked before awaiting the notification.
     triggered: AtomicBool,
+    /// Wakes the actor that is waiting for the signal.
     notify: tokio::sync::Notify,
 }
 
 impl Signal {
+    /// Marks the signal and wakes one waiter.
     fn trigger(&self) {
         self.triggered.store(true, Ordering::Release);
         self.notify.notify_one();
     }
 
+    /// Reads whether the signal has already fired.
     fn is_triggered(&self) -> bool {
         self.triggered.load(Ordering::Acquire)
     }
 
+    /// Waits until the signal fires.
     async fn notified(&self) {
         self.notify.notified().await;
     }
 }
 
 impl Default for Signal {
+    /// Creates a signal that has not fired yet.
     fn default() -> Self {
         Self {
             triggered: AtomicBool::new(false),
@@ -69,10 +79,15 @@ impl Default for Signal {
 
 #[derive(Clone, Debug)]
 struct ProjectionState {
+    /// Ordered update queue consumed by the renderer task.
     updates: mpsc::Sender<ProjectionEvent>,
+    /// Current prompt identifier for unkeyed ACP chunks.
     current_turn: Arc<Mutex<String>>,
+    /// Whether the connection is replaying persisted session history.
     replaying: Arc<Mutex<bool>>,
+    /// Signals that the renderer cannot keep up with ACP.
     fault: Arc<Signal>,
+    /// Stops the actor and its ACP connection.
     stop: Arc<Signal>,
 }
 
@@ -104,6 +119,7 @@ impl ProjectionState {
 /// Registry of one actor per persisted Discord session thread.
 #[derive(Debug, Default)]
 pub struct Supervisor {
+    /// One active actor entry per Discord thread.
     actors: ActorRegistry,
 }
 
@@ -138,19 +154,25 @@ pub struct ListedSession {
 
 #[derive(Debug)]
 struct ActorEntry {
+    /// Persisted identity used to reject stale actor reuse.
     row: SessionRow,
+    /// Bounded command queue consumed by the actor.
     sender: mpsc::Sender<SessionCommand>,
+    /// Signal used to stop this actor when its row changes.
     stop: Arc<Signal>,
 }
 
 /// Mutex-backed registry shared by supervisor and actor cleanup tasks.
 #[derive(Debug, Default, Clone)]
-struct ActorRegistry(Arc<Mutex<HashMap<GenericChannelId, ActorEntry>>>);
+struct ActorRegistry {
+    /// Shared map of thread IDs to active actor entries.
+    inner: Arc<Mutex<HashMap<GenericChannelId, ActorEntry>>>,
+}
 
 impl ActorRegistry {
     /// Locks the registry and converts poisoning into the process invariant.
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<GenericChannelId, ActorEntry>> {
-        self.0.lock().expect("ACP actor registry poisoned")
+        self.inner.lock().expect("ACP actor registry poisoned")
     }
 }
 
@@ -299,6 +321,7 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Returns an existing matching actor or starts one for this session row.
     fn sender(&self, bot: &Bot, row: &SessionRow) -> mpsc::Sender<SessionCommand> {
         let mut actors = self.actors();
         if let Some(entry) = actors.get(&row.thread_id)
@@ -351,6 +374,7 @@ impl Supervisor {
         sender
     }
 
+    /// Removes an actor only if the sender still identifies the current entry.
     fn remove(&self, thread: GenericChannelId, sender: &mpsc::Sender<SessionCommand>) {
         let mut actors = self.actors();
         if actors
@@ -362,15 +386,21 @@ impl Supervisor {
     }
 }
 
+/// Command delivered to a session actor.
 #[derive(Debug)]
 enum SessionCommand {
+    /// Sends one user prompt after optionally mirroring it to Discord.
     Prompt {
+        /// Prompt text sent to ACP.
         text: String,
+        /// Identifier used for unkeyed streamed output.
         turn_id: String,
+        /// Whether the prompt is already visible in Discord.
         origin: PromptOrigin,
     },
 }
 
+/// Runs the renderer task and one ACP connection for a persisted session.
 async fn run_actor(
     bot: Bot,
     row: SessionRow,
@@ -415,6 +445,7 @@ async fn run_actor(
     result
 }
 
+/// Initializes an ACP connection, restores the session, and drains commands.
 async fn connect_agent(
     bot: Bot,
     row: SessionRow,
@@ -509,6 +540,7 @@ async fn connect_agent(
         .await
 }
 
+/// Runs an operation unless the actor is stopped first.
 async fn stop_aware<T>(
     stop: &Signal,
     operation: impl Future<Output = Result<T, agent_client_protocol::Error>>,
@@ -525,6 +557,7 @@ async fn stop_aware<T>(
     }
 }
 
+/// Negotiates ACP v1 and validates the response.
 async fn initialize(
     connection: &ConnectionTo<Agent>,
     timeout: Duration,
@@ -546,7 +579,7 @@ async fn initialize(
     Ok(response)
 }
 
-/// Bounds one request so an unresponsive short-lived connection cannot linger.
+/// Bounds one request so an unresponsive connection cannot linger.
 async fn request_with_timeout<T>(
     timeout: Duration,
     operation: impl Future<Output = Result<T, agent_client_protocol::Error>>,
@@ -592,6 +625,7 @@ impl ListedSession {
     }
 }
 
+/// Processes queued prompts serially on the restored ACP connection.
 async fn run_commands(
     bot: Bot,
     connection: ConnectionTo<Agent>,
@@ -668,6 +702,7 @@ async fn run_commands(
     Ok(())
 }
 
+/// Sends one prompt and enforces timeout/cancellation behavior.
 async fn run_prompt(
     bot: &Bot,
     connection: &ConnectionTo<Agent>,
@@ -744,12 +779,16 @@ async fn run_prompt(
     ))
 }
 
+/// Distinguishes a prompt rejection from a broken ACP connection.
 #[derive(Debug)]
 enum PromptFailure {
+    /// The agent rejected only this prompt.
     Prompt(agent_client_protocol::Error),
+    /// The connection can no longer process this session.
     Connection(agent_client_protocol::Error),
 }
 
+/// Reports an actor failure in its Discord thread when possible.
 async fn notify_failure(bot: &Bot, thread: GenericChannelId, message: String) {
     let Ok(context) = bot.context() else {
         return;

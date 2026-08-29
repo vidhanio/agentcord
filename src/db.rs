@@ -44,11 +44,15 @@ pub struct RenderProjection {
 #[unique(agent, acp)]
 struct Session {
     #[key]
+    /// Discord thread ID stored as text for SQLite portability.
     thread_id: String,
     #[column("agent_key")]
+    /// Configured ACP executable key.
     agent: String,
     #[column("acp_session_id")]
+    /// Opaque ACP session ID.
     acp: String,
+    /// Absolute working directory used by ACP.
     project_path: String,
 }
 
@@ -56,11 +60,16 @@ struct Session {
 #[table = "render_sources"]
 #[key(thread_id, source_kind, source_id)]
 struct RenderSource {
+    /// Owning Discord thread ID.
     thread_id: String,
+    /// Logical source category such as an agent message.
     source_kind: String,
+    /// Stable ID within the source category.
     source_id: String,
+    /// Renderer-owned serialized state.
     state_json: String,
     #[belongs_to(key = thread_id, references = thread_id)]
+    /// Session binding that owns this source.
     session: toasty::Deferred<Session>,
 }
 
@@ -68,22 +77,29 @@ struct RenderSource {
 #[table = "render_messages"]
 #[key(thread_id, source_kind, source_id, position)]
 struct RenderMessage {
+    /// Owning Discord thread ID.
     thread_id: String,
+    /// Logical source category.
     source_kind: String,
+    /// Stable ID within the source category.
     source_id: String,
+    /// Display order within the source.
     position: i64,
     #[unique]
     #[column("message_id")]
+    /// Discord message ID stored as text.
     message: String,
     #[belongs_to(
         key = [thread_id, source_kind, source_id],
         references = [thread_id, source_kind, source_id]
     )]
+    /// Render source that owns this message.
     source: toasty::Deferred<RenderSource>,
 }
 
 /// Toasty-backed access to Agentcord's SQLite state.
 pub struct Db {
+    /// Toasty database handle shared by asynchronous operations.
     inner: toasty::Db,
 }
 
@@ -106,6 +122,7 @@ impl Db {
         Self::connect(&format!("sqlite:{path}"), create_schema).await
     }
 
+    /// Connects to a database and optionally creates its initial schema.
     async fn connect(url: &str, create_schema: bool) -> BotResult<Self> {
         let inner = toasty::Db::builder()
             .models(toasty::models!(Session, RenderSource, RenderMessage))
@@ -310,12 +327,14 @@ impl Db {
     }
 
     #[cfg(test)]
+    /// Opens an isolated in-memory database for persistence tests.
     async fn in_memory() -> BotResult<Self> {
         Self::connect("sqlite::memory:", true).await
     }
 }
 
 impl std::fmt::Debug for Db {
+    /// Omits internal database handles from debug output.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("Db").finish_non_exhaustive()
     }
@@ -324,6 +343,7 @@ impl std::fmt::Debug for Db {
 impl TryFrom<Session> for SessionRow {
     type Error = BotError;
 
+    /// Validates and converts a Toasty model into the public row type.
     fn try_from(session: Session) -> Result<Self, Self::Error> {
         let project_path = PathBuf::from(session.project_path);
         if !project_path.is_absolute() {
@@ -341,6 +361,7 @@ impl TryFrom<Session> for SessionRow {
     }
 }
 
+/// Builds the predicate for one stored render source.
 fn source_filter(thread_id: &str, source_kind: &str, source_id: &str) -> toasty::stmt::Expr<bool> {
     RenderSource::fields()
         .thread_id()
@@ -349,6 +370,7 @@ fn source_filter(thread_id: &str, source_kind: &str, source_id: &str) -> toasty:
         .and(RenderSource::fields().source_id().eq(source_id))
 }
 
+/// Builds the predicate for messages belonging to one render source.
 fn message_source_filter(
     thread_id: &str,
     source_kind: &str,
@@ -361,6 +383,7 @@ fn message_source_filter(
         .and(RenderMessage::fields().source_id().eq(source_id))
 }
 
+/// Parses a persisted Discord snowflake into the requested ID type.
 fn parse_id<T>(value: &str) -> BotResult<T>
 where
     T: From<u64>,
@@ -384,6 +407,7 @@ mod tests {
     use super::{Db, RenderProjection, SessionRow};
     use crate::config::AgentKey;
 
+    /// Builds a valid test session for one synthetic Discord thread.
     fn session(thread: u64) -> SessionRow {
         SessionRow {
             thread_id: GenericChannelId::new(thread),
@@ -393,6 +417,7 @@ mod tests {
         }
     }
 
+    /// Verifies a new database can be reopened with the same schema.
     #[tokio::test]
     async fn opens_a_new_file_and_reuses_its_schema() {
         let suffix = SystemTime::now()
@@ -420,6 +445,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    /// Verifies session persistence and the unique agent/session constraint.
     #[tokio::test]
     async fn restores_sessions_and_enforces_agent_session_uniqueness() {
         let db = Db::in_memory().await.unwrap();
@@ -438,6 +464,7 @@ mod tests {
         assert!(db.insert_session(&duplicate).await.is_err());
     }
 
+    /// Verifies projection replacement preserves state and message order.
     #[tokio::test]
     async fn replaces_projection_state_and_message_order_atomically() {
         let db = Db::in_memory().await.unwrap();
@@ -465,6 +492,7 @@ mod tests {
         );
     }
 
+    /// Verifies deleting a session also deletes its projections.
     #[tokio::test]
     async fn deleting_session_removes_its_projections() {
         let db = Db::in_memory().await.unwrap();
@@ -489,6 +517,7 @@ mod tests {
         );
     }
 
+    /// Verifies relative project paths cannot enter durable state.
     #[tokio::test]
     async fn rejects_relative_project_paths() {
         let db = Db::in_memory().await.unwrap();
