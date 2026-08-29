@@ -23,8 +23,8 @@ The current rewrite implements the first conversation slice:
   bot-authored fallback.
 - ACP session state is restored lazily through `session/load` when a session
   receives a prompt.
-- The allowed user can create a session with `/agent` or import one exposed by
-  an agent's `session/list` with `/import`.
+- The allowed user can create a session through the `/agent` modal or import
+  one exposed by an agent's `session/list` with `/import`.
 
 Permissions and elicitation are deliberately follow-up slices. Session
 controls and richer metadata updates are also still to be added. See

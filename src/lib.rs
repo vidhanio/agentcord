@@ -9,7 +9,7 @@ use agent_client_protocol::schema::v1::SessionId;
 use serenity::all::{
     Context, EventHandler, FullEvent, GatewayIntents, HttpBuilder, Token, async_trait,
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 mod acp;
 mod commands;
@@ -278,13 +278,18 @@ impl fmt::Debug for BotState {
 
 #[async_trait]
 impl EventHandler for Bot {
-    /// Installs the Discord context and dispatches message events.
+    /// Installs the Discord context and dispatches readiness and message
+    /// events.
     async fn dispatch(&self, context: &Context, event: &FullEvent) {
         let _ = self.0.context.set(context.clone());
-        if let FullEvent::Message { new_message, .. } = event
-            && let Err(error) = self.handle_message(new_message).await
-        {
-            warn!(?error, "failed to handle Discord message");
+        match event {
+            FullEvent::Ready { .. } => info!("bot ready"),
+            FullEvent::Message { new_message, .. } => {
+                if let Err(error) = self.handle_message(new_message).await {
+                    warn!(?error, "failed to handle Discord message");
+                }
+            }
+            _ => {}
         }
     }
 }
