@@ -1,8 +1,8 @@
 # Discord projection
 
-This document is the contract for the first end-to-end Agentcord message
-path. It intentionally describes a small projection surface; protocol features
-are added as new update cases instead of making the renderer know about agent
+This document is the contract for the first end-to-end Agentcord message path.
+It intentionally describes a small projection surface; protocol features are
+added as new update cases instead of making the renderer know about agent
 implementations.
 
 ## Responsibilities
@@ -40,18 +40,28 @@ as its source ID; unkeyed replay text is ignored because it cannot be
 distinguished safely from already-rendered history. A replay chunk already
 present in a source is ignored as a small idempotence guard.
 
-## First supported updates
+## Supported updates
 
-The first implementation handles only the update needed for a useful text
+The first implementation handles the updates needed for a useful text
 conversation:
 
 - `agent_message_chunk`: append text to a message source;
+- `agent_thought_chunk`: append internal reasoning to an italicized source;
+- `tool_call` and `tool_call_update`: merge one tool call into a stable source,
+  showing its status, input, output, and file diffs when available;
+- `plan`: replace the current plan source with a Discord checklist; and
 - `user_message_chunk`: ignore it because the Discord-originated message is
   already mirrored.
 
-Thought, tool-call, plan, metadata, and usage updates are intentionally
+Metadata, usage, mode, configuration, and available-command updates are still
 ignored until their Discord semantics are specified. Ignoring an unsupported
 update is observable in tracing but does not terminate the session.
+
+Thoughts, tool calls, and plans use the same source-state and message-ID
+reconciliation as agent messages. A tool update replaces fields supplied by the
+agent while retaining the rest of the call, and each plan update replaces the
+current checklist. Execute output is bounded to its most recent portion so a
+single noisy command cannot consume the entire Discord projection.
 
 The client advertises no filesystem, terminal, permission, or elicitation
 capabilities in this slice. Those request/response flows are separate features

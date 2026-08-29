@@ -3,6 +3,8 @@
 
 [discord]
 bot_token = "${DISCORD_TOKEN}"
+# Discord snowflakes may be TOML integers or quoted strings (use strings for
+# environment-variable expansion).
 guild_id = 1234567890
 allowed_user_id = 1234567890
 forum_channel_id = 1234567890
