@@ -21,9 +21,11 @@ The current rewrite implements the first text-conversation slice:
   bot-authored fallback.
 - ACP session state is restored lazily through `session/load` when a session
   receives a prompt.
+- The allowed user can create a session with `/agent` or import one exposed by
+  an agent's `session/list` with `/import`.
 
-Thoughts, tools, plans, slash commands, permissions, elicitation, and new
-session creation are deliberately follow-up slices. See
+Thoughts, tools, plans, permissions, and elicitation are deliberately
+follow-up slices. See
 [docs/projection.md](docs/projection.md) for the event and persistence
 contract.
 

@@ -57,6 +57,24 @@ The client advertises no filesystem, terminal, permission, or elicitation
 capabilities in this slice. Those request/response flows are separate features
 and must be implemented before the corresponding capabilities are enabled.
 
+## Session creation and import
+
+The allowed user can create or import a binding through the two slash commands
+registered in the configured guild:
+
+- `/agent` resolves and validates a project directory, calls `session/new`,
+  creates and tags a forum post, persists the `(thread, agent, session, cwd)`
+  tuple, and queues the initial prompt as `NeedsMirror`.
+- `/import` calls `session/list` (following ACP cursors), rejects an already
+  imported `(agent, session)` pair, adopts the reported absolute `cwd`, creates
+  and tags the forum post, and persists the binding without sending a prompt.
+
+The current actor starts lazily after the binding is persisted and therefore
+requires `session/load` for newly created sessions as well as imported ones.
+This keeps the actor lifecycle single-purpose and bounded; agents that do not
+advertise `session/load` are rejected by `/agent` because their new sessions
+could not be restored after the startup connection closes.
+
 ## Source and persistence model
 
 One logical source is identified by `(thread_id, source_kind, source_id)`.

@@ -5,12 +5,16 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use agent_client_protocol::schema::v1::SessionId;
 use serenity::all::{
     Context, EventHandler, FullEvent, GatewayIntents, HttpBuilder, Token, async_trait,
 };
 use tracing::warn;
 
 mod acp;
+mod commands;
+mod forum;
+mod projects;
 pub mod render;
 mod webhook;
 
@@ -47,6 +51,9 @@ pub enum BotError {
     /// A filesystem operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// A user supplied command argument is invalid.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
     /// The ACP subprocess or protocol connection failed.
     #[error("ACP error: {0}")]
     Acp(String),
@@ -149,6 +156,96 @@ impl Bot {
             .supervisor
             .prompt(self, &row, text, turn_id, origin)
     }
+
+    /// Creates a new ACP session, binds it to a forum post, and queues its
+    /// initial prompt.
+    pub async fn create_session(
+        &self,
+        agent_key: &config::AgentKey,
+        project: projects::Project,
+        prompt: String,
+    ) -> BotResult<serenity::all::GenericChannelId> {
+        if prompt.trim().is_empty() {
+            return Err(BotError::InvalidRequest("the prompt is empty".into()));
+        }
+        let created = self
+            .state()
+            .supervisor
+            .new_session(self, agent_key, project.path.clone())
+            .await?;
+        let metadata = forum::SessionMetadata {
+            agent_key: agent_key.clone(),
+            project_label: project.label,
+            project_path: project.path,
+            session_id: created.session_id,
+            title: None,
+        };
+        let row = self.create_session_post(&metadata).await?;
+        if let Err(error) = self.db().insert_session(&row).await {
+            let context = self.context()?.clone();
+            let _ = row.thread_id.delete(&context.http, None).await;
+            return Err(error);
+        }
+        self.forward_prompt(
+            row.thread_id,
+            prompt,
+            row.thread_id.to_string(),
+            PromptOrigin::NeedsMirror,
+        )
+        .await?;
+        Ok(row.thread_id)
+    }
+
+    /// Imports an ACP session exposed by `session/list` into a forum post.
+    pub async fn import_session(
+        &self,
+        agent_key: &config::AgentKey,
+        session_id: &SessionId,
+    ) -> BotResult<serenity::all::GenericChannelId> {
+        if session_id.to_string().trim().is_empty() {
+            return Err(BotError::InvalidRequest("the session id is empty".into()));
+        }
+        if let Some(existing) = self.db().session_by_agent(agent_key, session_id).await? {
+            return Err(BotError::InvalidRequest(format!(
+                "this session is already imported in thread {}",
+                existing.thread_id
+            )));
+        }
+        let imported = self
+            .state()
+            .supervisor
+            .inspect_session(self, agent_key, session_id)
+            .await?;
+        if !imported.project_path.is_absolute() {
+            return Err(BotError::InvalidRequest(format!(
+                "agent reported a non-absolute project path `{}`",
+                imported.project_path.display()
+            )));
+        }
+        let project = projects::Project::adopt(&self.config().projects, &imported.project_path);
+        let metadata = forum::SessionMetadata {
+            agent_key: agent_key.clone(),
+            project_label: project.label,
+            project_path: project.path,
+            session_id: imported.session_id,
+            title: imported.title,
+        };
+        let row = self.create_session_post(&metadata).await?;
+        if let Err(error) = self.db().insert_session(&row).await {
+            let context = self.context()?.clone();
+            let _ = row.thread_id.delete(&context.http, None).await;
+            return Err(error);
+        }
+        Ok(row.thread_id)
+    }
+
+    /// Lists externally visible ACP sessions for command autocomplete.
+    pub async fn list_sessions(
+        &self,
+        agent_key: &config::AgentKey,
+    ) -> BotResult<Vec<acp::ListedSession>> {
+        self.state().supervisor.list_sessions(self, agent_key).await
+    }
 }
 
 impl fmt::Debug for Bot {
@@ -229,7 +326,9 @@ pub async fn run(config: Config) -> BotResult {
         Arc::new(http),
         GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT,
     )
-    .event_handler(bot)
+    .event_handler(bot.clone())
+    .framework(Box::new(commands::framework(&bot)))
+    .data(bot)
     .await?;
     client.start().await?;
     Ok(())

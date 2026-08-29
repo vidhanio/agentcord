@@ -14,6 +14,25 @@ struct UserProfile {
     avatar_url: Option<String>,
 }
 
+impl UserProfile {
+    /// Fetches the configured user's guild display name and avatar.
+    async fn fetch(
+        context: &serenity::all::Context,
+        guild: serenity::all::GuildId,
+        user_id: serenity::all::UserId,
+    ) -> Option<Self> {
+        let user = context.http.get_user(user_id).await.ok()?;
+        let name = match context.http.get_member(guild, user_id).await {
+            Ok(member) => member.display_name().to_owned(),
+            Err(_) => user.global_name.as_deref().unwrap_or(&user.name).to_owned(),
+        };
+        Some(Self {
+            username: format!("{name} (via agentcord)"),
+            avatar_url: user.avatar_url(),
+        })
+    }
+}
+
 impl Bot {
     /// Mirrors a prompt as the configured Discord user.
     ///
@@ -23,7 +42,7 @@ impl Bot {
     pub async fn mirror_user_message(&self, thread: GenericChannelId, text: &str) -> BotResult {
         let context = self.context()?.clone();
         let chunks = split_message(text, serenity::constants::MESSAGE_CODE_LIMIT);
-        let profile = user_profile(
+        let profile = UserProfile::fetch(
             &context,
             self.config().discord.guild_id,
             self.config().discord.allowed_user_id,
@@ -115,20 +134,4 @@ impl Bot {
     pub(crate) fn webhook(&self) -> &tokio::sync::Mutex<Option<Webhook>> {
         &self.state().webhook
     }
-}
-
-async fn user_profile(
-    context: &serenity::all::Context,
-    guild: serenity::all::GuildId,
-    user_id: serenity::all::UserId,
-) -> Option<UserProfile> {
-    let user = context.http.get_user(user_id).await.ok()?;
-    let name = match context.http.get_member(guild, user_id).await {
-        Ok(member) => member.display_name().to_owned(),
-        Err(_) => user.global_name.as_deref().unwrap_or(&user.name).to_owned(),
-    };
-    Some(UserProfile {
-        username: format!("{name} (via agentcord)"),
-        avatar_url: user.avatar_url(),
-    })
 }

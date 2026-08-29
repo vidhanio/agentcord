@@ -8,6 +8,7 @@
 use std::{
     collections::HashMap,
     future::Future,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -20,8 +21,9 @@ use agent_client_protocol::{
     schema::{
         ProtocolVersion,
         v1::{
-            ContentBlock, InitializeRequest, InitializeResponse, LoadSessionRequest, PromptRequest,
-            SessionId, SessionNotification,
+            ContentBlock, InitializeRequest, InitializeResponse, ListSessionsRequest,
+            LoadSessionRequest, NewSessionRequest, PromptRequest, SessionId, SessionInfo,
+            SessionNotification,
         },
     },
 };
@@ -74,10 +76,64 @@ struct ProjectionState {
     stop: Arc<Signal>,
 }
 
+impl ProjectionState {
+    /// Returns the current logical turn captured by notification callbacks.
+    fn turn(&self) -> String {
+        self.current_turn
+            .lock()
+            .expect("ACP turn mutex poisoned")
+            .clone()
+    }
+
+    /// Returns whether notifications are still replaying session history.
+    fn is_replaying(&self) -> bool {
+        *self.replaying.lock().expect("ACP replay mutex poisoned")
+    }
+
+    /// Changes the logical turn used for unkeyed notifications.
+    fn set_turn(&self, turn: String) {
+        *self.current_turn.lock().expect("ACP turn mutex poisoned") = turn;
+    }
+
+    /// Marks replay completion after `session/load` responds.
+    fn finish_replay(&self) {
+        *self.replaying.lock().expect("ACP replay mutex poisoned") = false;
+    }
+}
+
 /// Registry of one actor per persisted Discord session thread.
 #[derive(Debug, Default)]
 pub struct Supervisor {
-    actors: Arc<Mutex<HashMap<GenericChannelId, ActorEntry>>>,
+    actors: ActorRegistry,
+}
+
+/// ACP metadata returned while creating a new session.
+#[derive(Clone, Debug)]
+pub struct NewSession {
+    /// Agent-owned session identifier.
+    pub session_id: SessionId,
+}
+
+/// ACP metadata returned while inspecting an existing session.
+#[derive(Clone, Debug)]
+pub struct ImportedSession {
+    /// Agent-owned session identifier.
+    pub session_id: SessionId,
+    /// Working directory reported by the agent.
+    pub project_path: PathBuf,
+    /// Optional title reported by the agent.
+    pub title: Option<String>,
+}
+
+/// Session information exposed by an agent's `session/list` implementation.
+#[derive(Clone, Debug)]
+pub struct ListedSession {
+    /// Agent-owned session identifier.
+    pub session_id: SessionId,
+    /// Working directory reported by the agent.
+    pub project_path: PathBuf,
+    /// Optional title reported by the agent.
+    pub title: Option<String>,
 }
 
 #[derive(Debug)]
@@ -87,7 +143,134 @@ struct ActorEntry {
     stop: Arc<Signal>,
 }
 
+/// Mutex-backed registry shared by supervisor and actor cleanup tasks.
+#[derive(Debug, Default, Clone)]
+struct ActorRegistry(Arc<Mutex<HashMap<GenericChannelId, ActorEntry>>>);
+
+impl ActorRegistry {
+    /// Locks the registry and converts poisoning into the process invariant.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<GenericChannelId, ActorEntry>> {
+        self.0.lock().expect("ACP actor registry poisoned")
+    }
+}
+
 impl Supervisor {
+    /// Locks the actor registry for one short synchronous mutation.
+    fn actors(&self) -> std::sync::MutexGuard<'_, HashMap<GenericChannelId, ActorEntry>> {
+        self.actors.lock()
+    }
+
+    /// Clones the configured executable for one short-lived ACP operation.
+    fn configured_agent(
+        bot: &Bot,
+        agent_key: &crate::config::AgentKey,
+    ) -> BotResult<crate::config::AgentConfig> {
+        bot.config()
+            .agents
+            .get(agent_key)
+            .cloned()
+            .ok_or_else(|| BotError::InvalidRequest(format!("unknown agent `{agent_key}`")))
+    }
+
+    /// Converts a protocol error into Agentcord's public error type.
+    fn acp_error(error: &agent_client_protocol::Error) -> BotError {
+        BotError::Acp(error.to_string())
+    }
+
+    /// Creates a new ACP session in a short-lived startup connection.
+    pub async fn new_session(
+        &self,
+        bot: &Bot,
+        agent_key: &crate::config::AgentKey,
+        project_path: PathBuf,
+    ) -> BotResult<NewSession> {
+        let agent = Self::configured_agent(bot, agent_key)?;
+        let timeout = bot.config().timeouts.startup;
+        let process = AcpAgent::new(
+            AcpAgentConfig::new(agent.command)
+                .args(agent.args)
+                .envs(agent.env),
+        );
+        let response = Client
+            .builder()
+            .name("agentcord")
+            .connect_with(process, |connection: ConnectionTo<Agent>| async move {
+                let initialized = initialize(&connection, timeout).await?;
+                if !initialized.agent_capabilities.load_session {
+                    return Err(agent_client_protocol::Error::invalid_request().data(
+                        "agent does not advertise session/load; newly created sessions cannot be restored",
+                    ));
+                }
+                request_with_timeout(
+                    timeout,
+                    connection
+                        .send_request(NewSessionRequest::new(project_path))
+                        .block_task(),
+                    "ACP session/new timed out",
+                )
+                .await
+            })
+            .await
+            .map_err(|error| Self::acp_error(&error))?;
+        Ok(NewSession {
+            session_id: response.session_id,
+        })
+    }
+
+    /// Lists all sessions exposed by an ACP agent, following pagination.
+    pub async fn list_sessions(
+        &self,
+        bot: &Bot,
+        agent_key: &crate::config::AgentKey,
+    ) -> BotResult<Vec<ListedSession>> {
+        let agent = Self::configured_agent(bot, agent_key)?;
+        let timeout = bot.config().timeouts.startup;
+        let process = AcpAgent::new(
+            AcpAgentConfig::new(agent.command)
+                .args(agent.args)
+                .envs(agent.env),
+        );
+        Client
+            .builder()
+            .name("agentcord")
+            .connect_with(process, |connection: ConnectionTo<Agent>| async move {
+                let initialized = initialize(&connection, timeout).await?;
+                if initialized
+                    .agent_capabilities
+                    .session_capabilities
+                    .list
+                    .is_none()
+                {
+                    return Err(agent_client_protocol::Error::invalid_request()
+                        .data("agent does not advertise session/list"));
+                }
+                ListedSession::fetch_all(&connection, timeout).await
+            })
+            .await
+            .map_err(|error| Self::acp_error(&error))
+    }
+
+    /// Looks up one external session before it is imported into Discord.
+    pub async fn inspect_session(
+        &self,
+        bot: &Bot,
+        agent_key: &crate::config::AgentKey,
+        session_id: &SessionId,
+    ) -> BotResult<ImportedSession> {
+        let sessions = self.list_sessions(bot, agent_key).await?;
+        sessions
+            .into_iter()
+            .find(|session| session.session_id == *session_id)
+            .map(|session| ImportedSession {
+                session_id: session.session_id,
+                project_path: session.project_path,
+                title: session.title,
+            })
+            .ok_or_else(|| {
+                BotError::InvalidRequest(format!("agent does not know session `{session_id}`"))
+            })
+    }
+
     /// Queues a prompt for a persisted session, starting its actor on demand.
     pub fn prompt(
         &self,
@@ -117,7 +300,7 @@ impl Supervisor {
     }
 
     fn sender(&self, bot: &Bot, row: &SessionRow) -> mpsc::Sender<SessionCommand> {
-        let mut actors = self.actors.lock().expect("ACP actor registry poisoned");
+        let mut actors = self.actors();
         if let Some(entry) = actors.get(&row.thread_id)
             && entry.row == *row
         {
@@ -135,7 +318,7 @@ impl Supervisor {
         let actor_stop = Arc::clone(&stop);
         let failure_stop = Arc::clone(&stop);
         let actor_row = row.clone();
-        let registry = Arc::clone(&self.actors);
+        let registry = self.actors.clone();
         tokio::spawn(async move {
             if let Err(error) = run_actor(actor_bot, actor_row.clone(), commands, actor_stop).await
             {
@@ -149,7 +332,7 @@ impl Supervisor {
                 }
                 warn!(?error, thread = ?actor_row.thread_id, "ACP session actor stopped");
             }
-            let mut actors = registry.lock().expect("ACP actor registry poisoned");
+            let mut actors = registry.lock();
             if actors
                 .get(&actor_row.thread_id)
                 .is_some_and(|current| current.sender.same_channel(&actor_sender))
@@ -169,7 +352,7 @@ impl Supervisor {
     }
 
     fn remove(&self, thread: GenericChannelId, sender: &mpsc::Sender<SessionCommand>) {
-        let mut actors = self.actors.lock().expect("ACP actor registry poisoned");
+        let mut actors = self.actors();
         if actors
             .get(&thread)
             .is_some_and(|current| current.sender.same_channel(sender))
@@ -239,10 +422,9 @@ async fn connect_agent(
     mut commands: mpsc::Receiver<SessionCommand>,
     projection: ProjectionState,
 ) -> Result<(), agent_client_protocol::Error> {
-    let callback_updates = projection.updates.clone();
-    let callback_turn = Arc::clone(&projection.current_turn);
-    let callback_replay = Arc::clone(&projection.replaying);
-    let callback_fault = Arc::clone(&projection.fault);
+    let callback_projection = projection.clone();
+    let callback_updates = callback_projection.updates.clone();
+    let callback_fault = callback_projection.fault.clone();
     let expected_session = row.session_id.clone();
     let thread = row.thread_id;
 
@@ -260,11 +442,8 @@ async fn connect_agent(
                     );
                     return Ok(());
                 }
-                let turn_id = callback_turn
-                    .lock()
-                    .expect("ACP turn mutex poisoned")
-                    .clone();
-                let replay = *callback_replay.lock().expect("ACP replay mutex poisoned");
+                let turn_id = callback_projection.turn();
+                let replay = callback_projection.is_replaying();
                 callback_updates
                     .try_send(ProjectionEvent {
                         thread_id: thread,
@@ -316,10 +495,7 @@ async fn connect_agent(
                 return Err(agent_client_protocol::Error::internal_error()
                     .data("ACP projection queue overflowed during session/load"));
             }
-            *projection
-                .replaying
-                .lock()
-                .expect("ACP replay mutex poisoned") = false;
+            projection.finish_replay();
             run_commands(
                 bot,
                 connection,
@@ -370,6 +546,52 @@ async fn initialize(
     Ok(response)
 }
 
+/// Bounds one request so an unresponsive short-lived connection cannot linger.
+async fn request_with_timeout<T>(
+    timeout: Duration,
+    operation: impl Future<Output = Result<T, agent_client_protocol::Error>>,
+    message: &'static str,
+) -> Result<T, agent_client_protocol::Error> {
+    tokio::time::timeout(timeout, operation)
+        .await
+        .map_err(|_| agent_client_protocol::Error::internal_error().data(message))?
+}
+
+impl ListedSession {
+    /// Follows ACP session/list pagination and converts each result.
+    async fn fetch_all(
+        connection: &ConnectionTo<Agent>,
+        timeout: Duration,
+    ) -> Result<Vec<Self>, agent_client_protocol::Error> {
+        let mut sessions = Vec::new();
+        let mut cursor = None;
+        loop {
+            let response = request_with_timeout(
+                timeout,
+                connection
+                    .send_request(ListSessionsRequest::new().cursor(cursor.take()))
+                    .block_task(),
+                "ACP session/list timed out",
+            )
+            .await?;
+            sessions.extend(response.sessions.into_iter().map(Self::from_info));
+            let Some(next_cursor) = response.next_cursor else {
+                return Ok(sessions);
+            };
+            cursor = Some(next_cursor);
+        }
+    }
+
+    /// Converts one ACP session-list record into the import representation.
+    fn from_info(session: SessionInfo) -> Self {
+        Self {
+            session_id: session.session_id,
+            project_path: session.cwd,
+            title: session.title,
+        }
+    }
+}
+
 async fn run_commands(
     bot: Bot,
     connection: ConnectionTo<Agent>,
@@ -406,10 +628,7 @@ async fn run_commands(
         else {
             break;
         };
-        *projection
-            .current_turn
-            .lock()
-            .expect("ACP turn mutex poisoned") = turn_id;
+        projection.set_turn(turn_id);
         if origin == PromptOrigin::NeedsMirror
             && let Err(error) = bot.mirror_user_message(thread, &text).await
         {

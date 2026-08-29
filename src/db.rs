@@ -164,6 +164,26 @@ impl Db {
             .collect()
     }
 
+    /// Finds a Discord binding by its configured agent and ACP session id.
+    pub async fn session_by_agent(
+        &self,
+        agent_key: &AgentKey,
+        session_id: &SessionId,
+    ) -> BotResult<Option<SessionRow>> {
+        let mut db = self.inner.clone();
+        Session::filter(
+            Session::fields()
+                .agent()
+                .eq(agent_key.as_ref())
+                .and(Session::fields().acp().eq(session_id.0.as_ref())),
+        )
+        .first()
+        .exec(&mut db)
+        .await?
+        .map(SessionRow::try_from)
+        .transpose()
+    }
+
     /// Deletes a session and all of its render projections.
     pub async fn delete_session(&self, thread_id: GenericChannelId) -> BotResult {
         let thread_id = thread_id.to_string();
