@@ -455,7 +455,6 @@ async fn connect_agent(
 ) -> Result<(), agent_client_protocol::Error> {
     let callback_projection = projection.clone();
     let expected_session = row.session_id.clone();
-    let thread = row.thread_id;
 
     Client
         .builder()
@@ -466,7 +465,7 @@ async fn connect_agent(
                     warn!(
                         expected = %expected_session,
                         received = %notification.session_id,
-                        thread = ?thread,
+                        thread = ?row.thread_id,
                         "ignoring ACP notification for another session"
                     );
                     return Ok(());
@@ -474,7 +473,7 @@ async fn connect_agent(
                 callback_projection
                     .updates
                     .try_send(ProjectionEvent {
-                        thread_id: thread,
+                        thread_id: row.thread_id,
                         turn_id: callback_projection.turn(),
                         replay: callback_projection.is_replaying(),
                         update: notification.update,
@@ -527,7 +526,7 @@ async fn connect_agent(
                 bot,
                 connection,
                 row.session_id,
-                thread,
+                row.thread_id,
                 &projection,
                 &mut commands,
             )
