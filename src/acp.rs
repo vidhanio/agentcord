@@ -213,7 +213,7 @@ impl Supervisor {
                 .args(agent.args)
                 .envs(agent.env),
         );
-        let response = Client
+        Client
             .builder()
             .name("agentcord")
             .connect_with(process, |connection: ConnectionTo<Agent>| async move {
@@ -233,10 +233,10 @@ impl Supervisor {
                 .await
             })
             .await
-            .map_err(|error| Self::acp_error(&error))?;
-        Ok(NewSession {
-            session_id: response.session_id,
-        })
+            .map(|response| NewSession {
+                session_id: response.session_id,
+            })
+            .map_err(|error| Self::acp_error(&error))
     }
 
     /// Lists all sessions exposed by an ACP agent, following pagination.
@@ -279,8 +279,8 @@ impl Supervisor {
         agent_key: &crate::config::AgentKey,
         session_id: &SessionId,
     ) -> BotResult<ImportedSession> {
-        let sessions = self.list_sessions(bot, agent_key).await?;
-        sessions
+        self.list_sessions(bot, agent_key)
+            .await?
             .into_iter()
             .find(|session| session.session_id == *session_id)
             .map(|session| ImportedSession {
@@ -302,22 +302,22 @@ impl Supervisor {
         turn_id: String,
         origin: PromptOrigin,
     ) -> BotResult {
-        let thread = row.thread_id;
         let sender = self.sender(bot, row);
-        let command = SessionCommand::Prompt {
-            text,
-            turn_id,
-            origin,
-        };
-        sender.try_send(command).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => {
-                BotError::Acp("the ACP prompt queue is full".into())
-            }
-            mpsc::error::TrySendError::Closed(_) => {
-                self.remove(thread, &sender);
-                BotError::Acp("the ACP session actor has exited".into())
-            }
-        })?;
+        sender
+            .try_send(SessionCommand::Prompt {
+                text,
+                turn_id,
+                origin,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    BotError::Acp("the ACP prompt queue is full".into())
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    self.remove(row.thread_id, &sender);
+                    BotError::Acp("the ACP session actor has exited".into())
+                }
+            })?;
         Ok(())
     }
 
@@ -336,7 +336,7 @@ impl Supervisor {
         let (sender, commands) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let actor_sender = sender.clone();
         let actor_bot = bot.clone();
-        let failure_bot = actor_bot.clone();
+        let failure_bot = bot.clone();
         let stop = Arc::new(Signal::default());
         let actor_stop = Arc::clone(&stop);
         let failure_stop = Arc::clone(&stop);
@@ -454,8 +454,6 @@ async fn connect_agent(
     projection: ProjectionState,
 ) -> Result<(), agent_client_protocol::Error> {
     let callback_projection = projection.clone();
-    let callback_updates = callback_projection.updates.clone();
-    let callback_fault = callback_projection.fault.clone();
     let expected_session = row.session_id.clone();
     let thread = row.thread_id;
 
@@ -473,17 +471,16 @@ async fn connect_agent(
                     );
                     return Ok(());
                 }
-                let turn_id = callback_projection.turn();
-                let replay = callback_projection.is_replaying();
-                callback_updates
+                callback_projection
+                    .updates
                     .try_send(ProjectionEvent {
                         thread_id: thread,
-                        turn_id,
-                        replay,
+                        turn_id: callback_projection.turn(),
+                        replay: callback_projection.is_replaying(),
                         update: notification.update,
                     })
                     .map_err(|error| {
-                        callback_fault.trigger();
+                        callback_projection.fault.trigger();
                         let message = match error {
                             mpsc::error::TrySendError::Full(_) => {
                                 "the ACP projection queue is full"
@@ -507,21 +504,20 @@ async fn connect_agent(
                 return Err(agent_client_protocol::Error::invalid_request()
                     .data("agent does not advertise session/load"));
             }
-            let load = connection.send_request(LoadSessionRequest::new(
-                row.session_id.clone(),
-                row.project_path.clone(),
-            ));
-            let load_timeout = bot.config().timeouts.startup;
-            let load = async move {
-                tokio::time::timeout(load_timeout, load.block_task())
-                    .await
-                    .map_err(|_| {
-                        agent_client_protocol::Error::internal_error()
-                            .data("ACP session/load timed out")
-                    })??;
-                Ok(())
-            };
-            stop_aware(&projection.stop, load).await?;
+            stop_aware(
+                &projection.stop,
+                request_with_timeout(
+                    bot.config().timeouts.startup,
+                    connection
+                        .send_request(LoadSessionRequest::new(
+                            row.session_id.clone(),
+                            row.project_path.clone(),
+                        ))
+                        .block_task(),
+                    "ACP session/load timed out",
+                ),
+            )
+            .await?;
             if projection.fault.is_triggered() {
                 return Err(agent_client_protocol::Error::internal_error()
                     .data("ACP projection queue overflowed during session/load"));
