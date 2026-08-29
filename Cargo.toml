@@ -11,7 +11,7 @@ agent-client-protocol = { version = "2", features = ["unstable_elicitation"] }
 clap = { version = "4", features = ["derive", "env"] }
 color-eyre = "0.6"
 config = { version = "0.15", default-features = false, features = ["toml"] }
-dirs = "5"
+dirs = "6"
 humantime = "2"
 nutype = { version = "0.7", features = ["serde"] }
 toasty = { version = "0.10", default-features = false, features = ["sqlite"] }
