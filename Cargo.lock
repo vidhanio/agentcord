@@ -2194,7 +2194,7 @@ dependencies = [
 [[package]]
 name = "poise"
 version = "0.6.1"
-source = "git+https://github.com/serenity-rs/poise?branch=serenity-next#cb4a95b6634d486f0c345f0ecb0a81d8099619e7"
+source = "git+https://github.com/serenity-rs/poise?branch=serenity-next#b189f7c1cfd47eb4e7863683a49c389a9702ce23"
 dependencies = [
  "async-trait",
  "derivative",
@@ -2212,7 +2212,7 @@ dependencies = [
 [[package]]
 name = "poise_macros"
 version = "0.6.1"
-source = "git+https://github.com/serenity-rs/poise?branch=serenity-next#cb4a95b6634d486f0c345f0ecb0a81d8099619e7"
+source = "git+https://github.com/serenity-rs/poise?branch=serenity-next#b189f7c1cfd47eb4e7863683a49c389a9702ce23"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -2906,7 +2906,7 @@ dependencies = [
 [[package]]
 name = "serenity"
 version = "0.12.5"
-source = "git+https://github.com/serenity-rs/serenity?branch=next#37b9f433ada8b9ccc5f93f04826403b175855f86"
+source = "git+https://github.com/serenity-rs/serenity?branch=next#46f5689715c49476ab289465b675dd79e25fb079"
 dependencies = [
  "aformat",
  "arrayvec",
@@ -3927,7 +3927,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
