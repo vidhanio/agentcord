@@ -38,8 +38,6 @@ with `--config` or `AGENTCORD_CONFIG`. `${NAME}` placeholders in string values
 are expanded after TOML parsing.
 
 See [config.example.toml](config.example.toml) for the complete schema.
-Discord snowflake fields accept either TOML integers or quoted decimal strings,
-so they can be populated from environment variables.
 
 ## Home Manager
 

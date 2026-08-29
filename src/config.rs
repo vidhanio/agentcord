@@ -13,7 +13,7 @@ use std::{
 
 use config::{Config as Settings, File, FileFormat, Value, ValueKind};
 use nutype::nutype;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use serenity::all::{ChannelId, EmojiId, GuildId, UserId};
 
 use crate::{BotError, BotResult};
@@ -68,13 +68,10 @@ pub struct DiscordConfig {
     /// Bot token used to authenticate with Discord.
     pub bot_token: String,
     /// Guild containing the configured forum.
-    #[serde(deserialize_with = "deserialize_discord_id")]
     pub guild_id: GuildId,
     /// Sole user allowed to control Agentcord.
-    #[serde(deserialize_with = "deserialize_discord_id")]
     pub allowed_user_id: UserId,
     /// Forum where ACP sessions are projected as posts.
-    #[serde(deserialize_with = "deserialize_discord_id")]
     pub forum_channel_id: ChannelId,
 }
 
@@ -359,27 +356,6 @@ fn valid_env_name(name: &str) -> bool {
         && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
-/// Deserializes a Discord snowflake from either a TOML integer or string.
-fn deserialize_discord_id<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: From<u64>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Repr {
-        Number(u64),
-        Text(String),
-    }
-
-    match Repr::deserialize(deserializer)? {
-        Repr::Number(value) => Ok(T::from(value)),
-        Repr::Text(value) => value.trim().parse::<u64>().map(T::from).map_err(|error| {
-            serde::de::Error::custom(format!("invalid Discord id `{value}`: {error}"))
-        }),
-    }
-}
-
 mod duration {
     use std::time::Duration;
 
@@ -479,43 +455,6 @@ mod tests {
         assert_eq!(config.timeouts.edit_debounce, Duration::from_millis(100));
         assert_eq!(config.timeouts.modal, Timeouts::default().modal);
         config.validate().expect("valid configuration");
-    }
-
-    /// Verifies Discord snowflakes accept quoted values for environment
-    /// expansion.
-    #[test]
-    fn parses_discord_ids_from_strings() {
-        let config = Config::parse(
-            r#"
-                [discord]
-                bot_token = "token"
-                guild_id = "100000000000000001"
-                allowed_user_id = "100000000000000002"
-                forum_channel_id = "100000000000000003"
-
-                [projects]
-                base_path = "/tmp/projects"
-
-                [agents.example]
-                display_name = "Example Agent"
-                command = "example-agent-acp"
-                emoji = "🤖"
-            "#,
-        )
-        .expect("quoted Discord ids should parse");
-
-        assert_eq!(
-            config.discord.guild_id,
-            serenity::all::GuildId::new(100_000_000_000_000_001)
-        );
-        assert_eq!(
-            config.discord.allowed_user_id,
-            serenity::all::UserId::new(100_000_000_000_000_002)
-        );
-        assert_eq!(
-            config.discord.forum_channel_id,
-            serenity::all::ChannelId::new(100_000_000_000_000_003)
-        );
     }
 
     /// Verifies environment expansion traverses nested values.
