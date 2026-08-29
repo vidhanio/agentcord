@@ -1,7 +1,12 @@
-//! Agentcord's entirely configuration-driven runtime contract.
+//! Agentcord's configuration contract.
+//!
+//! Configuration is loaded from TOML after expanding `${NAME}` references in
+//! string values. Expansion is performed on the parsed value tree, so an
+//! environment value is data and cannot change the TOML structure.
 
 use std::{
     collections::BTreeMap,
+    fmt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -38,7 +43,7 @@ const DISCORD_SELECT_LIMIT: usize = 25;
 pub struct AgentKey(String);
 
 /// Complete configuration for one Agentcord process.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Config {
     /// Discord connection and projection settings.
     pub discord: DiscordConfig,
@@ -55,7 +60,7 @@ pub struct Config {
 }
 
 /// Discord account, guild, user, and forum identifiers.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct DiscordConfig {
     /// Bot token used to authenticate with Discord.
     pub bot_token: String,
@@ -75,7 +80,7 @@ pub struct ProjectsConfig {
 }
 
 /// Command and presentation settings for one ACP agent.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct AgentConfig {
     /// Human-readable name shown in Discord.
     pub display_name: String,
@@ -161,6 +166,9 @@ impl Config {
     }
 
     /// Parses configuration from an in-memory TOML string.
+    ///
+    /// Parsing and validation are separate so callers that build a config in
+    /// more than one source can validate only after merging those sources.
     pub fn parse(raw: &str) -> Result<Self, config::ConfigError> {
         Self::from_source(File::from_str(raw, FileFormat::Toml))
     }
@@ -175,7 +183,8 @@ impl Config {
         settings.try_deserialize()
     }
 
-    /// Rejects invalid identifiers, paths, timeouts, and Discord settings.
+    /// Rejects invalid identifiers and values that cannot be represented by
+    /// Agentcord's Discord surface.
     pub fn validate(&self) -> BotResult {
         if self.agents.is_empty() {
             return Err(BotError::Config(
@@ -194,6 +203,7 @@ impl Config {
                 self.agents.len()
             )));
         }
+
         for (key, agent) in &self.agents {
             if key.trim().is_empty() || key.chars().count() > 20 {
                 return Err(BotError::Config(format!(
@@ -222,6 +232,47 @@ impl Config {
             }
         }
         Ok(())
+    }
+}
+
+impl fmt::Debug for Config {
+    /// Formats useful configuration metadata without exposing secrets.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("discord", &self.discord)
+            .field("projects", &self.projects)
+            .field("agents", &self.agents)
+            .field("permissions", &self.permissions)
+            .field("timeouts", &self.timeouts)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DiscordConfig {
+    /// Formats Discord identifiers while redacting the bot token.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DiscordConfig")
+            .field("bot_token", &"[REDACTED]")
+            .field("guild_id", &self.guild_id)
+            .field("allowed_user_id", &self.allowed_user_id)
+            .field("forum_channel_id", &self.forum_channel_id)
+            .finish()
+    }
+}
+
+impl fmt::Debug for AgentConfig {
+    /// Formats agent settings without exposing arbitrary environment values.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentConfig")
+            .field("display_name", &self.display_name)
+            .field("command", &self.command)
+            .field("args", &"[REDACTED]")
+            .field("env", &"[REDACTED]")
+            .field("emoji", &self.emoji)
+            .finish()
     }
 }
 
@@ -264,12 +315,16 @@ where
 }
 
 /// Expands `${NAME}` references in one string.
+///
+/// A single pass is intentional: if an environment value contains another
+/// placeholder, that value is not interpreted as a second template.
 fn expand_string<F>(value: &str, lookup: &F) -> String
 where
     F: Fn(&str) -> Option<String>,
 {
     let mut output = String::with_capacity(value.len());
     let mut rest = value;
+
     while let Some(start) = rest.find("${") {
         output.push_str(&rest[..start]);
         let placeholder = &rest[start..];
@@ -286,6 +341,7 @@ where
         }
         rest = &placeholder[token_len..];
     }
+
     output.push_str(rest);
     output
 }
@@ -323,5 +379,160 @@ mod duration {
                 humantime::parse_duration(&value).map_err(serde::de::Error::custom)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::BTreeMap,
+        fs,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
+    use config::{Config as Settings, File, FileFormat};
+
+    use super::{AgentKey, Config, Timeouts, config_path, expand_string, expand_value, state_path};
+
+    fn minimal_config() -> &'static str {
+        r#"
+            [discord]
+            bot_token = "token"
+            guild_id = 1
+            allowed_user_id = 2
+            forum_channel_id = 3
+
+            [projects]
+            base_path = "~/Projects"
+
+            [agents.example]
+            display_name = "Example Agent"
+            command = "example-agent-acp"
+            emoji = "🤖"
+        "#
+    }
+
+    #[test]
+    fn parses_schema_defaults_and_duration_forms() {
+        let config = Config::parse(
+            r#"
+                [discord]
+                bot_token = "token"
+                guild_id = 1
+                allowed_user_id = 2
+                forum_channel_id = 3
+
+                [projects]
+                base_path = "/tmp/projects"
+
+                [agents.example]
+                display_name = "Example Agent"
+                command = "example-agent-acp"
+                args = ["--stdio"]
+                env = { SETTING = "1" }
+                emoji = { id = 7, animated = true }
+
+                [timeouts]
+                startup = 42
+                prompt = "2m"
+                edit_debounce = "100ms"
+            "#,
+        )
+        .expect("valid configuration");
+
+        assert_eq!(config.discord.guild_id, serenity::all::GuildId::new(1));
+        assert_eq!(
+            config.agents[&AgentKey::new("example")].args,
+            vec![String::from("--stdio")]
+        );
+        assert_eq!(config.timeouts.startup, Duration::from_secs(42));
+        assert_eq!(config.timeouts.prompt, Duration::from_secs(120));
+        assert_eq!(config.timeouts.edit_debounce, Duration::from_millis(100));
+        assert_eq!(config.timeouts.modal, Timeouts::default().modal);
+        config.validate().expect("valid configuration");
+    }
+
+    #[test]
+    fn expands_string_leaves_in_nested_tables_and_arrays() {
+        let raw = r#"
+            [nested]
+            value = "prefix-${VALUE}"
+            values = ["${VALUE}", "${MISSING}"]
+            [nested.more]
+            value = "${VALUE}/suffix"
+        "#;
+        let mut settings = Settings::builder()
+            .add_source(File::from_str(raw, FileFormat::Toml))
+            .build()
+            .expect("valid TOML");
+        expand_value(&mut settings.cache, &|name| match name {
+            "VALUE" => Some("replacement".into()),
+            _ => None,
+        });
+        let value: serde_json::Value = settings.try_deserialize().expect("expanded value tree");
+
+        assert_eq!(value["nested"]["value"], "prefix-replacement");
+        assert_eq!(value["nested"]["values"][0], "replacement");
+        assert_eq!(value["nested"]["values"][1], "${MISSING}");
+        assert_eq!(value["nested"]["more"]["value"], "replacement/suffix");
+    }
+
+    #[test]
+    fn expansion_is_single_pass_and_leaves_invalid_placeholders() {
+        let expanded = expand_string("${NESTED}-${bad}-${UNFINISHED", &|name| match name {
+            "NESTED" => Some("${OTHER}".into()),
+            _ => None,
+        });
+        assert_eq!(expanded, "${OTHER}-${bad}-${UNFINISHED");
+    }
+
+    #[test]
+    fn validation_rejects_missing_agents() {
+        let mut config = Config::parse(minimal_config()).expect("valid configuration");
+        config.agents.clear();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn debug_redacts_discord_and_agent_environment_secrets() {
+        let mut config = Config::parse(minimal_config()).expect("valid configuration");
+        config.discord.bot_token = "discord-secret".into();
+        config
+            .agents
+            .get_mut(&AgentKey::new("example"))
+            .expect("agent")
+            .args = vec![String::from("agent-secret")];
+        config
+            .agents
+            .get_mut(&AgentKey::new("example"))
+            .expect("agent")
+            .env = BTreeMap::from([(String::from("SECRET"), String::from("agent-secret"))]);
+
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("discord-secret"));
+        assert!(!debug.contains("agent-secret"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn paths_are_scoped_to_agentcord() {
+        assert!(config_path().ends_with("agentcord/config.toml"));
+        assert!(state_path().ends_with("agentcord/state.sqlite3"));
+    }
+
+    #[test]
+    fn load_reads_and_validates_a_toml_file() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "agentcord-config-{}-{suffix}.toml",
+            std::process::id()
+        ));
+        fs::write(&path, minimal_config()).expect("write config");
+        let result = Config::load(&path);
+        fs::remove_file(&path).expect("remove config");
+        result.expect("load valid config");
     }
 }

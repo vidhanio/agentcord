@@ -8,15 +8,12 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
-    /// Path to the config file (default:
-    /// `$XDG_CONFIG_HOME/agentcord/config.toml`).
+    /// Configuration file path.
     #[arg(short, long, env = "AGENTCORD_CONFIG")]
-    /// Optional configuration path override.
     config: Option<PathBuf>,
 }
 
 #[tokio::main]
-/// Loads configuration, initializes diagnostics, and runs Agentcord.
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();

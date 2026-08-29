@@ -1,224 +1,235 @@
-//! Discord projection and supervision for arbitrary Agent Client Protocol
-//! agents.
-
-mod acp;
-mod commands;
-pub mod config;
-mod db;
-mod elicitation;
-mod error;
-mod forum;
-mod permission;
-mod projects;
-mod render;
-mod webhook;
+//! Discord projection and supervision for Agent Client Protocol agents.
 
 use std::{
-    collections::HashMap,
-    fmt::{self, Debug, Formatter},
-    ops::Deref,
-    sync::{Arc, Mutex, OnceLock},
+    fmt,
+    sync::{Arc, OnceLock},
 };
 
-use config::AgentKey;
-pub use config::Config;
-use db::Db;
-pub use error::BotError;
-use projects::Project;
 use serenity::all::{
-    ClientBuilder, Context, EventHandler, FullEvent, GatewayIntents, HttpBuilder, Token, UserId,
-    Webhook, async_trait,
+    Context, EventHandler, FullEvent, GatewayIntents, HttpBuilder, Token, async_trait,
 };
-use tracing::{info, warn};
+use tracing::warn;
+
+mod acp;
+pub mod render;
+mod webhook;
+
+pub mod config;
+pub mod db;
+
+pub use config::Config;
+pub use db::Db;
 
 /// Result type used by Agentcord operations.
 pub type BotResult<T = ()> = Result<T, BotError>;
 
-/// Cheaply cloneable handle to the shared application state.
-#[derive(Clone)]
-pub struct Bot(
-    /// Single shared ownership boundary for application state.
-    Arc<BotState>,
-);
-
-/// Shared application dependencies and runtime coordination state.
-#[doc(hidden)]
-pub struct BotState {
-    /// Immutable validated configuration.
-    pub(crate) config: Config,
-    /// Persistent session and render mappings.
-    pub(crate) db: Db,
-    /// Discord context installed by the first ready event.
-    context: OnceLock<Context>,
-    /// Singleflight registry for starting and active ACP sessions.
-    pub(crate) sessions: acp::SessionRegistry,
-    /// Short-lived per-agent session-list cache.
-    pub(crate) listings: Mutex<HashMap<AgentKey, acp::CachedListing>>,
-    /// Learned `session/load` support keyed by agent.
-    pub(crate) restorable: Mutex<HashMap<AgentKey, bool>>,
-    /// Recoverable cached webhook used to mirror user prompts.
-    pub(crate) webhook: tokio::sync::Mutex<Option<Webhook>>,
-    /// Retryable one-time startup and restoration gate.
-    ready_started: tokio::sync::OnceCell<()>,
+/// Identifies whether a prompt already has a visible Discord message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptOrigin {
+    /// The gateway message is already visible and must not be mirrored.
+    AlreadyVisible,
+    /// The prompt came from another surface and needs a webhook mirror.
+    NeedsMirror,
 }
 
-impl Debug for BotState {
-    /// Formats only stable, useful state and omits runtime handles.
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+/// Errors produced while constructing and using Agentcord.
+#[derive(Debug, thiserror::Error)]
+pub enum BotError {
+    /// Configuration could not be loaded or validated.
+    #[error("configuration error: {0}")]
+    Config(String),
+    /// The state database could not be read or updated.
+    #[error(transparent)]
+    Database(#[from] toasty::Error),
+    /// A database or persisted project path cannot be represented safely.
+    #[error("database path error: {0}")]
+    DatabasePath(String),
+    /// A filesystem operation failed.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// The ACP subprocess or protocol connection failed.
+    #[error("ACP error: {0}")]
+    Acp(String),
+    /// Discord has not delivered its first ready event.
+    #[error("Discord is not ready")]
+    DiscordNotReady,
+    /// A protocol update could not be reduced to renderer state.
+    #[error("projection error: {0}")]
+    Projection(String),
+    /// A Discord API operation failed.
+    #[error("Discord error: {0}")]
+    Serenity(Box<serenity::Error>),
+}
+
+impl From<serenity::Error> for BotError {
+    fn from(error: serenity::Error) -> Self {
+        Self::Serenity(Box::new(error))
+    }
+}
+
+/// Cheaply cloneable handle to the process-wide application state.
+#[derive(Clone)]
+pub struct Bot(Arc<BotState>);
+
+/// Durable dependencies shared by Agentcord tasks.
+pub struct BotState {
+    /// Immutable validated configuration.
+    pub config: Config,
+    /// Persistent session and Discord projection state.
+    pub db: Db,
+    /// Serenity context installed by the first ready event.
+    context: OnceLock<Context>,
+    /// Cached webhook used to represent prompts as the allowed user.
+    webhook: tokio::sync::Mutex<Option<serenity::all::Webhook>>,
+    /// Per-thread ACP session actors.
+    supervisor: acp::Supervisor,
+}
+
+impl Bot {
+    /// Constructs application state using the configured state path.
+    pub async fn new(config: Config) -> BotResult<Self> {
+        config.validate()?;
+        let db = Db::open(&config::state_path()).await?;
+        Ok(Self::with_db(config, db))
+    }
+
+    /// Constructs application state with an already-open database.
+    #[must_use]
+    pub fn with_db(config: Config, db: Db) -> Self {
+        Self(Arc::new(BotState {
+            config,
+            db,
+            context: OnceLock::new(),
+            webhook: tokio::sync::Mutex::new(None),
+            supervisor: acp::Supervisor::default(),
+        }))
+    }
+
+    /// Installs the Serenity context from the first ready event.
+    pub fn install_context(&self, context: Context) {
+        let _ = self.0.context.set(context);
+    }
+
+    /// Returns the installed Serenity context.
+    pub fn context(&self) -> BotResult<&Context> {
+        self.0.context.get().ok_or(BotError::DiscordNotReady)
+    }
+
+    /// Returns the immutable application configuration.
+    #[must_use]
+    pub fn config(&self) -> &Config {
+        &self.0.config
+    }
+
+    /// Returns the persistent state database.
+    #[must_use]
+    pub fn db(&self) -> &Db {
+        &self.0.db
+    }
+
+    /// Returns the shared application state for crate modules.
+    pub(crate) fn state(&self) -> &BotState {
+        &self.0
+    }
+
+    /// Forwards one prompt to the persisted session for a Discord thread.
+    pub async fn forward_prompt(
+        &self,
+        thread: serenity::all::GenericChannelId,
+        text: String,
+        turn_id: String,
+        origin: PromptOrigin,
+    ) -> BotResult {
+        let row = self
+            .db()
+            .session(thread)
+            .await?
+            .ok_or_else(|| BotError::Acp("this thread is not an ACP session".into()))?;
+        self.state()
+            .supervisor
+            .prompt(self, &row, text, turn_id, origin)
+    }
+}
+
+impl fmt::Debug for Bot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Bot")
+            .field("config", &self.0.config)
+            .field("db", &self.0.db)
+            .field("discord_ready", &self.0.context.get().is_some())
+            .finish()
+    }
+}
+
+impl fmt::Debug for BotState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BotState")
             .field("config", &self.config)
             .field("db", &self.db)
-            .field("sessions", &self.sessions)
+            .field("discord_ready", &self.context.get().is_some())
             .finish_non_exhaustive()
-    }
-}
-
-impl Deref for Bot {
-    /// Shared state exposed through the lightweight bot handle.
-    type Target = BotState;
-
-    /// Exposes the shared application state to crate modules.
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Debug for Bot {
-    /// Formats the bot without leaking tokens or noisy runtime state.
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Bot")
-            .field("config", &self.0.config)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Bot {
-    /// Validates configuration and constructs the shared application state.
-    fn new(config: Config) -> BotResult<Self> {
-        config.validate()?;
-        let db = Db::open(&config::state_path())?;
-        Ok(Self(Arc::new(BotState {
-            config,
-            db,
-            context: OnceLock::new(),
-            sessions: acp::SessionRegistry::default(),
-            listings: Mutex::default(),
-            restorable: Mutex::default(),
-            webhook: tokio::sync::Mutex::new(None),
-            ready_started: tokio::sync::OnceCell::new(),
-        })))
-    }
-
-    /// Returns the Discord context after the first ready event.
-    pub(crate) fn context(&self) -> BotResult<&Context> {
-        self.context
-            .get()
-            .ok_or_else(|| BotError::Other("Discord is not ready".into()))
-    }
-
-    /// Reports whether a Discord user may interact with the bot.
-    #[must_use]
-    pub fn is_allowed(&self, user: UserId) -> bool {
-        user == self.config.discord.allowed_user_id
-    }
-
-    /// Resolves user-supplied project input against configured project roots.
-    pub(crate) fn resolve_project(&self, input: &str) -> BotResult<Project> {
-        projects::resolve(&self.config.projects, input)
-    }
-
-    /// Performs one-time forum reconciliation and session restoration.
-    ///
-    /// Concurrent ready events share the same initialization attempt, while a
-    /// failed attempt remains retryable on a later gateway reconnect.
-    async fn handle_ready(&self, ctx: &Context) {
-        let _ = self.context.set(ctx.clone());
-        let result = self
-            .ready_started
-            .get_or_try_init(|| async {
-                self.validate_and_reconcile_forum().await?;
-                self.restore_all().await;
-                Ok::<(), BotError>(())
-            })
-            .await;
-        if let Err(error) = result {
-            warn!(?error, "configured Agentcord forum is unavailable");
-            return;
-        }
-        info!("agentcord ready");
-    }
-
-    /// Routes an allowed Discord message to its thread's ACP session.
-    async fn handle_message(&self, message: &serenity::all::Message) {
-        let Ok(ctx) = self.context() else {
-            return;
-        };
-        if !self.is_allowed(message.author.id)
-            || message.author.id == ctx.cache.current_user().id
-            || message.content.trim().is_empty()
-        {
-            return;
-        }
-        let Ok(Some(_)) = self.db.session(message.channel_id) else {
-            return;
-        };
-        if let Err(error) = self
-            .submit(message.channel_id, message.content.to_string())
-            .await
-        {
-            let _ = message
-                .reply(&ctx.http, format!("couldn't send to ACP: {error}"))
-                .await;
-        }
     }
 }
 
 #[async_trait]
 impl EventHandler for Bot {
-    /// Projects relevant Discord gateway events into application operations.
-    async fn dispatch(&self, ctx: &Context, event: &FullEvent) {
-        match event {
-            FullEvent::Ready { .. } => self.handle_ready(ctx).await,
-            FullEvent::Message { new_message, .. } => self.handle_message(new_message).await,
-            FullEvent::ThreadCreate { thread, .. } => {
-                if let Err(error) = self.delete_manual_post(thread).await {
-                    warn!(?error, thread = %thread.base.name, "failed to handle forum post");
-                }
-            }
-            FullEvent::ThreadDelete { thread, .. } => {
-                let channel = thread.id.widen();
-                if self.db.session(channel).ok().flatten().is_some() {
-                    self.forget(channel);
-                    if let Err(error) = self.db.delete_session(channel) {
-                        warn!(?error, ?channel, "failed to delete removed session binding");
-                    }
-                }
-            }
-            _ => {}
+    async fn dispatch(&self, context: &Context, event: &FullEvent) {
+        let _ = self.0.context.set(context.clone());
+        if let FullEvent::Message { new_message, .. } = event
+            && let Err(error) = self.handle_message(new_message).await
+        {
+            warn!(?error, "failed to handle Discord message");
         }
     }
 }
 
-/// Builds and runs the Discord client until it shuts down or fails.
+impl Bot {
+    async fn handle_message(&self, message: &serenity::all::Message) -> BotResult {
+        let context = self.context()?.clone();
+        if message.author.id != self.config().discord.allowed_user_id
+            || message.author.id == context.cache.current_user().id
+            || message.content.trim().is_empty()
+        {
+            return Ok(());
+        }
+        let Some(_) = self.db().session(message.channel_id).await? else {
+            return Ok(());
+        };
+        if let Err(error) = self
+            .forward_prompt(
+                message.channel_id,
+                message.content.to_string(),
+                message.id.to_string(),
+                PromptOrigin::AlreadyVisible,
+            )
+            .await
+        {
+            let _ = message
+                .reply(&context.http, format!("ACP prompt failed: {error}"))
+                .await;
+        }
+        Ok(())
+    }
+}
+
+/// Builds and runs the Discord gateway client.
 pub async fn run(config: Config) -> BotResult {
-    let bot = Arc::new(Bot::new(config)?);
+    let bot = Arc::new(Bot::new(config).await?);
     let token: Token = bot
-        .config
+        .config()
         .discord
         .bot_token
         .parse()
         .map_err(|error| BotError::Config(format!("invalid Discord bot token: {error}")))?;
     let http = HttpBuilder::new(token.clone()).build();
-    let mut client = ClientBuilder::new_with_http(
+    let mut client = serenity::all::ClientBuilder::new_with_http(
         token,
         Arc::new(http),
         GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT,
     )
-    .event_handler(bot.clone())
-    .framework(Box::new(commands::framework(&bot)))
-    .data(bot)
+    .event_handler(bot)
     .await?;
     client.start().await?;
     Ok(())

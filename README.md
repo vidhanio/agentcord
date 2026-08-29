@@ -10,25 +10,22 @@ emoji all come from configuration.
 
 ## What it does
 
-- `/agent` opens a native modal for choosing a configured agent and entering a
-  working directory, then creates an ACP session and sends its initial prompt.
-- `/import` binds an existing ACP session of a configured agent to a new forum
-  post; imported posts stay archived until their first message restores them.
-- Inside a session post, `/mode`, `/model`, and `/command` change the session
-  mode, the model and thinking-level config options, and run the agent's
-  advertised slash commands — all with autocomplete fed by the session state.
-- Messages in a session post are delivered as ACP prompts.
-- Streamed thoughts and tool-call content are kept visible in full; only shell
-  output is tail-capped.
-- Sessions used outside Discord are pulled in on restore: `session/load`
-  replays the conversation and agentcord renders whatever the thread has not
-  seen yet, keyed by the agent's replay message ids.
-- Structured ACP tool calls, plans, modes, configuration, usage, titles,
-  permission requests, and elicitation forms and URL consents are projected
-  into Discord.
-- Restorable sessions reconnect through `session/load` after a restart or when
-  the allowed user sends a message to an inactive post.
-- Each ACP session owns an isolated, process-group-supervised subprocess.
+The current rewrite implements the first text-conversation slice:
+
+- Messages from the configured user in a persisted session thread are queued
+  to a per-thread ACP actor and sent as `session/prompt` requests.
+- Agent text updates are reduced into durable Toasty projections and reconciled
+  to ordered Discord messages with edits, sends, and deletes.
+- Prompts originating outside the Discord gateway can be mirrored through a
+  forum webhook under the user's current display name and avatar, with a
+  bot-authored fallback.
+- ACP session state is restored lazily through `session/load` when a session
+  receives a prompt.
+
+Thoughts, tools, plans, slash commands, permissions, elicitation, and new
+session creation are deliberately follow-up slices. See
+[docs/projection.md](docs/projection.md) for the event and persistence
+contract.
 
 ## Configuration
 

@@ -1,3 +1,5 @@
+//! Discord webhook mirroring for user-authored prompts.
+
 use serenity::all::{
     CreateMessage, CreateWebhook, ExecuteWebhook, GenericChannelId, ThreadId, Webhook,
 };
@@ -5,99 +7,85 @@ use tracing::warn;
 
 use crate::{Bot, BotResult, render::split_message};
 
-/// Discord identity used when mirroring the allowed user's prompt.
-#[derive(Debug, Clone)]
+/// Display identity used for webhook-authored prompt messages.
+#[derive(Clone, Debug)]
 struct UserProfile {
-    /// Webhook username including the Agentcord attribution suffix.
     username: String,
-    /// Current user avatar, if Discord exposes one.
     avatar_url: Option<String>,
 }
 
 impl Bot {
-    /// Mirrors a prompt through the user's webhook, falling back to bot posts.
-    pub async fn post_user_message(&self, thread: GenericChannelId, text: &str) -> BotResult {
-        let ctx = self.context()?.clone();
+    /// Mirrors a prompt as the configured Discord user.
+    ///
+    /// Webhook failures are non-fatal: messages not sent by the webhook are
+    /// sent with the bot identity so ACP receives only after the prompt is
+    /// visible in the thread.
+    pub async fn mirror_user_message(&self, thread: GenericChannelId, text: &str) -> BotResult {
+        let context = self.context()?.clone();
         let chunks = split_message(text, serenity::constants::MESSAGE_CODE_LIMIT);
-        let profile = self.user_profile(&ctx).await;
+        let profile = user_profile(
+            &context,
+            self.config().discord.guild_id,
+            self.config().discord.allowed_user_id,
+        )
+        .await;
         let webhook = match profile.as_ref() {
-            Some(profile) => {
-                self.user_webhook(&ctx, self.config.discord.forum_channel_id, profile)
-                    .await
-            }
+            Some(profile) => self.user_webhook(&context, profile).await,
             None => None,
         };
 
         let mut posted = 0;
         if let (Some(profile), Some(webhook)) = (profile, webhook) {
             for chunk in &chunks {
-                let mut builder = ExecuteWebhook::new()
+                let mut request = ExecuteWebhook::new()
                     .content(chunk)
                     .in_thread(ThreadId::new(thread.get()))
                     .username(profile.username.clone());
                 if let Some(avatar_url) = &profile.avatar_url {
-                    builder = builder.avatar_url(avatar_url.clone());
+                    request = request.avatar_url(avatar_url.clone());
                 }
-                match webhook.execute(&ctx.http, true, builder).await {
+                match webhook.execute(&context.http, true, request).await {
                     Ok(Some(_)) => posted += 1,
                     Ok(None) => {
-                        warn!("user webhook returned no message, falling back to a bot message");
+                        warn!("user webhook returned no message; using bot fallback");
                         break;
                     }
                     Err(error) => {
-                        warn!(?error, "user webhook failed, falling back to a bot message");
-                        *self.webhook.lock().await = None;
+                        warn!(?error, "user webhook failed; using bot fallback");
+                        *self.webhook().lock().await = None;
                         break;
                     }
                 }
             }
         }
+
         for chunk in chunks.iter().skip(posted) {
             thread
-                .send_message(&ctx.http, CreateMessage::new().content(chunk))
+                .send_message(&context.http, CreateMessage::new().content(chunk))
                 .await?;
         }
         Ok(())
     }
 
-    /// Resolves the allowed user's current display name and avatar.
-    async fn user_profile(&self, ctx: &serenity::all::Context) -> Option<UserProfile> {
-        let user_id = self.config.discord.allowed_user_id;
-        let user = ctx.http.get_user(user_id).await.ok()?;
-        let name = match ctx
-            .http
-            .get_member(self.config.discord.guild_id, user_id)
-            .await
-        {
-            Ok(member) => member.display_name().to_owned(),
-            Err(_) => user.global_name.as_deref().unwrap_or(&user.name).to_owned(),
-        };
-        Some(UserProfile {
-            username: format!("{name} (via agentcord)"),
-            avatar_url: user.avatar_url(),
-        })
-    }
-
-    /// Reuses or creates the forum webhook used to mirror user prompts.
-    ///
-    /// Discovery is serialized to prevent duplicate webhook creation. Execute
-    /// failures clear the cache so a deleted webhook can be recovered.
     async fn user_webhook(
         &self,
-        ctx: &serenity::all::Context,
-        forum: serenity::all::ChannelId,
+        context: &serenity::all::Context,
         profile: &UserProfile,
     ) -> Option<Webhook> {
-        let mut cached = self.webhook.lock().await;
+        let mut cached = self.webhook().lock().await;
         if let Some(webhook) = cached.as_ref() {
-            return Some(webhook.clone());
+            let webhook = webhook.clone();
+            drop(cached);
+            return Some(webhook);
         }
-        let existing = match forum.webhooks(&ctx.http).await {
+
+        let forum = self.config().discord.forum_channel_id;
+        let existing = match forum.webhooks(&context.http).await {
             Ok(webhooks) => webhooks
                 .into_iter()
                 .find(|webhook| webhook.name.as_deref() == Some(profile.username.as_str())),
             Err(error) => {
-                warn!(?error, %forum, "failed to list user webhooks");
+                warn!(?error, %forum, "failed to list prompt webhooks");
                 return None;
             }
         };
@@ -105,7 +93,7 @@ impl Bot {
             Some(webhook) => Ok(webhook),
             None => {
                 forum
-                    .create_webhook(&ctx.http, CreateWebhook::new(&profile.username))
+                    .create_webhook(&context.http, CreateWebhook::new(&profile.username))
                     .await
             }
         };
@@ -115,11 +103,32 @@ impl Bot {
                 Some(webhook)
             }
             Err(error) => {
-                warn!(?error, %forum, "failed to find or create user webhook");
+                warn!(?error, %forum, "failed to find or create prompt webhook");
                 None
             }
         };
         drop(cached);
         result
     }
+
+    /// Returns the mutex protecting the process-wide webhook cache.
+    pub(crate) fn webhook(&self) -> &tokio::sync::Mutex<Option<Webhook>> {
+        &self.state().webhook
+    }
+}
+
+async fn user_profile(
+    context: &serenity::all::Context,
+    guild: serenity::all::GuildId,
+    user_id: serenity::all::UserId,
+) -> Option<UserProfile> {
+    let user = context.http.get_user(user_id).await.ok()?;
+    let name = match context.http.get_member(guild, user_id).await {
+        Ok(member) => member.display_name().to_owned(),
+        Err(_) => user.global_name.as_deref().unwrap_or(&user.name).to_owned(),
+    };
+    Some(UserProfile {
+        username: format!("{name} (via agentcord)"),
+        avatar_url: user.avatar_url(),
+    })
 }
