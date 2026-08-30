@@ -113,11 +113,8 @@ impl Db {
             std::fs::create_dir_all(parent)?;
         }
         let create_schema = !path.exists();
-        let path = path.to_str().ok_or_else(|| {
-            BotError::DatabasePath(format!(
-                "database path `{}` is not valid UTF-8",
-                path.display()
-            ))
+        let path = path.to_str().ok_or_else(|| BotError::DatabasePathNotUtf8 {
+            path: path.to_owned(),
         })?;
         Self::connect(&format!("sqlite:{path}"), create_schema).await
     }
@@ -137,17 +134,16 @@ impl Db {
     /// Inserts a durable Discord-to-ACP session binding.
     pub async fn insert_session(&self, row: &SessionRow) -> BotResult {
         if !row.project_path.is_absolute() {
-            return Err(BotError::DatabasePath(format!(
-                "ACP project path `{}` must be absolute",
-                row.project_path.display()
-            )));
+            return Err(BotError::RelativeProjectPath {
+                path: row.project_path.clone(),
+            });
         }
-        let project_path = row.project_path.to_str().ok_or_else(|| {
-            BotError::DatabasePath(format!(
-                "project path `{}` is not valid UTF-8",
-                row.project_path.display()
-            ))
-        })?;
+        let project_path =
+            row.project_path
+                .to_str()
+                .ok_or_else(|| BotError::ProjectPathNotUtf8 {
+                    path: row.project_path.clone(),
+                })?;
         let mut db = self.inner.clone();
         toasty::create!(Session {
             thread_id: row.thread_id.to_string(),
@@ -249,9 +245,7 @@ impl Db {
         .exec(&mut transaction)
         .await?;
         for (position, message_id) in projection.message_ids.iter().enumerate() {
-            let position = i64::try_from(position).map_err(|_| {
-                BotError::DatabasePath("render projection contains too many messages".into())
-            })?;
+            let position = i64::try_from(position).map_err(|_| BotError::ProjectionTooLarge)?;
             toasty::create!(RenderMessage {
                 thread_id: thread_id.as_str(),
                 source_kind: projection.source_kind.as_str(),
@@ -347,10 +341,7 @@ impl TryFrom<Session> for SessionRow {
     fn try_from(session: Session) -> Result<Self, Self::Error> {
         let project_path = PathBuf::from(session.project_path);
         if !project_path.is_absolute() {
-            return Err(BotError::DatabasePath(format!(
-                "stored ACP project path `{}` must be absolute",
-                project_path.display()
-            )));
+            return Err(BotError::RelativeProjectPath { path: project_path });
         }
         Ok(Self {
             thread_id: parse_id(&session.thread_id)?,
@@ -391,7 +382,10 @@ where
     value
         .parse::<u64>()
         .map(T::from)
-        .map_err(|error| BotError::DatabasePath(format!("invalid stored Discord id: {error}")))
+        .map_err(|source| BotError::InvalidStoredDiscordId {
+            value: value.to_owned(),
+            source,
+        })
 }
 
 #[cfg(test)]

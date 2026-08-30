@@ -21,15 +21,17 @@ The current rewrite implements the first conversation slice:
 - Prompts originating outside the Discord gateway can be mirrored through a
   forum webhook under the user's current display name and avatar, with a
   bot-authored fallback.
-- ACP session state is restored lazily through `session/load` when a session
-  receives a prompt.
-- The allowed user can create a session through the `/agent` modal or import
-  one exposed by an agent's `session/list` with `/import`.
+- Imported ACP sessions are restored through `session/load` when their actor
+  starts; newly created sessions keep the live connection used by
+  `session/new` and accept messages typed in the forum thread immediately.
+- The allowed user can create a session through the `/agent` slash command or
+  import one exposed by an agent's `session/list` with `/import`. New sessions
+  show the model default advertised by ACP; `/model` changes it for the current
+  session.
 
-Permissions and elicitation are deliberately follow-up slices. Session
-controls and richer metadata updates are also still to be added. See
-[docs/projection.md](docs/projection.md) for the event and persistence
-contract.
+ACP permission requests are presented as Discord buttons, with an optional
+`approve_all` policy for unattended operation. Elicitation, session controls,
+and richer metadata updates are still to be added.
 
 ## Configuration
 
@@ -55,11 +57,10 @@ See [config.example.toml](config.example.toml) for the complete schema.
         allowed_user_id = 456;
         forum_channel_id = 789;
       };
-      projects.base_path = "~/Projects";
       agents.example = {
         display_name = "Example";
         command = "example-acp";
-        tag = { name = "example"; emoji = "🤖"; };
+        emoji = "🤖";
       };
     };
   };

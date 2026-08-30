@@ -5,12 +5,11 @@
 //! complete projection for the affected source. The Discord adapter then
 //! synchronizes message IDs and persists the result.
 
-use std::fmt::Write;
-
 use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
 use serde::{Deserialize, Serialize};
 use serenity::all::{Context, CreateMessage, EditMessage, GenericChannelId, MessageId};
 use text_splitter::{ChunkConfig, MarkdownSplitter};
+use tracing::warn;
 
 use crate::{Bot, BotError, BotResult, db::RenderProjection};
 
@@ -77,32 +76,48 @@ pub fn reduce(
                 return Ok(ProjectionOutcome::Ignored);
             }
             state.text.push_str(&text);
-            projection.state_json = serde_json::to_string(&state)
-                .map_err(|error| BotError::Projection(format!("text state: {error}")))?;
+            projection.state_json =
+                serde_json::to_string(&state).map_err(|source| BotError::ProjectionSerialize {
+                    context: "text state",
+                    source,
+                })?;
         }
         SessionUpdate::ToolCall(call) => {
             let mut state = parse_object_state(&projection.state_json)?;
             merge_object(
                 &mut state,
-                &serde_json::to_value(call)
-                    .map_err(|error| BotError::Projection(format!("tool state: {error}")))?,
+                &serde_json::to_value(call).map_err(|source| BotError::ProjectionSerialize {
+                    context: "tool state",
+                    source,
+                })?,
             );
-            projection.state_json = serde_json::to_string(&state)
-                .map_err(|error| BotError::Projection(format!("tool state: {error}")))?;
+            projection.state_json =
+                serde_json::to_string(&state).map_err(|source| BotError::ProjectionSerialize {
+                    context: "tool state",
+                    source,
+                })?;
         }
         SessionUpdate::ToolCallUpdate(update) => {
             let mut state = parse_object_state(&projection.state_json)?;
             merge_object(
                 &mut state,
-                &serde_json::to_value(update)
-                    .map_err(|error| BotError::Projection(format!("tool update state: {error}")))?,
+                &serde_json::to_value(update).map_err(|source| BotError::ProjectionSerialize {
+                    context: "tool update state",
+                    source,
+                })?,
             );
-            projection.state_json = serde_json::to_string(&state)
-                .map_err(|error| BotError::Projection(format!("tool state: {error}")))?;
+            projection.state_json =
+                serde_json::to_string(&state).map_err(|source| BotError::ProjectionSerialize {
+                    context: "tool state",
+                    source,
+                })?;
         }
         SessionUpdate::Plan(plan) => {
-            projection.state_json = serde_json::to_string(plan)
-                .map_err(|error| BotError::Projection(format!("plan state: {error}")))?;
+            projection.state_json =
+                serde_json::to_string(plan).map_err(|source| BotError::ProjectionSerialize {
+                    context: "plan state",
+                    source,
+                })?;
         }
         _ => return Ok(ProjectionOutcome::Ignored),
     }
@@ -114,44 +129,79 @@ pub fn reduce(
 impl Bot {
     /// Projects one ordered ACP update into its session thread.
     pub async fn apply_projection_event(&self, event: ProjectionEvent) -> BotResult {
-        let Some((kind, id)) = source_key(&event) else {
-            return Ok(());
-        };
-        let previous = self.db().projection(event.thread_id, kind, &id).await?;
-        let projection = match reduce(previous.clone(), &event)? {
-            ProjectionOutcome::Updated(projection) => projection,
-            ProjectionOutcome::Ignored if event.replay => {
-                let Some(previous) = previous else {
-                    return Ok(());
-                };
-                previous
-            }
-            ProjectionOutcome::Ignored => return Ok(()),
-        };
-        let mut projection = projection;
+        self.apply_projection_events(vec![event]).await
+    }
 
-        let context = self.context()?.clone();
-        let target = render_projection(&projection)?;
-        self.db().replace_projection(&projection).await?;
-
-        match sync_messages(
-            &context,
-            projection.thread_id,
-            &projection.message_ids,
-            target,
-        )
-        .await
-        {
-            Ok(message_ids) => {
-                projection.message_ids = message_ids;
-                self.db().replace_projection(&projection).await
-            }
-            Err(failure) => {
-                projection.message_ids = failure.message_ids;
-                self.db().replace_projection(&projection).await?;
-                Err(failure.error)
+    /// Projects adjacent ordered ACP updates with one Discord reconciliation
+    /// per source.
+    pub(crate) async fn apply_projection_events(&self, events: Vec<ProjectionEvent>) -> BotResult {
+        let mut projections = Vec::new();
+        for event in events {
+            let Some((kind, id)) = source_key(&event) else {
+                continue;
+            };
+            let index = projections
+                .iter()
+                .position(|projection: &RenderProjection| {
+                    projection.thread_id == event.thread_id
+                        && projection.source_kind == kind
+                        && projection.source_id == id
+                });
+            let previous = match index {
+                Some(index) => Some(projections[index].clone()),
+                None => self.db().projection(event.thread_id, kind, &id).await?,
+            };
+            let projection = match reduce(previous.clone(), &event)? {
+                ProjectionOutcome::Updated(projection) => projection,
+                ProjectionOutcome::Ignored if event.replay => {
+                    let Some(previous) = previous else {
+                        continue;
+                    };
+                    previous
+                }
+                ProjectionOutcome::Ignored => continue,
+            };
+            if let Some(index) = index {
+                projections[index] = projection;
+            } else {
+                projections.push(projection);
             }
         }
+        if projections.is_empty() {
+            return Ok(());
+        }
+
+        let context = self.context()?.clone();
+        let mut targets = Vec::with_capacity(projections.len());
+        for projection in projections {
+            let target = render_projection(&projection)?;
+            targets.push((projection, target));
+        }
+        for (projection, _) in &targets {
+            self.db().replace_projection(projection).await?;
+        }
+
+        for (mut projection, target) in targets {
+            match sync_messages(
+                &context,
+                projection.thread_id,
+                &projection.message_ids,
+                target,
+            )
+            .await
+            {
+                Ok(message_ids) => {
+                    projection.message_ids = message_ids;
+                    self.db().replace_projection(&projection).await?;
+                }
+                Err(failure) => {
+                    projection.message_ids = failure.message_ids;
+                    self.db().replace_projection(&projection).await?;
+                    return Err(*failure.error);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -190,8 +240,10 @@ where
     if state.trim().is_empty() {
         Ok(T::default())
     } else {
-        serde_json::from_str(state)
-            .map_err(|error| BotError::Projection(format!("invalid source state: {error}")))
+        serde_json::from_str(state).map_err(|source| BotError::ProjectionDeserialize {
+            context: "source state",
+            source,
+        })
     }
 }
 
@@ -200,14 +252,15 @@ fn parse_object_state(state: &str) -> BotResult<serde_json::Value> {
     if state.trim().is_empty() {
         return Ok(serde_json::json!({}));
     }
-    let value: serde_json::Value = serde_json::from_str(state)
-        .map_err(|error| BotError::Projection(format!("invalid object state: {error}")))?;
+    let value: serde_json::Value =
+        serde_json::from_str(state).map_err(|source| BotError::ProjectionDeserialize {
+            context: "object state",
+            source,
+        })?;
     if value.is_object() {
         Ok(value)
     } else {
-        Err(BotError::Projection(
-            "renderer state must contain a JSON object".into(),
-        ))
+        Err(BotError::ProjectionStateNotObject)
     }
 }
 
@@ -216,25 +269,31 @@ fn content_text(content: &ContentBlock) -> String {
     match content {
         ContentBlock::Text(text) => text.text.clone(),
         ContentBlock::ResourceLink(resource) => format!("[{}]({})", resource.name, resource.uri),
-        ContentBlock::Resource(resource) => serde_json::to_value(resource)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| "[embedded resource]".into()),
+        ContentBlock::Resource(resource) => match serde_json::to_value(resource) {
+            Ok(value) => value
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map_or_else(|| "[embedded resource]".into(), str::to_owned),
+            Err(error) => {
+                warn!(?error, "failed to serialize acp resource content");
+                "[embedded resource]".into()
+            }
+        },
         ContentBlock::Image(image) => format!("[image: {}]", image.mime_type),
         ContentBlock::Audio(audio) => format!("[audio: {}]", audio.mime_type),
-        _ => "[unsupported ACP content]".into(),
+        _ => "[unsupported acp content]".into(),
     }
 }
 
 /// Turns persisted renderer state into bounded Discord message chunks.
 fn render_projection(projection: &RenderProjection) -> BotResult<Vec<String>> {
-    let value: serde_json::Value = serde_json::from_str(&projection.state_json)
-        .map_err(|error| BotError::Projection(format!("invalid source state: {error}")))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&projection.state_json).map_err(|source| {
+            BotError::ProjectionDeserialize {
+                context: "source state",
+                source,
+            }
+        })?;
     match projection.source_kind.as_str() {
         "agent_message" => Ok(render_text(&value, false)),
         "agent_thought" => Ok(render_text(&value, true)),
@@ -276,17 +335,29 @@ fn render_tool_text(state: &serde_json::Value) -> String {
         .get("kind")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("other");
+    let name = tool_label(kind);
     let title = state
         .get("title")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|title| !title.is_empty())
-        .map_or_else(|| kind.replace('_', " "), ToOwned::to_owned);
+        .filter(|title| !title.replace('_', " ").eq_ignore_ascii_case(&name))
+        .filter(|title| !(kind == "execute" && execute_command(state).trim() == *title))
+        .map(header_title);
     let status = state
         .get("status")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("pending");
-    let header = format!("{} **{}**{}", tool_emoji(kind), title, tool_status(status));
+    let header = title.map_or_else(
+        || format!("{} **{name}**{}", tool_emoji(kind), tool_status(status)),
+        |title| {
+            format!(
+                "{} **{name}** {title}{}",
+                tool_emoji(kind),
+                tool_status(status)
+            )
+        },
+    );
     let body = match kind {
         "edit" => render_diff_content(state),
         "execute" => render_execute_content(state),
@@ -296,6 +367,20 @@ fn render_tool_text(state: &serde_json::Value) -> String {
         header
     } else {
         format!("{header}\n{body}")
+    }
+}
+
+/// Converts a protocol tool kind into the name shown in a tool header.
+fn tool_label(kind: &str) -> String {
+    kind.replace('_', " ")
+}
+
+/// Wraps path-like tool titles in inline Markdown code.
+fn header_title(title: &str) -> String {
+    if title.contains('/') || title.contains('\\') {
+        format!("`{}`", title.replace('`', "ˋ"))
+    } else {
+        title.to_owned()
     }
 }
 
@@ -322,7 +407,11 @@ fn render_plan(state: &serde_json::Value) -> String {
             "in_progress" => "~",
             _ => " ",
         };
-        let _ = write!(output, "\n[{marker}] {content}");
+        output.push('\n');
+        output.push('[');
+        output.push_str(marker);
+        output.push_str("] ");
+        output.push_str(content);
     }
     output
 }
@@ -368,12 +457,20 @@ fn render_tool_content(state: &serde_json::Value) -> String {
         }
     }
     if output.is_empty() {
-        state
+        let Some(input) = state
             .get("rawOutput")
             .or_else(|| state.get("rawInput"))
             .filter(|input| !input.is_null())
-            .and_then(|input| serde_json::to_string_pretty(input).ok())
-            .map_or_else(String::new, |input| fence(&input, "json"))
+        else {
+            return String::new();
+        };
+        match serde_json::to_string_pretty(input) {
+            Ok(input) => fence(&input, "json"),
+            Err(error) => {
+                warn!(?error, "failed to serialize acp tool content");
+                String::new()
+            }
+        }
     } else {
         output
     }
@@ -492,16 +589,26 @@ fn render_diff(diff: &serde_json::Value) -> String {
         .unwrap_or("file");
     let mut output = String::new();
     if let Some(old) = diff.get("oldText").and_then(serde_json::Value::as_str) {
-        let _ = writeln!(output, "--- a/{path}\n+++ b/{path}");
+        output.push_str("--- a/");
+        output.push_str(path);
+        output.push_str("\n+++ b/");
+        output.push_str(path);
+        output.push('\n');
         for line in old.lines() {
-            let _ = writeln!(output, "-{line}");
+            output.push('-');
+            output.push_str(line);
+            output.push('\n');
         }
     } else {
-        let _ = writeln!(output, "--- /dev/null\n+++ b/{path}");
+        output.push_str("--- /dev/null\n+++ b/");
+        output.push_str(path);
+        output.push('\n');
     }
     if let Some(new) = diff.get("newText").and_then(serde_json::Value::as_str) {
         for line in new.lines() {
-            let _ = writeln!(output, "+{line}");
+            output.push('+');
+            output.push_str(line);
+            output.push('\n');
         }
     }
     output
@@ -509,12 +616,7 @@ fn render_diff(diff: &serde_json::Value) -> String {
 
 /// Renders an execute tool's command and bounded output.
 fn render_execute_content(state: &serde_json::Value) -> String {
-    let command = state
-        .get("rawInput")
-        .and_then(|input| input.get("command").or_else(|| input.get("cmd")))
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| state.get("title").and_then(serde_json::Value::as_str))
-        .unwrap_or("command");
+    let command = execute_command(state);
     let mut output = fence(command, "sh");
     if let Some(result) = execute_output(state)
         && !result.trim().is_empty()
@@ -523,6 +625,16 @@ fn render_execute_content(state: &serde_json::Value) -> String {
         output.push_str(&fence(&keep_tail(&result, 1800), "ansi"));
     }
     output
+}
+
+/// Resolves the command represented by an execute tool call.
+fn execute_command(state: &serde_json::Value) -> &str {
+    state
+        .get("rawInput")
+        .and_then(|input| input.get("command").or_else(|| input.get("cmd")))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| state.get("title").and_then(serde_json::Value::as_str))
+        .unwrap_or("command")
 }
 
 /// Extracts execute output from raw output or text content.
@@ -648,7 +760,7 @@ async fn sync_messages(
         {
             return Err(SyncFailure {
                 message_ids: previous.to_vec(),
-                error: error.into(),
+                error: Box::new(error.into()),
             });
         }
     }
@@ -662,7 +774,7 @@ async fn sync_messages(
             Err(error) => {
                 return Err(SyncFailure {
                     message_ids: current,
-                    error: error.into(),
+                    error: Box::new(error.into()),
                 });
             }
         };
@@ -675,7 +787,7 @@ async fn sync_messages(
             message_ids.extend_from_slice(&plan.deletes[index..]);
             return Err(SyncFailure {
                 message_ids,
-                error: error.into(),
+                error: Box::new(error.into()),
             });
         }
     }
@@ -688,7 +800,7 @@ struct SyncFailure {
     /// Message IDs known to exist after the partial operation.
     message_ids: Vec<MessageId>,
     /// Discord error that stopped synchronization.
-    error: BotError,
+    error: Box<BotError>,
 }
 
 /// Splits text into Discord-sized Unicode-safe chunks.
@@ -903,9 +1015,53 @@ mod tests {
             panic!("tool update should change the projection");
         };
         let rendered = render_projection(&state).unwrap().concat();
-        assert!(rendered.contains("📖 **read source**"));
+        assert!(rendered.contains("📖 **read** read source"));
         assert!(rendered.contains("source text"));
         assert!(!rendered.contains("*running*"));
+    }
+
+    /// Keeps the tool name while omitting a title that only repeats it.
+    #[test]
+    fn redundant_tool_titles_are_omitted() {
+        let state = serde_json::json!({
+            "toolCallId": "tool-1",
+            "title": "Switch_Mode",
+            "kind": "switch_mode",
+            "status": "pending"
+        });
+        assert_eq!(render_tool_text(&state), "🔁 **switch mode** · *pending*");
+    }
+
+    /// Omits an execute title when it repeats the command in the shell block.
+    #[test]
+    fn execute_titles_matching_commands_are_omitted() {
+        let state = serde_json::json!({
+            "toolCallId": "tool-1",
+            "title": "cargo test",
+            "kind": "execute",
+            "status": "completed",
+            "rawInput": {"command": "cargo test"}
+        });
+        assert_eq!(
+            render_tool_text(&state),
+            "⚙️ **execute**\n```sh\ncargo test\n```"
+        );
+    }
+
+    /// Retains an execute title when it describes a different command.
+    #[test]
+    fn execute_titles_different_from_commands_are_shown() {
+        let state = serde_json::json!({
+            "toolCallId": "tool-1",
+            "title": "run tests",
+            "kind": "execute",
+            "status": "completed",
+            "rawInput": {"command": "cargo test"}
+        });
+        assert_eq!(
+            render_tool_text(&state),
+            "⚙️ **execute** run tests\n```sh\ncargo test\n```"
+        );
     }
 
     /// Verifies plans replace their checklist state in one stable projection.

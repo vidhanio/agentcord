@@ -4,7 +4,7 @@ use agentcord::Config;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-/// A Discord client for Agent Client Protocol agents.
+/// A Discord client for ACP agents.
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {

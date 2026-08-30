@@ -50,8 +50,6 @@ pub struct AgentKey(
 pub struct Config {
     /// Discord connection and projection settings.
     pub discord: DiscordConfig,
-    /// Project path resolution settings.
-    pub projects: ProjectsConfig,
     /// Configured ACP agents keyed by stable identifier.
     pub agents: BTreeMap<AgentKey, AgentConfig>,
     /// Permission-response behavior.
@@ -73,13 +71,6 @@ pub struct DiscordConfig {
     pub allowed_user_id: UserId,
     /// Forum where ACP sessions are projected as posts.
     pub forum_channel_id: ChannelId,
-}
-
-/// Filesystem settings used to resolve and label projects.
-#[derive(Clone, Debug, Deserialize)]
-pub struct ProjectsConfig {
-    /// Base path used to shorten project display labels.
-    pub base_path: PathBuf,
 }
 
 /// Command and presentation settings for one ACP agent.
@@ -162,7 +153,10 @@ impl Config {
     pub fn load(path: &Path) -> BotResult<Self> {
         let config =
             Self::from_source(File::from(path).format(FileFormat::Toml)).map_err(|error| {
-                BotError::Config(format!("failed to load {}: {error}", path.display()))
+                BotError::ConfigLoad {
+                    path: path.to_owned(),
+                    source: error,
+                }
             })?;
         config.validate()?;
         Ok(config)
@@ -190,48 +184,48 @@ impl Config {
     /// Agentcord's Discord surface.
     pub fn validate(&self) -> BotResult {
         if self.agents.is_empty() {
-            return Err(BotError::Config(
-                "at least one `[agents.<key>]` is required".into(),
-            ));
+            return Err(BotError::NoAgents);
         }
         if self.agents.len() > DISCORD_FORUM_TAG_LIMIT {
-            return Err(BotError::Config(format!(
-                "{} agents exceed Discord's {DISCORD_FORUM_TAG_LIMIT}-tag forum limit",
-                self.agents.len()
-            )));
+            return Err(BotError::TooManyAgents {
+                count: self.agents.len(),
+                limit: DISCORD_FORUM_TAG_LIMIT,
+                surface: "tag forum",
+            });
         }
         if self.agents.len() > DISCORD_SELECT_LIMIT {
-            return Err(BotError::Config(format!(
-                "{} agents exceed Discord's {DISCORD_SELECT_LIMIT}-option selector limit",
-                self.agents.len()
-            )));
+            return Err(BotError::TooManyAgents {
+                count: self.agents.len(),
+                limit: DISCORD_SELECT_LIMIT,
+                surface: "option selector",
+            });
         }
 
         for (key, agent) in &self.agents {
             if key.trim().is_empty() || key.chars().count() > 20 {
-                return Err(BotError::Config(format!(
-                    "agent key `{key}` must contain 1–20 characters because it names the forum tag"
-                )));
+                return Err(BotError::InvalidAgentKey {
+                    key: key.to_string(),
+                });
             }
             if agent.display_name.trim().is_empty() || agent.display_name.chars().count() > 100 {
-                return Err(BotError::Config(format!(
-                    "agent `{key}` display name must contain 1–100 characters"
-                )));
+                return Err(BotError::InvalidAgentDisplayName {
+                    key: key.to_string(),
+                });
             }
             if agent.command.as_os_str().is_empty() {
-                return Err(BotError::Config(format!(
-                    "agent `{key}` has an empty command"
-                )));
+                return Err(BotError::EmptyAgentCommand {
+                    key: key.to_string(),
+                });
             }
             if matches!(&agent.emoji, TagEmoji::Unicode(value) if value.trim().is_empty()) {
-                return Err(BotError::Config(format!(
-                    "agent `{key}` has an empty tag emoji"
-                )));
+                return Err(BotError::EmptyAgentEmoji {
+                    key: key.to_string(),
+                });
             }
             if matches!(agent.emoji, TagEmoji::Custom { id, .. } if id.get() == 0) {
-                return Err(BotError::Config(format!(
-                    "agent `{key}` has an invalid custom emoji id"
-                )));
+                return Err(BotError::InvalidAgentEmojiId {
+                    key: key.to_string(),
+                });
             }
         }
         Ok(())
@@ -244,7 +238,6 @@ impl fmt::Debug for Config {
         formatter
             .debug_struct("Config")
             .field("discord", &self.discord)
-            .field("projects", &self.projects)
             .field("agents", &self.agents)
             .field("permissions", &self.permissions)
             .field("timeouts", &self.timeouts)
@@ -406,9 +399,6 @@ mod tests {
             allowed_user_id = 2
             forum_channel_id = 3
 
-            [projects]
-            base_path = "~/Projects"
-
             [agents.example]
             display_name = "Example Agent"
             command = "example-agent-acp"
@@ -427,15 +417,15 @@ mod tests {
                 allowed_user_id = 2
                 forum_channel_id = 3
 
-                [projects]
-                base_path = "/tmp/projects"
-
                 [agents.example]
                 display_name = "Example Agent"
                 command = "example-agent-acp"
                 args = ["--stdio"]
                 env = { SETTING = "1" }
                 emoji = { id = 7, animated = true }
+
+                [permissions]
+                approve_all = true
 
                 [timeouts]
                 startup = 42
@@ -454,6 +444,7 @@ mod tests {
         assert_eq!(config.timeouts.prompt, Duration::from_secs(120));
         assert_eq!(config.timeouts.edit_debounce, Duration::from_millis(100));
         assert_eq!(config.timeouts.modal, Timeouts::default().modal);
+        assert!(config.permissions.approve_all);
         config.validate().expect("valid configuration");
     }
 

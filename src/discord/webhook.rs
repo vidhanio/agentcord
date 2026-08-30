@@ -5,7 +5,7 @@ use serenity::all::{
 };
 use tracing::warn;
 
-use crate::{Bot, BotResult, render::split_message};
+use crate::{Bot, BotResult, discord::render::split_message};
 
 /// Display identity used for webhook-authored prompt messages.
 #[derive(Clone, Debug)]
@@ -23,10 +23,19 @@ impl UserProfile {
         guild: serenity::all::GuildId,
         user_id: serenity::all::UserId,
     ) -> Option<Self> {
-        let user = context.http.get_user(user_id).await.ok()?;
+        let user = match context.http.get_user(user_id).await {
+            Ok(user) => user,
+            Err(error) => {
+                warn!(?error, %user_id, "failed to fetch user profile");
+                return None;
+            }
+        };
         let name = match context.http.get_member(guild, user_id).await {
             Ok(member) => member.display_name().to_owned(),
-            Err(_) => user.global_name.as_deref().unwrap_or(&user.name).to_owned(),
+            Err(error) => {
+                warn!(?error, %guild, %user_id, "failed to fetch guild member; using global profile");
+                user.global_name.as_deref().unwrap_or(&user.name).to_owned()
+            }
         };
         Some(Self {
             username: format!("{name} (via agentcord)"),
@@ -135,6 +144,6 @@ impl Bot {
 
     /// Returns the mutex protecting the process-wide webhook cache.
     pub(crate) fn webhook(&self) -> &tokio::sync::Mutex<Option<Webhook>> {
-        &self.state().webhook
+        self.state().discord.webhook()
     }
 }

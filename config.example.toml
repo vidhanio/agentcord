@@ -1,4 +1,4 @@
-# Copy to $XDG_CONFIG_HOME/agentcord/config.toml. Override the path with
+# Copy to `$XDG_CONFIG_HOME/agentcord/config.toml`. Override the path with
 # `--config` or `AGENTCORD_CONFIG`. String values support `${NAME}` expansion.
 
 [discord]
@@ -7,15 +7,12 @@ guild_id = 1234567890
 allowed_user_id = 1234567890
 forum_channel_id = 1234567890
 
-[projects]
-base_path = "~/Projects"
-
 [agents.example]
+# The agent key above doubles as the forum tag name, so keep it to 1–20 chars.
 display_name = "Example Agent"
 command = "example-agent-acp"
 args = ["--stdio"]
 env = { EXAMPLE_SETTING = "1" }
-# The agent key above doubles as the forum tag name, so keep it to 1-20 chars.
 emoji = "🤖"
 
 [agents.custom-emoji]
@@ -25,7 +22,7 @@ args = []
 emoji = { id = 123456789012345678, animated = false }
 
 [permissions]
-# Automatically choose ACP's AllowAlways option for every permission request.
+# Automatically choose ACP's `AllowAlways` option for every permission request.
 approve_all = false
 
 # Integer values are seconds; human durations are also accepted.

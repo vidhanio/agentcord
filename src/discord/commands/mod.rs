@@ -1,9 +1,11 @@
 //! Minimal slash-command surface for creating and importing sessions.
 
+use std::borrow::Cow;
+
 use poise::{CreateReply, FrameworkError, serenity_prelude as serenity};
 use tracing::warn;
 
-use crate::{Bot, BotError};
+use crate::{Bot, BotError, config::AgentKey};
 
 /// Maximum number of choices Discord accepts in one autocomplete response.
 const CHOICE_LIMIT: usize = 25;
@@ -18,16 +20,55 @@ pub struct BotFramework {
 
 /// Builds the guild-scoped command framework.
 pub fn framework(bot: &Bot) -> BotFramework {
+    let mut agent = agent::agent();
+    configure_agent_choices(&mut agent, bot);
+    let mut import = import::import();
+    configure_agent_choices(&mut import, bot);
     BotFramework {
         poise: poise::Framework::builder()
             .options(poise::FrameworkOptions {
-                commands: vec![agent::agent(), import::import()],
+                commands: vec![agent, import, model::model()],
                 on_error,
                 ..Default::default()
             })
             .build(),
         guild_id: bot.config().discord.guild_id,
     }
+}
+
+/// Adds the configured agents as fixed Discord choices to a command's agent
+/// parameter.
+fn configure_agent_choices(command: &mut poise::Command<Bot, BotError>, bot: &Bot) {
+    let choices = bot
+        .config()
+        .agents
+        .values()
+        .map(|agent| poise::CommandParameterChoice {
+            name: Cow::Owned(agent.display_name.clone()),
+            localizations: Cow::Borrowed(&[]),
+            __non_exhaustive: (),
+        })
+        .collect::<Vec<_>>();
+    if let Some(parameter) = command
+        .parameters
+        .iter_mut()
+        .find(|parameter| parameter.name == "agent")
+    {
+        parameter.autocomplete_callback = None;
+        parameter.choices = choices.into();
+    }
+}
+
+/// Resolves a fixed agent-choice index against the immutable configuration.
+fn agent_key_at(bot: &Bot, index: usize) -> Result<AgentKey, BotError> {
+    bot.config()
+        .agents
+        .keys()
+        .nth(index)
+        .cloned()
+        .ok_or_else(|| BotError::UnknownAgent {
+            key: format!("choice {index}"),
+        })
 }
 
 #[serenity::async_trait]
@@ -57,7 +98,7 @@ impl serenity::Framework for BotFramework {
     }
 }
 
-#[expect(clippy::unused_async, reason = "Poise checks must be async functions")]
+#[expect(clippy::unused_async, reason = "poise checks must be async functions")]
 /// Restricts commands to the configured Discord user.
 async fn allowed(ctx: poise::Context<'_, Bot, BotError>) -> Result<bool, BotError> {
     Ok(ctx.author().id == ctx.data().config().discord.allowed_user_id)
@@ -68,22 +109,29 @@ fn on_error(error: FrameworkError<'_, Bot, BotError>) -> poise::BoxFuture<'_, ()
     Box::pin(async move {
         match error {
             FrameworkError::Command { error, ctx, .. } => {
-                let _ = ctx
+                warn!(?error, "command failed");
+                if let Err(send_error) = ctx
                     .send(
                         CreateReply::new()
                             .content(format!("command failed: {error}"))
                             .ephemeral(true),
                     )
-                    .await;
+                    .await
+                {
+                    warn!(?send_error, "failed to send command error response");
+                }
             }
             FrameworkError::CommandCheckFailed { ctx, .. } => {
-                let _ = ctx
+                if let Err(send_error) = ctx
                     .send(
                         CreateReply::new()
                             .content("you're not allowed to use this bot")
                             .ephemeral(true),
                     )
-                    .await;
+                    .await
+                {
+                    warn!(?send_error, "failed to send command permission response");
+                }
             }
             other => {
                 if let Err(error) = poise::builtins::on_error(other).await {
@@ -109,3 +157,4 @@ fn truncate(value: &str, limit: usize) -> String {
 
 mod agent;
 mod import;
+mod model;

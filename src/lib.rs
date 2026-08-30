@@ -1,31 +1,24 @@
-//! Discord projection and supervision for Agent Client Protocol agents.
+#![recursion_limit = "256"]
 
-use std::{
-    fmt,
-    sync::{Arc, OnceLock},
-};
+//! Discord projection and supervision for ACP agents.
 
-use agent_client_protocol::schema::v1::SessionId;
+use std::{fmt, sync::Arc};
+
 use serenity::all::{
     Context, EventHandler, FullEvent, GatewayIntents, HttpBuilder, Token, async_trait,
 };
 use tracing::{info, warn};
 
 mod acp;
-mod commands;
-mod forum;
-mod projects;
-pub mod render;
-mod webhook;
+pub mod discord;
+mod error;
 
 pub mod config;
 pub mod db;
 
 pub use config::Config;
 pub use db::Db;
-
-/// Result type used by Agentcord operations.
-pub type BotResult<T = ()> = Result<T, BotError>;
+pub use error::{BotError, BotResult, ModelSpecError};
 
 /// Identifies whether a prompt already has a visible Discord message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,45 +27,6 @@ pub enum PromptOrigin {
     AlreadyVisible,
     /// The prompt came from another surface and needs a webhook mirror.
     NeedsMirror,
-}
-
-/// Errors produced while constructing and using Agentcord.
-#[derive(Debug, thiserror::Error)]
-pub enum BotError {
-    /// Configuration could not be loaded or validated.
-    #[error("configuration error: {0}")]
-    Config(String),
-    /// The state database could not be read or updated.
-    #[error(transparent)]
-    Database(#[from] toasty::Error),
-    /// A database or persisted project path cannot be represented safely.
-    #[error("database path error: {0}")]
-    DatabasePath(String),
-    /// A filesystem operation failed.
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    /// A user supplied command argument is invalid.
-    #[error("invalid request: {0}")]
-    InvalidRequest(String),
-    /// The ACP subprocess or protocol connection failed.
-    #[error("ACP error: {0}")]
-    Acp(String),
-    /// Discord has not delivered its first ready event.
-    #[error("Discord is not ready")]
-    DiscordNotReady,
-    /// A protocol update could not be reduced to renderer state.
-    #[error("projection error: {0}")]
-    Projection(String),
-    /// A Discord API operation failed.
-    #[error("Discord error: {0}")]
-    Serenity(Box<serenity::Error>),
-}
-
-impl From<serenity::Error> for BotError {
-    /// Wraps a Serenity error without exposing it as a public dependency type.
-    fn from(error: serenity::Error) -> Self {
-        Self::Serenity(Box::new(error))
-    }
 }
 
 /// Cheaply cloneable handle to the process-wide application state.
@@ -88,10 +42,8 @@ pub struct BotState {
     pub config: Config,
     /// Persistent session and Discord projection state.
     pub db: Db,
-    /// Serenity context installed by the first ready event.
-    context: OnceLock<Context>,
-    /// Cached webhook used to represent prompts as the allowed user.
-    webhook: tokio::sync::Mutex<Option<serenity::all::Webhook>>,
+    /// Discord context, webhook cache, and integration-owned runtime state.
+    discord: discord::state::State,
     /// Per-thread ACP session actors.
     supervisor: acp::Supervisor,
 }
@@ -110,20 +62,19 @@ impl Bot {
         Self(Arc::new(BotState {
             config,
             db,
-            context: OnceLock::new(),
-            webhook: tokio::sync::Mutex::new(None),
+            discord: discord::state::State::default(),
             supervisor: acp::Supervisor::default(),
         }))
     }
 
     /// Installs the Serenity context from the first ready event.
     pub fn install_context(&self, context: Context) {
-        let _ = self.0.context.set(context);
+        self.0.discord.install_context(context);
     }
 
     /// Returns the installed Serenity context.
     pub fn context(&self) -> BotResult<&Context> {
-        self.0.context.get().ok_or(BotError::DiscordNotReady)
+        self.0.discord.context()
     }
 
     /// Returns the immutable application configuration.
@@ -155,92 +106,33 @@ impl Bot {
             .db()
             .session(thread)
             .await?
-            .ok_or_else(|| BotError::Acp("this thread is not an ACP session".into()))?;
+            .ok_or(BotError::NotSession { thread })?;
         self.state()
             .supervisor
             .prompt(self, &row, text, turn_id, origin)
     }
 
-    /// Creates a new ACP session, binds it to a forum post, and queues its
-    /// initial prompt.
-    pub async fn create_session(
+    /// Changes the selected model for a session thread.
+    pub async fn set_model(
         &self,
-        agent_key: &config::AgentKey,
-        project: projects::Project,
-        prompt: String,
-    ) -> BotResult<serenity::all::GenericChannelId> {
-        if prompt.trim().is_empty() {
-            return Err(BotError::InvalidRequest("the prompt is empty".into()));
-        }
-        let created = self
-            .state()
-            .supervisor
-            .new_session(self, agent_key, project.path.clone())
-            .await?;
-        let metadata = forum::SessionMetadata {
-            agent_key: agent_key.clone(),
-            project_label: project.label,
-            project_path: project.path,
-            session_id: created.session_id,
-            title: None,
-        };
-        let row = self.create_session_post(&metadata).await?;
-        if let Err(error) = self.db().insert_session(&row).await {
-            let context = self.context()?.clone();
-            let _ = row.thread_id.delete(&context.http, None).await;
-            return Err(error);
-        }
-        self.forward_prompt(
-            row.thread_id,
-            prompt,
-            row.thread_id.to_string(),
-            PromptOrigin::NeedsMirror,
-        )
-        .await?;
-        Ok(row.thread_id)
+        thread: serenity::all::GenericChannelId,
+        model: acp::ModelSpec,
+    ) -> BotResult {
+        let row = self
+            .db()
+            .session(thread)
+            .await?
+            .ok_or(BotError::NotSession { thread })?;
+        self.state().supervisor.set_model(self, &row, model).await
     }
 
-    /// Imports an ACP session exposed by `session/list` into a forum post.
-    pub async fn import_session(
+    /// Returns cached ACP configuration options for an active session.
+    #[must_use]
+    pub(crate) fn session_ui(
         &self,
-        agent_key: &config::AgentKey,
-        session_id: &SessionId,
-    ) -> BotResult<serenity::all::GenericChannelId> {
-        if session_id.to_string().trim().is_empty() {
-            return Err(BotError::InvalidRequest("the session id is empty".into()));
-        }
-        if let Some(existing) = self.db().session_by_agent(agent_key, session_id).await? {
-            return Err(BotError::InvalidRequest(format!(
-                "this session is already imported in thread {}",
-                existing.thread_id
-            )));
-        }
-        let imported = self
-            .state()
-            .supervisor
-            .inspect_session(self, agent_key, session_id)
-            .await?;
-        if !imported.project_path.is_absolute() {
-            return Err(BotError::InvalidRequest(format!(
-                "agent reported a non-absolute project path `{}`",
-                imported.project_path.display()
-            )));
-        }
-        let project = projects::Project::adopt(&self.config().projects, &imported.project_path);
-        let metadata = forum::SessionMetadata {
-            agent_key: agent_key.clone(),
-            project_label: project.label,
-            project_path: project.path,
-            session_id: imported.session_id,
-            title: imported.title,
-        };
-        let row = self.create_session_post(&metadata).await?;
-        if let Err(error) = self.db().insert_session(&row).await {
-            let context = self.context()?.clone();
-            let _ = row.thread_id.delete(&context.http, None).await;
-            return Err(error);
-        }
-        Ok(row.thread_id)
+        thread: serenity::all::GenericChannelId,
+    ) -> Option<acp::SessionUiState> {
+        self.state().supervisor.session_ui(thread)
     }
 
     /// Lists externally visible ACP sessions for command autocomplete.
@@ -259,7 +151,7 @@ impl fmt::Debug for Bot {
             .debug_struct("Bot")
             .field("config", &self.0.config)
             .field("db", &self.0.db)
-            .field("discord_ready", &self.0.context.get().is_some())
+            .field("discord_ready", &self.0.discord.is_ready())
             .finish()
     }
 }
@@ -271,7 +163,7 @@ impl fmt::Debug for BotState {
             .debug_struct("BotState")
             .field("config", &self.config)
             .field("db", &self.db)
-            .field("discord_ready", &self.context.get().is_some())
+            .field("discord_ready", &self.discord.is_ready())
             .finish_non_exhaustive()
     }
 }
@@ -281,12 +173,17 @@ impl EventHandler for Bot {
     /// Installs the Discord context and dispatches readiness and message
     /// events.
     async fn dispatch(&self, context: &Context, event: &FullEvent) {
-        let _ = self.0.context.set(context.clone());
+        self.0.discord.install_context(context.clone());
         match event {
-            FullEvent::Ready { .. } => info!("bot ready"),
+            FullEvent::Ready { .. } => {
+                info!("bot ready");
+                if let Err(error) = self.validate_and_reconcile_forum().await {
+                    warn!(?error, "configured forum is unavailable");
+                }
+            }
             FullEvent::Message { new_message, .. } => {
                 if let Err(error) = self.handle_message(new_message).await {
-                    warn!(?error, "failed to handle Discord message");
+                    warn!(?error, "failed to handle discord message");
                 }
             }
             _ => {}
@@ -316,9 +213,13 @@ impl Bot {
             )
             .await
         {
-            let _ = message
-                .reply(&context.http, format!("ACP prompt failed: {error}"))
-                .await;
+            warn!(?error, thread = ?message.channel_id, "acp prompt failed");
+            if let Err(reply_error) = message
+                .reply(&context.http, format!("acp prompt failed: {error}"))
+                .await
+            {
+                warn!(?reply_error, thread = ?message.channel_id, "failed to report acp prompt failure");
+            }
         }
         Ok(())
     }
@@ -331,8 +232,10 @@ pub async fn run(config: Config) -> BotResult {
         .config()
         .discord
         .bot_token
-        .parse()
-        .map_err(|error| BotError::Config(format!("invalid Discord bot token: {error}")))?;
+        .parse::<Token>()
+        .map_err(|error| BotError::InvalidDiscordToken {
+            message: error.to_string(),
+        })?;
     let http = HttpBuilder::new(token.clone()).build();
     let mut client = serenity::all::ClientBuilder::new_with_http(
         token,
@@ -340,7 +243,7 @@ pub async fn run(config: Config) -> BotResult {
         GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT,
     )
     .event_handler(bot.clone())
-    .framework(Box::new(commands::framework(&bot)))
+    .framework(Box::new(discord::commands::framework(&bot)))
     .data(bot)
     .await?;
     client.start().await?;

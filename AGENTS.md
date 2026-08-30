@@ -14,14 +14,13 @@ independent copies of its constituent state.
 ## Source layout
 
 - `src/lib.rs`: `Bot`, Serenity event handling, startup and wiring.
-- `src/acp.rs`: ACP subprocess/session supervision, prompt queues, restoration.
+- `src/acp/`: ACP subprocess/session supervision, prompt queues, restoration,
+  protocol lifecycle, and model configuration.
 - `src/config.rs`: TOML schema, environment expansion, validation and paths.
-- `src/projects.rs`: path resolution and display labels.
 - `src/db.rs`: new Agentcord SQLite state and Discord projection bindings.
-- `src/forum.rs`: fixed forum validation, tags, posts, titles and availability.
-- `src/render.rs`: ordered ACP update and tool-call projection.
-- `src/permission.rs`: allowed-user Discord permission interactions.
-- `src/commands/`: Poise wiring and the sole `/agent` command.
+- `src/discord/`: Discord-specific forum, webhook, permission, rendering, and
+  command integrations.
+- `src/discord/commands/`: Poise wiring for `/agent`, `/import`, and `/model`.
 
 ## Development
 
