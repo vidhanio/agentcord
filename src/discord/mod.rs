@@ -37,6 +37,18 @@ pub(crate) fn shorten_home(value: &str) -> String {
     value.to_owned()
 }
 
+/// Formats a project path relative to the configured base or home directory.
+pub(crate) fn project_label(path: &Path, base_path: &Path) -> String {
+    if !base_path.as_os_str().is_empty()
+        && let Ok(base_path) = expand_home(base_path)
+        && let Ok(relative) = path.strip_prefix(base_path)
+        && !relative.as_os_str().is_empty()
+    {
+        return relative.display().to_string();
+    }
+    shorten_home(&path.display().to_string())
+}
+
 pub(crate) mod commands;
 pub(crate) mod forum;
 pub(crate) mod permission;

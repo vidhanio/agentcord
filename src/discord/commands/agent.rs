@@ -1,9 +1,16 @@
 use std::path::{Path, PathBuf};
 
-use serenity::model::mention::Mentionable;
+use poise::serenity_prelude as serenity;
+use serenity::{
+    all::{AutocompleteChoice, CreateAutocompleteResponse},
+    model::mention::Mentionable,
+};
 use tracing::{info, warn};
 
-use crate::{Bot, BotError, discord::expand_home};
+use crate::{
+    Bot, BotError,
+    discord::{expand_home, project_label},
+};
 
 /// Creates a new ACP session in a configured project.
 #[poise::command(
@@ -15,7 +22,9 @@ use crate::{Bot, BotError, discord::expand_home};
 pub async fn agent(
     ctx: poise::ApplicationContext<'_, Bot, BotError>,
     #[description = "configured agent"] agent: usize,
-    #[description = "project directory or base-relative project name"] project: String,
+    #[description = "project directory or base-relative project name"]
+    #[autocomplete = "project_choices"]
+    project: String,
 ) -> Result<(), BotError> {
     let bot = ctx.data().clone();
     let agent_key = super::agent_key_at(&bot, agent)?;
@@ -72,6 +81,44 @@ fn resolve_project_path(input: &str, base_path: &Path) -> Result<PathBuf, BotErr
         return Err(BotError::ProjectNotDirectory { path: canonical });
     }
     Ok(canonical)
+}
+
+/// Lists persisted project paths with concise labels for `/agent`.
+async fn project_choices<'a>(
+    ctx: poise::Context<'a, Bot, BotError>,
+    partial: &'a str,
+) -> CreateAutocompleteResponse<'a> {
+    let poise::Context::Application(application) = ctx else {
+        return CreateAutocompleteResponse::new();
+    };
+    let bot = application.data();
+    let projects = match bot.db().project_paths().await {
+        Ok(projects) => projects,
+        Err(error) => {
+            warn!(?error, "failed to load projects for autocomplete");
+            return CreateAutocompleteResponse::new();
+        }
+    };
+    let base_path = &bot.config().projects.base_path;
+    let needle = partial.to_lowercase();
+    let mut choices = projects
+        .into_iter()
+        .map(|path| {
+            let label = project_label(&path, base_path);
+            let value = path.display().to_string();
+            (label, value)
+        })
+        .filter(|(label, value)| {
+            label.to_lowercase().contains(&needle) || value.to_lowercase().contains(&needle)
+        })
+        .collect::<Vec<_>>();
+    choices.sort_by(|left, right| left.0.cmp(&right.0));
+    let choices: Vec<AutocompleteChoice<'static>> = choices
+        .into_iter()
+        .take(super::CHOICE_LIMIT)
+        .map(|(label, value)| AutocompleteChoice::new(super::truncate(&label, 100), value))
+        .collect();
+    CreateAutocompleteResponse::new().set_choices(choices)
 }
 
 #[cfg(test)]

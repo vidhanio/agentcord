@@ -4,7 +4,10 @@
     reason = "Toasty's unique-index derive generates private underscore helpers"
 )]
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use agent_client_protocol::schema::v1::SessionId;
 use serenity::all::{GenericChannelId, MessageId};
@@ -187,6 +190,17 @@ impl Db {
             .map(SessionRow::try_from)
             .collect::<BotResult<Vec<_>>>()?;
         Ok(sessions)
+    }
+
+    /// Lists the distinct project paths used by persisted sessions.
+    pub async fn project_paths(&self) -> BotResult<Vec<PathBuf>> {
+        let projects = self
+            .sessions()
+            .await?
+            .into_iter()
+            .map(|session| session.project_path)
+            .collect::<BTreeSet<_>>();
+        Ok(projects.into_iter().collect())
     }
 
     /// Finds a Discord binding by its configured agent and ACP session id.
@@ -444,8 +458,23 @@ mod tests {
         );
         assert_eq!(db.sessions().await.unwrap(), vec![first.clone()]);
 
-        let duplicate = SessionRow {
+        let second = SessionRow {
             thread_id: GenericChannelId::new(11),
+            session_id: SessionId::new("session-11"),
+            project_path: PathBuf::from("/work/other-project"),
+            ..first.clone()
+        };
+        db.insert_session(&second).await.unwrap();
+        assert_eq!(
+            db.project_paths().await.unwrap(),
+            vec![
+                PathBuf::from("/work/other-project"),
+                PathBuf::from("/work/project")
+            ]
+        );
+
+        let duplicate = SessionRow {
+            thread_id: GenericChannelId::new(12),
             ..first
         };
         assert!(db.insert_session(&duplicate).await.is_err());

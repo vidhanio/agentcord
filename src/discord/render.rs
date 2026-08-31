@@ -1437,11 +1437,11 @@ mod tests {
     #[test]
     fn thought_chunks_render_as_italic_text() {
         let first = event(SessionUpdate::AgentThoughtChunk(
-            ContentChunk::new(ContentBlock::Text(TextContent::new("checking ")))
+            ContentChunk::new(ContentBlock::Text(TextContent::new(" checking ")))
                 .message_id(AcpMessageId::new("thought-1")),
         ));
         let second = event(SessionUpdate::AgentThoughtChunk(
-            ContentChunk::new(ContentBlock::Text(TextContent::new("the plan")))
+            ContentChunk::new(ContentBlock::Text(TextContent::new("the plan ")))
                 .message_id(AcpMessageId::new("thought-1")),
         ));
         let ProjectionOutcome::Updated(state) = reduce(None, &first).unwrap() else {

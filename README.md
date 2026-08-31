@@ -25,6 +25,7 @@ The current rewrite implements the first conversation slice:
   starts; newly created sessions keep the live connection used by
   `session/new` and accept messages typed in the forum thread immediately.
 - The allowed user can create a session through the `/agent` slash command,
+  with autocomplete suggestions from persisted project paths,
   import one exposed by an agent's `session/list` with `/import`, recreate the
   current thread with `/recreate`, or refresh it from a fresh ACP history load
   with `/refresh`. New sessions show the model default advertised by ACP;

@@ -14,7 +14,7 @@ use serenity::{
 };
 use tracing::{debug, info, warn};
 
-use super::{expand_home, shorten_home};
+use super::project_label;
 use crate::{
     Bot, BotError, BotResult,
     acp::default_model,
@@ -60,7 +60,7 @@ impl SessionMetadata {
             .as_deref()
             .filter(|title| !title.trim().is_empty())
             .unwrap_or(&fallback);
-        let project_path = project_title(&self.project_path, base_path);
+        let project_path = project_label(&self.project_path, base_path);
         let raw = format!("{project_path} · {title}")
             .chars()
             .map(|character| {
@@ -850,18 +850,6 @@ fn configured_emoji_key(emoji: &TagEmoji) -> String {
     }
 }
 
-/// Returns the project path relative to the configured base when possible.
-fn project_title(path: &std::path::Path, base_path: &std::path::Path) -> String {
-    if !base_path.as_os_str().is_empty()
-        && let Ok(base_path) = expand_home(base_path)
-        && let Ok(relative) = path.strip_prefix(base_path)
-        && !relative.as_os_str().is_empty()
-    {
-        return relative.display().to_string();
-    }
-    shorten_home(&path.display().to_string())
-}
-
 /// Retains the title portion already rendered in a managed forum post.
 fn existing_session_title(thread: &GuildThread, session_id: &SessionId) -> Option<String> {
     let fallback = format!("session {session_id}");
@@ -898,8 +886,8 @@ mod tests {
 
     use agent_client_protocol::schema::v1::SessionId;
 
-    use super::{SessionMetadata, project_title};
-    use crate::config::AgentKey;
+    use super::SessionMetadata;
+    use crate::{config::AgentKey, discord::project_label};
 
     #[test]
     fn forum_title_uses_relative_project_and_session_title() {
@@ -934,13 +922,24 @@ mod tests {
     }
 
     #[test]
-    fn project_title_expands_tilde_base_path() {
+    fn project_label_strips_tilde_base_path() {
         let home = dirs::home_dir().expect("home directory");
         let base = home.join("Projects");
 
         assert_eq!(
-            project_title(&base.join("blah"), PathBuf::from("~/Projects").as_path()),
+            project_label(&base.join("blah"), PathBuf::from("~/Projects").as_path()),
             "blah"
+        );
+    }
+
+    #[test]
+    fn project_label_shortens_home_path_outside_base() {
+        let home = dirs::home_dir().expect("home directory");
+        let base = home.join("Projects");
+
+        assert_eq!(
+            project_label(&home.join("Other/blah"), &base),
+            "~/Other/blah"
         );
     }
 }
