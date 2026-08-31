@@ -494,7 +494,7 @@ fn render_tool_text(state: &serde_json::Value) -> String {
         .map(str::trim)
         .filter(|title| !title.is_empty())
         .filter(|title| !title.replace('_', " ").eq_ignore_ascii_case(&name))
-        .filter(|title| !(kind == "execute" && execute_command(state).trim() == *title));
+        .filter(|title| !(kind == "execute" && redundant_execute_title(title, state)));
     if kind == "read" {
         return title.map_or_else(
             || format!("{} **{name}**", tool_emoji(kind)),
@@ -543,6 +543,13 @@ fn tool_label(kind: &str) -> String {
 /// Wraps tool titles in inline Markdown code.
 fn header_title(title: &str) -> String {
     format!("`{}`", title.replace('`', "ˋ"))
+}
+
+/// Recognizes execute titles that repeat the command, with or without a shell
+/// prompt prefix.
+fn redundant_execute_title(title: &str, state: &serde_json::Value) -> bool {
+    let command = execute_command(state).trim();
+    title == command || title == format!("$ {command}")
 }
 
 /// Formats a plan update as a compact checklist.
@@ -1493,6 +1500,23 @@ mod tests {
             "status": "completed",
             "rawInput": {"command": "cargo test"},
             "rawOutput": {"stdout": "test output", "stderr": "terminal output"}
+        });
+        assert_eq!(
+            render_tool_text(&state),
+            "⚙️ **execute**\n```sh\ncargo test\n```"
+        );
+    }
+
+    /// Omits an execute title when it repeats the command with a shell prompt.
+    #[test]
+    fn execute_titles_with_shell_prompt_are_omitted() {
+        let state = serde_json::json!({
+            "toolCallId": "tool-1",
+            "title": "$ cargo test",
+            "kind": "execute",
+            "status": "completed",
+            "rawInput": {"command": "cargo test"},
+            "rawOutput": {"stdout": "test output"}
         });
         assert_eq!(
             render_tool_text(&state),
