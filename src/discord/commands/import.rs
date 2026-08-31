@@ -30,14 +30,7 @@ pub async fn import(
             .await
     });
     let content = match operation.await {
-        Ok(Ok(thread)) => format!(
-            "imported **{}** — {}",
-            bot.config()
-                .agents
-                .get(&agent_key)
-                .map_or_else(|| agent_key.as_ref(), |agent| agent.display_name.as_str()),
-            thread.mention()
-        ),
+        Ok(Ok(thread)) => format!("imported {}", thread.mention()),
         Ok(Err(error)) => {
             warn!(?error, "failed to import session");
             format!("couldn't import the session: {error}")

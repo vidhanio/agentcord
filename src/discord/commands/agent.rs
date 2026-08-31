@@ -46,14 +46,7 @@ pub async fn agent(
             return Ok(());
         }
     };
-    let content = format!(
-        "created **{}** — {}; type your first prompt in the thread",
-        bot.config()
-            .agents
-            .get(&agent_key)
-            .map_or_else(|| agent_key.as_ref(), |agent| agent.display_name.as_str()),
-        thread.mention()
-    );
+    let content = format!("created {}", thread.mention());
     ctx.send(poise::CreateReply::new().content(content).ephemeral(true))
         .await?;
     Ok(())
