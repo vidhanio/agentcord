@@ -191,7 +191,7 @@ async fn run_prompt(
     request_task.abort();
     Err(PromptFailure::Connection(
         agent_client_protocol::Error::internal_error().data(format!(
-            "acp prompt did not finish after session/cancel (thread `{thread}`)"
+            "acp prompt did not finish after session/cancel (thread <#{thread}>)"
         )),
     ))
 }

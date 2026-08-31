@@ -179,7 +179,7 @@ pub enum BotError {
         key: String,
     },
     /// A command targeted a channel that is not an Agentcord session.
-    #[error("this is not an acp session in thread `{thread}`")]
+    #[error("this is not an acp session in thread <#{thread}>")]
     NotSession {
         /// Discord thread supplied by the command or message handler.
         thread: GenericChannelId,
@@ -188,7 +188,7 @@ pub enum BotError {
     #[error("the session id is empty")]
     EmptySessionId,
     /// A session is already bound to a live Discord thread.
-    #[error("this session is already imported in thread `{thread}`")]
+    #[error("this session is already imported in thread <#{thread}>")]
     AlreadyImported {
         /// Existing Discord thread.
         thread: GenericChannelId,
