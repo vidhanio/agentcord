@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use agent_client_protocol::schema::v1::SessionConfigOptionCategory;
 use poise::serenity_prelude as serenity;
 use serenity::all::{AutocompleteChoice, CreateAutocompleteResponse};
+use tracing::{debug, info};
 
 use crate::{Bot, BotError, acp::ModelSpec};
 
@@ -16,14 +17,22 @@ pub async fn model(
 ) -> Result<(), BotError> {
     let bot = ctx.data().clone();
     let model = ModelSpec::parse(&model)?;
+    let user = ctx.author().id;
+    let thread = ctx.channel_id();
+    info!(%user, ?thread, model = %model, "selecting session model...");
+    debug!(%user, ?thread, "deferring model selection response...");
     ctx.defer_ephemeral().await?;
-    bot.set_model(ctx.channel_id(), model.clone()).await?;
+    debug!(%user, ?thread, "deferred model selection response");
+    bot.set_model(thread, model.clone()).await?;
+    debug!(%user, ?thread, model = %model, "sending model selection response...");
     ctx.send(
         poise::CreateReply::new()
             .content(format!("model `{model}` selected"))
             .ephemeral(true),
     )
     .await?;
+    debug!(%user, ?thread, model = %model, "sent model selection response");
+    info!(%user, ?thread, model = %model, "reported session model selection");
     Ok(())
 }
 

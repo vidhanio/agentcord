@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use agent_client_protocol::schema::v1::SessionId;
 use serenity::all::{GenericChannelId, MessageId};
+use tracing::{debug, info, trace};
 
 use crate::{BotError, BotResult, config::AgentKey};
 
@@ -110,29 +111,46 @@ impl Db {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
+            debug!(path = %parent.display(), "creating database directory...");
             std::fs::create_dir_all(parent)?;
+            debug!(path = %parent.display(), "database directory ready");
         }
+        debug!(path = %path.display(), "checking database schema state...");
         let create_schema = !path.exists();
+        debug!(path = %path.display(), create_schema, "database schema state checked");
         let path = path.to_str().ok_or_else(|| BotError::DatabasePathNotUtf8 {
             path: path.to_owned(),
         })?;
-        Self::connect(&format!("sqlite:{path}"), create_schema).await
+        info!(path, create_schema, "opening state database...");
+        let db = Self::connect(&format!("sqlite:{path}"), create_schema).await?;
+        info!(path, "state database opened");
+        Ok(db)
     }
 
     /// Connects to a database and optionally creates its initial schema.
     async fn connect(url: &str, create_schema: bool) -> BotResult<Self> {
+        debug!(create_schema, "connecting database handle...");
         let inner = toasty::Db::builder()
             .models(toasty::models!(Session, RenderSource, RenderMessage))
             .connect(url)
             .await?;
+        debug!(create_schema, "database handle connected");
         if create_schema {
+            info!("creating state database schema...");
             inner.push_schema().await?;
+            info!("state database schema created");
         }
         Ok(Self { inner })
     }
 
     /// Inserts a durable Discord-to-ACP session binding.
     pub async fn insert_session(&self, row: &SessionRow) -> BotResult {
+        info!(
+            thread = ?row.thread_id,
+            agent = %row.agent_key,
+            session = %row.session_id,
+            "storing session binding..."
+        );
         if !row.project_path.is_absolute() {
             return Err(BotError::RelativeProjectPath {
                 path: row.project_path.clone(),
@@ -153,28 +171,40 @@ impl Db {
         })
         .exec(&mut db)
         .await?;
+        info!(
+            thread = ?row.thread_id,
+            agent = %row.agent_key,
+            session = %row.session_id,
+            "stored session binding"
+        );
         Ok(())
     }
 
     /// Finds the session bound to a Discord thread.
     pub async fn session(&self, thread_id: GenericChannelId) -> BotResult<Option<SessionRow>> {
+        trace!(thread = ?thread_id, "querying session binding...");
         let mut db = self.inner.clone();
         let session = Session::filter_by_thread_id(thread_id.to_string())
             .first()
             .exec(&mut db)
             .await?;
-        session.map(SessionRow::try_from).transpose()
+        let session = session.map(SessionRow::try_from).transpose()?;
+        trace!(thread = ?thread_id, found = session.is_some(), "queried session binding");
+        Ok(session)
     }
 
     /// Lists every persisted session.
     pub async fn sessions(&self) -> BotResult<Vec<SessionRow>> {
+        trace!("querying persisted sessions...");
         let mut db = self.inner.clone();
-        Session::all()
+        let sessions = Session::all()
             .exec(&mut db)
             .await?
             .into_iter()
             .map(SessionRow::try_from)
-            .collect()
+            .collect::<BotResult<Vec<_>>>()?;
+        trace!(count = sessions.len(), "queried persisted sessions");
+        Ok(sessions)
     }
 
     /// Finds a Discord binding by its configured agent and ACP session id.
@@ -183,8 +213,13 @@ impl Db {
         agent_key: &AgentKey,
         session_id: &SessionId,
     ) -> BotResult<Option<SessionRow>> {
+        trace!(
+            agent = %agent_key,
+            session = %session_id,
+            "querying session binding by agent and acp session..."
+        );
         let mut db = self.inner.clone();
-        Session::filter(
+        let session = Session::filter(
             Session::fields()
                 .agent()
                 .eq(agent_key.as_ref())
@@ -194,36 +229,69 @@ impl Db {
         .exec(&mut db)
         .await?
         .map(SessionRow::try_from)
-        .transpose()
+        .transpose()?;
+        trace!(
+            agent = %agent_key,
+            session = %session_id,
+            found = session.is_some(),
+            "queried session binding by agent and acp session"
+        );
+        Ok(session)
     }
 
     /// Deletes a session and all of its render projections.
     pub async fn delete_session(&self, thread_id: GenericChannelId) -> BotResult {
         let thread_id = thread_id.to_string();
+        info!(thread = %thread_id, "deleting session binding and projections...");
         let mut db = self.inner.clone();
+        debug!(thread = %thread_id, "starting session deletion transaction...");
         let mut transaction = db.transaction().await?;
+        debug!(thread = %thread_id, "session deletion transaction started");
+        debug!(thread = %thread_id, "deleting session render messages...");
         RenderMessage::filter(RenderMessage::fields().thread_id().eq(&thread_id))
             .delete()
             .exec(&mut transaction)
             .await?;
+        debug!(thread = %thread_id, "deleted session render messages");
+        debug!(thread = %thread_id, "deleting session render sources...");
         RenderSource::filter(RenderSource::fields().thread_id().eq(&thread_id))
             .delete()
             .exec(&mut transaction)
             .await?;
-        Session::filter_by_thread_id(thread_id)
+        debug!(thread = %thread_id, "deleted session render sources");
+        debug!(thread = %thread_id, "deleting session binding...");
+        Session::filter_by_thread_id(&thread_id)
             .delete()
             .exec(&mut transaction)
             .await?;
+        debug!(thread = %thread_id, "deleted session binding");
+        debug!(thread = %thread_id, "committing session deletion transaction...");
         transaction.commit().await?;
+        info!(thread = %thread_id, "deleted session binding and projections");
         Ok(())
     }
 
     /// Atomically replaces one logical source's state and ordered messages.
     pub async fn replace_projection(&self, projection: &RenderProjection) -> BotResult {
         let thread_id = projection.thread_id.to_string();
+        debug!(
+            thread = %thread_id,
+            source_kind = %projection.source_kind,
+            source_id = %projection.source_id,
+            message_count = projection.message_ids.len(),
+            "replacing render projection..."
+        );
         let mut db = self.inner.clone();
+        trace!(thread = %thread_id, "starting render projection transaction...");
         let mut transaction = db.transaction().await?;
+        trace!(thread = %thread_id, "render projection transaction started");
         let source = source_filter(&thread_id, &projection.source_kind, &projection.source_id);
+        trace!(
+            thread = %thread_id,
+            source_kind = %projection.source_kind,
+            source_id = %projection.source_id,
+            "deleting existing render messages..."
+        );
         RenderMessage::filter(message_source_filter(
             &thread_id,
             &projection.source_kind,
@@ -232,10 +300,34 @@ impl Db {
         .delete()
         .exec(&mut transaction)
         .await?;
+        trace!(
+            thread = %thread_id,
+            source_kind = %projection.source_kind,
+            source_id = %projection.source_id,
+            "deleted existing render messages"
+        );
+        trace!(
+            thread = %thread_id,
+            source_kind = %projection.source_kind,
+            source_id = %projection.source_id,
+            "deleting existing render source..."
+        );
         RenderSource::filter(source)
             .delete()
             .exec(&mut transaction)
             .await?;
+        trace!(
+            thread = %thread_id,
+            source_kind = %projection.source_kind,
+            source_id = %projection.source_id,
+            "deleted existing render source"
+        );
+        trace!(
+            thread = %thread_id,
+            source_kind = %projection.source_kind,
+            source_id = %projection.source_id,
+            "storing render source..."
+        );
         toasty::create!(RenderSource {
             thread_id: thread_id.as_str(),
             source_kind: projection.source_kind.as_str(),
@@ -244,6 +336,12 @@ impl Db {
         })
         .exec(&mut transaction)
         .await?;
+        trace!(
+            thread = %thread_id,
+            source_kind = %projection.source_kind,
+            source_id = %projection.source_id,
+            "stored render source"
+        );
         for (position, message_id) in projection.message_ids.iter().enumerate() {
             let position = i64::try_from(position).map_err(|_| BotError::ProjectionTooLarge)?;
             toasty::create!(RenderMessage {
@@ -256,7 +354,22 @@ impl Db {
             .exec(&mut transaction)
             .await?;
         }
+        trace!(
+            thread = %thread_id,
+            source_kind = %projection.source_kind,
+            source_id = %projection.source_id,
+            message_count = projection.message_ids.len(),
+            "stored render message bindings"
+        );
+        trace!(thread = %thread_id, "committing render projection transaction...");
         transaction.commit().await?;
+        debug!(
+            thread = %thread_id,
+            source_kind = %projection.source_kind,
+            source_id = %projection.source_id,
+            message_count = projection.message_ids.len(),
+            "replaced render projection"
+        );
         Ok(())
     }
 
@@ -268,14 +381,39 @@ impl Db {
         source_id: &str,
     ) -> BotResult<Option<RenderProjection>> {
         let thread_id_text = thread_id.to_string();
+        trace!(
+            thread = %thread_id_text,
+            source_kind,
+            source_id,
+            "querying render projection..."
+        );
         let mut db = self.inner.clone();
         let source = RenderSource::filter(source_filter(&thread_id_text, source_kind, source_id))
             .first()
             .exec(&mut db)
             .await?;
         let Some(source) = source else {
+            trace!(
+                thread = %thread_id_text,
+                source_kind,
+                source_id,
+                found = false,
+                "queried render projection"
+            );
             return Ok(None);
         };
+        trace!(
+            thread = %thread_id_text,
+            source_kind,
+            source_id,
+            "render projection source found"
+        );
+        trace!(
+            thread = %thread_id_text,
+            source_kind,
+            source_id,
+            "querying render projection messages..."
+        );
         let messages = RenderMessage::filter(message_source_filter(
             &thread_id_text,
             source_kind,
@@ -284,18 +422,35 @@ impl Db {
         .order_by(RenderMessage::fields().position().asc())
         .exec(&mut db)
         .await?;
+        let message_count = messages.len();
+        trace!(
+            thread = %thread_id_text,
+            source_kind,
+            source_id,
+            message_count,
+            "queried render projection messages"
+        );
         let message_ids = messages
             .into_iter()
             .map(|message| parse_id(&message.message))
             .collect::<BotResult<_>>()?;
 
-        Ok(Some(RenderProjection {
+        let projection = Some(RenderProjection {
             thread_id,
             source_kind: source.source_kind,
             source_id: source.source_id,
             state_json: source.state_json,
             message_ids,
-        }))
+        });
+        trace!(
+            thread = %thread_id_text,
+            source_kind,
+            source_id,
+            found = true,
+            message_count,
+            "queried render projection"
+        );
+        Ok(projection)
     }
 
     /// Deletes one logical render projection.
@@ -306,17 +461,56 @@ impl Db {
         source_id: &str,
     ) -> BotResult {
         let thread_id = thread_id.to_string();
+        debug!(
+            thread = %thread_id,
+            source_kind,
+            source_id,
+            "deleting render projection..."
+        );
         let mut db = self.inner.clone();
+        trace!(thread = %thread_id, "starting render projection deletion transaction...");
         let mut transaction = db.transaction().await?;
+        trace!(thread = %thread_id, "render projection deletion transaction started");
+        trace!(
+            thread = %thread_id,
+            source_kind,
+            source_id,
+            "deleting render message bindings..."
+        );
         RenderMessage::filter(message_source_filter(&thread_id, source_kind, source_id))
             .delete()
             .exec(&mut transaction)
             .await?;
+        trace!(
+            thread = %thread_id,
+            source_kind,
+            source_id,
+            "deleted render message bindings"
+        );
+        trace!(
+            thread = %thread_id,
+            source_kind,
+            source_id,
+            "deleting render source..."
+        );
         RenderSource::filter(source_filter(&thread_id, source_kind, source_id))
             .delete()
             .exec(&mut transaction)
             .await?;
+        trace!(
+            thread = %thread_id,
+            source_kind,
+            source_id,
+            "deleted render source"
+        );
+        trace!(thread = %thread_id, "committing render projection deletion transaction...");
         transaction.commit().await?;
+        debug!(
+            thread = %thread_id,
+            source_kind,
+            source_id,
+            "deleted render projection"
+        );
         Ok(())
     }
 

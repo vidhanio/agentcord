@@ -9,7 +9,7 @@ use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
 use serde::{Deserialize, Serialize};
 use serenity::all::{Context, CreateMessage, EditMessage, GenericChannelId, MessageId};
 use text_splitter::{ChunkConfig, MarkdownSplitter};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::{Bot, BotError, BotResult, db::RenderProjection};
 
@@ -127,17 +127,19 @@ pub fn reduce(
 
 /// Applies and renders one event, synchronizing Discord before persistence.
 impl Bot {
-    /// Projects one ordered ACP update into its session thread.
-    pub async fn apply_projection_event(&self, event: ProjectionEvent) -> BotResult {
-        self.apply_projection_events(vec![event]).await
-    }
-
-    /// Projects adjacent ordered ACP updates with one Discord reconciliation
-    /// per source.
-    pub(crate) async fn apply_projection_events(&self, events: Vec<ProjectionEvent>) -> BotResult {
+    /// Reduces updates into the projections that need Discord synchronization.
+    async fn collect_projections(
+        &self,
+        events: Vec<ProjectionEvent>,
+    ) -> BotResult<Vec<RenderProjection>> {
         let mut projections = Vec::new();
         for event in events {
             let Some((kind, id)) = source_key(&event) else {
+                debug!(
+                    thread = ?event.thread_id,
+                    replay = event.replay,
+                    "ignoring acp update without a discord projection"
+                );
                 continue;
             };
             let index = projections
@@ -147,19 +149,69 @@ impl Bot {
                         && projection.source_kind == kind
                         && projection.source_id == id
                 });
-            let previous = match index {
-                Some(index) => Some(projections[index].clone()),
-                None => self.db().projection(event.thread_id, kind, &id).await?,
+            let previous = if let Some(index) = index {
+                debug!(
+                    thread = ?event.thread_id,
+                    source_kind = kind,
+                    source_id = %id,
+                    "reusing in-memory discord projection"
+                );
+                Some(projections[index].clone())
+            } else {
+                debug!(
+                    thread = ?event.thread_id,
+                    source_kind = kind,
+                    source_id = %id,
+                    "loading persisted discord projection..."
+                );
+                let previous = self.db().projection(event.thread_id, kind, &id).await?;
+                debug!(
+                    thread = ?event.thread_id,
+                    source_kind = kind,
+                    source_id = %id,
+                    found = previous.is_some(),
+                    "loaded persisted discord projection"
+                );
+                previous
             };
             let projection = match reduce(previous.clone(), &event)? {
-                ProjectionOutcome::Updated(projection) => projection,
+                ProjectionOutcome::Updated(projection) => {
+                    debug!(
+                        thread = ?event.thread_id,
+                        source_kind = kind,
+                        source_id = %id,
+                        replay = event.replay,
+                        "updated discord projection"
+                    );
+                    projection
+                }
                 ProjectionOutcome::Ignored if event.replay => {
                     let Some(previous) = previous else {
+                        debug!(
+                            thread = ?event.thread_id,
+                            source_kind = kind,
+                            source_id = %id,
+                            "ignoring replayed acp update without persisted projection"
+                        );
                         continue;
                     };
+                    debug!(
+                        thread = ?event.thread_id,
+                        source_kind = kind,
+                        source_id = %id,
+                        "retaining persisted projection for replayed acp update"
+                    );
                     previous
                 }
-                ProjectionOutcome::Ignored => continue,
+                ProjectionOutcome::Ignored => {
+                    debug!(
+                        thread = ?event.thread_id,
+                        source_kind = kind,
+                        source_id = %id,
+                        "ignoring acp update without a projection change"
+                    );
+                    continue;
+                }
             };
             if let Some(index) = index {
                 projections[index] = projection;
@@ -167,42 +219,145 @@ impl Bot {
                 projections.push(projection);
             }
         }
+        Ok(projections)
+    }
+
+    /// Projects one ordered ACP update into its session thread.
+    pub async fn apply_projection_event(&self, event: ProjectionEvent) -> BotResult {
+        self.apply_projection_events(vec![event]).await
+    }
+
+    /// Projects adjacent ordered ACP updates with one Discord reconciliation
+    /// per source.
+    pub(crate) async fn apply_projection_events(&self, events: Vec<ProjectionEvent>) -> BotResult {
+        debug!(
+            events = events.len(),
+            "processing acp updates for discord..."
+        );
+        let projections = self.collect_projections(events).await?;
         if projections.is_empty() {
+            debug!("no discord projection changes to synchronize");
             return Ok(());
         }
 
         let context = self.context()?.clone();
-        let mut targets = Vec::with_capacity(projections.len());
-        for projection in projections {
-            let target = render_projection(&projection)?;
-            targets.push((projection, target));
+        let targets = render_projections(projections)?;
+        self.store_projections(&targets).await?;
+        for (projection, target) in targets {
+            self.synchronize_projection(&context, projection, target)
+                .await?;
         }
-        for (projection, _) in &targets {
-            self.db().replace_projection(projection).await?;
-        }
+        Ok(())
+    }
 
-        for (mut projection, target) in targets {
-            match sync_messages(
-                &context,
-                projection.thread_id,
-                &projection.message_ids,
-                target,
-            )
-            .await
-            {
-                Ok(message_ids) => {
-                    projection.message_ids = message_ids;
-                    self.db().replace_projection(&projection).await?;
-                }
-                Err(failure) => {
-                    projection.message_ids = failure.message_ids;
-                    self.db().replace_projection(&projection).await?;
-                    return Err(*failure.error);
-                }
+    /// Renders and stores the latest state for each changed source.
+    async fn store_projections(&self, targets: &[(RenderProjection, Vec<String>)]) -> BotResult {
+        for (projection, _) in targets {
+            debug!(
+                thread = ?projection.thread_id,
+                source_kind = %projection.source_kind,
+                source_id = %projection.source_id,
+                "storing discord projection..."
+            );
+            self.db().replace_projection(projection).await?;
+            debug!(
+                thread = ?projection.thread_id,
+                source_kind = %projection.source_kind,
+                source_id = %projection.source_id,
+                "stored discord projection"
+            );
+        }
+        Ok(())
+    }
+
+    /// Synchronizes one rendered source and persists its Discord message IDs.
+    async fn synchronize_projection(
+        &self,
+        context: &Context,
+        mut projection: RenderProjection,
+        target: Vec<String>,
+    ) -> BotResult {
+        debug!(
+            thread = ?projection.thread_id,
+            source_kind = %projection.source_kind,
+            source_id = %projection.source_id,
+            previous_messages = projection.message_ids.len(),
+            target_messages = target.len(),
+            "synchronizing rendered discord messages..."
+        );
+        match sync_messages(
+            context,
+            projection.thread_id,
+            &projection.message_ids,
+            target,
+        )
+        .await
+        {
+            Ok(message_ids) => {
+                debug!(
+                    thread = ?projection.thread_id,
+                    source_kind = %projection.source_kind,
+                    source_id = %projection.source_id,
+                    messages = message_ids.len(),
+                    "synchronized rendered discord messages"
+                );
+                projection.message_ids = message_ids;
+                debug!(
+                    thread = ?projection.thread_id,
+                    source_kind = %projection.source_kind,
+                    source_id = %projection.source_id,
+                    "storing synchronized discord projection..."
+                );
+                self.db().replace_projection(&projection).await?;
+                debug!(
+                    thread = ?projection.thread_id,
+                    source_kind = %projection.source_kind,
+                    source_id = %projection.source_id,
+                    "stored synchronized discord projection"
+                );
+            }
+            Err(SyncFailure { message_ids, error }) => {
+                warn!(
+                    ?error,
+                    thread = ?projection.thread_id,
+                    source_kind = %projection.source_kind,
+                    source_id = %projection.source_id,
+                    messages = message_ids.len(),
+                    "failed to synchronize rendered discord messages"
+                );
+                projection.message_ids = message_ids;
+                self.db().replace_projection(&projection).await?;
+                return Err(*error);
             }
         }
         Ok(())
     }
+}
+
+/// Renders each changed projection into Discord-sized message chunks.
+fn render_projections(
+    projections: Vec<RenderProjection>,
+) -> BotResult<Vec<(RenderProjection, Vec<String>)>> {
+    projections
+        .into_iter()
+        .map(|projection| {
+            debug!(
+                thread = ?projection.thread_id,
+                source_kind = %projection.source_kind,
+                source_id = %projection.source_id,
+                "rendering discord projection..."
+            );
+            let target = render_projection(&projection)?;
+            debug!(
+                thread = ?projection.thread_id,
+                source_kind = %projection.source_kind,
+                source_id = %projection.source_id,
+                messages = target.len(),
+                "rendered discord projection"
+            );
+            Ok((projection, target))
+        })
+        .collect()
 }
 
 /// Renderer-owned state for a text source.
@@ -752,26 +907,98 @@ async fn sync_messages(
     chunks: Vec<String>,
 ) -> Result<Vec<MessageId>, SyncFailure> {
     let plan = plan_messages(previous, &chunks);
-    let mut current = previous[..plan.edits.len()].to_vec();
-    for (id, chunk) in &plan.edits {
-        if let Err(error) = thread
+    debug!(
+        thread = ?thread,
+        previous = previous.len(),
+        target = chunks.len(),
+        edits = plan.edits.len(),
+        sends = plan.sends.len(),
+        deletes = plan.deletes.len(),
+        "planning rendered discord message synchronization..."
+    );
+    let current = edit_messages(context, thread, previous, &plan.edits).await?;
+    let current = send_messages(context, thread, current, &plan.sends).await?;
+    let current = delete_messages(context, thread, current, &plan.deletes).await?;
+    debug!(
+        thread = ?thread,
+        messages = current.len(),
+        "synchronized rendered discord message plan"
+    );
+    Ok(current)
+}
+
+/// Edits the existing messages in a synchronization plan.
+async fn edit_messages(
+    context: &Context,
+    thread: GenericChannelId,
+    previous: &[MessageId],
+    edits: &[(MessageId, String)],
+) -> Result<Vec<MessageId>, SyncFailure> {
+    let current = previous[..edits.len()].to_vec();
+    for (id, chunk) in edits {
+        debug!(
+            thread = ?thread,
+            message = ?id,
+            characters = chunk.chars().count(),
+            "editing rendered discord message..."
+        );
+        match thread
             .edit_message(&context.http, *id, EditMessage::new().content(chunk))
             .await
         {
-            return Err(SyncFailure {
-                message_ids: previous.to_vec(),
-                error: Box::new(error.into()),
-            });
+            Ok(_) => debug!(thread = ?thread, message = ?id, "edited rendered discord message"),
+            Err(error) => {
+                warn!(
+                    ?error,
+                    thread = ?thread,
+                    message = ?id,
+                    "failed to edit rendered discord message"
+                );
+                return Err(SyncFailure {
+                    message_ids: previous.to_vec(),
+                    error: Box::new(error.into()),
+                });
+            }
         }
     }
+    Ok(current)
+}
 
-    for chunk in &plan.sends {
+/// Sends new messages in a synchronization plan.
+async fn send_messages(
+    context: &Context,
+    thread: GenericChannelId,
+    mut current: Vec<MessageId>,
+    sends: &[String],
+) -> Result<Vec<MessageId>, SyncFailure> {
+    for (index, chunk) in sends.iter().enumerate() {
+        debug!(
+            thread = ?thread,
+            chunk = index + 1,
+            chunks = sends.len(),
+            characters = chunk.chars().count(),
+            "sending rendered discord message..."
+        );
         let message = match thread
             .send_message(&context.http, CreateMessage::new().content(chunk))
             .await
         {
-            Ok(message) => message,
+            Ok(message) => {
+                debug!(
+                    thread = ?thread,
+                    message = ?message.id,
+                    chunk = index + 1,
+                    "sent rendered discord message"
+                );
+                message
+            }
             Err(error) => {
+                warn!(
+                    ?error,
+                    thread = ?thread,
+                    chunk = index + 1,
+                    "failed to send rendered discord message"
+                );
                 return Err(SyncFailure {
                     message_ids: current,
                     error: Box::new(error.into()),
@@ -780,15 +1007,40 @@ async fn sync_messages(
         };
         current.push(message.id);
     }
+    Ok(current)
+}
 
-    for (index, id) in plan.deletes.iter().enumerate() {
-        if let Err(error) = thread.delete_message(&context.http, *id, None).await {
-            let mut message_ids = current;
-            message_ids.extend_from_slice(&plan.deletes[index..]);
-            return Err(SyncFailure {
-                message_ids,
-                error: Box::new(error.into()),
-            });
+/// Deletes stale messages in a synchronization plan.
+async fn delete_messages(
+    context: &Context,
+    thread: GenericChannelId,
+    current: Vec<MessageId>,
+    deletes: &[MessageId],
+) -> Result<Vec<MessageId>, SyncFailure> {
+    for (index, id) in deletes.iter().enumerate() {
+        debug!(
+            thread = ?thread,
+            message = ?id,
+            "deleting stale rendered discord message..."
+        );
+        match thread.delete_message(&context.http, *id, None).await {
+            Ok(()) => {
+                debug!(thread = ?thread, message = ?id, "deleted stale rendered discord message");
+            }
+            Err(error) => {
+                warn!(
+                    ?error,
+                    thread = ?thread,
+                    message = ?id,
+                    "failed to delete stale rendered discord message"
+                );
+                let mut message_ids = current.clone();
+                message_ids.extend_from_slice(&deletes[index..]);
+                return Err(SyncFailure {
+                    message_ids,
+                    error: Box::new(error.into()),
+                });
+            }
         }
     }
     Ok(current)

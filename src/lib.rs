@@ -8,7 +8,7 @@ use serenity::all::{
     Context, EventHandler, FullEvent, GatewayIntents, GuildThread, HttpBuilder, PartialGuildThread,
     Token, async_trait,
 };
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
 mod acp;
 pub mod discord;
@@ -52,8 +52,25 @@ pub struct BotState {
 impl Bot {
     /// Constructs application state using the configured state path.
     pub async fn new(config: Config) -> BotResult<Self> {
-        config.validate()?;
-        let db = Db::open(&config::state_path()).await?;
+        info!(
+            agents = config.agents.len(),
+            "validating bot configuration..."
+        );
+        if let Err(error) = config.validate() {
+            error!(?error, "bot configuration is invalid");
+            return Err(error);
+        }
+        info!("bot configuration validated");
+        let state_path = config::state_path();
+        info!(path = ?state_path, "opening state database...");
+        let db = match Db::open(&state_path).await {
+            Ok(db) => db,
+            Err(error) => {
+                error!(?error, path = ?state_path, "failed to open state database");
+                return Err(error);
+            }
+        };
+        info!(path = ?state_path, "state database opened");
         Ok(Self::with_db(config, db))
     }
 
@@ -186,13 +203,24 @@ impl EventHandler for Bot {
     async fn dispatch(&self, context: &Context, event: &FullEvent) {
         self.0.discord.install_context(context.clone());
         match event {
-            FullEvent::Ready { .. } => {
-                info!("bot ready");
-                if let Err(error) = self.validate_and_reconcile_forum().await {
-                    warn!(?error, "configured forum is unavailable");
+            FullEvent::Ready { data_about_bot, .. } => {
+                info!(
+                    application = %data_about_bot.application.id,
+                    "discord ready; context installed"
+                );
+                info!("starting forum reconciliation...");
+                match self.validate_and_reconcile_forum().await {
+                    Ok(()) => info!("forum reconciliation completed"),
+                    Err(error) => {
+                        warn!(?error, "configured forum is unavailable");
+                    }
                 }
-                if let Err(error) = self.validate_and_reconcile_webhook().await {
-                    warn!(?error, "prompt webhook could not be initialized");
+                info!("starting prompt webhook reconciliation...");
+                match self.validate_and_reconcile_webhook().await {
+                    Ok(()) => info!("prompt webhook reconciliation completed"),
+                    Err(error) => {
+                        warn!(?error, "prompt webhook could not be initialized");
+                    }
                 }
             }
             FullEvent::Message { new_message, .. } => {
@@ -228,6 +256,12 @@ impl Bot {
         let Some(_) = self.db().session(message.channel_id).await? else {
             return Ok(());
         };
+        info!(
+            thread = ?message.channel_id,
+            message = %message.id,
+            characters = message.content.chars().count(),
+            "received prompt"
+        );
         if let Err(error) = self
             .forward_prompt(
                 message.channel_id,
@@ -237,24 +271,34 @@ impl Bot {
             )
             .await
         {
-            warn!(?error, thread = ?message.channel_id, "acp prompt failed");
+            warn!(?error, thread = ?message.channel_id, "acp `session/prompt` failed");
             if let Err(reply_error) = message
-                .reply(&context.http, format!("acp prompt failed: {error}"))
+                .reply(
+                    &context.http,
+                    format!("acp `session/prompt` failed: {error}"),
+                )
                 .await
             {
-                warn!(?reply_error, thread = ?message.channel_id, "failed to report acp prompt failure");
+                warn!(?reply_error, thread = ?message.channel_id, "failed to report acp `session/prompt` failure");
+            } else {
+                debug!(thread = ?message.channel_id, "reported acp prompt failure");
             }
+        } else {
+            info!(thread = ?message.channel_id, message = %message.id, "queued prompt");
         }
         Ok(())
     }
 
     /// Removes a newly created forum thread unless the bot owns it.
     async fn handle_thread_create(&self, thread: &GuildThread) -> BotResult {
-        if thread.parent_id != self.config().discord.forum_channel_id
-            || thread.owner_id == self.context()?.cache.current_user().id
-        {
+        if thread.parent_id != self.config().discord.forum_channel_id {
             return Ok(());
         }
+        if thread.owner_id == self.context()?.cache.current_user().id {
+            debug!(thread = ?thread.id, "observed bot-created forum thread");
+            return Ok(());
+        }
+        info!(thread = ?thread.id, "deleting unmanaged forum thread...");
         let context = self.context()?.clone();
         thread.id.widen().delete(&context.http, None).await?;
         info!(thread = ?thread.id, "deleted unmanaged forum thread");
@@ -267,9 +311,11 @@ impl Bot {
             return Ok(());
         }
         let thread_id = thread.id.widen();
+        debug!(thread = ?thread_id, "observed forum thread deletion");
         if self.db().session(thread_id).await?.is_none() {
             return Ok(());
         }
+        info!(thread = ?thread_id, "stopping deleted managed session...");
         self.state().supervisor.stop(thread_id);
         self.db().delete_session(thread_id).await?;
         info!(thread = ?thread_id, "removed deleted managed session");
@@ -279,17 +325,23 @@ impl Bot {
 
 /// Builds and runs the Discord gateway client.
 pub async fn run(config: Config) -> BotResult {
+    info!("initializing bot state...");
     let bot = Arc::new(Bot::new(config).await?);
-    let token: Token = bot
-        .config()
-        .discord
-        .bot_token
-        .parse::<Token>()
-        .map_err(|error| BotError::InvalidDiscordToken {
-            message: error.to_string(),
-        })?;
+    info!("bot state initialized");
+    let token: Token = match bot.config().discord.bot_token.parse::<Token>() {
+        Ok(token) => token,
+        Err(error) => {
+            error!(?error, "failed to parse discord token");
+            return Err(BotError::InvalidDiscordToken {
+                message: error.to_string(),
+            });
+        }
+    };
+    info!("discord token parsed");
     let http = HttpBuilder::new(token.clone()).build();
-    let mut client = serenity::all::ClientBuilder::new_with_http(
+    info!("discord http client built");
+    info!("building discord client...");
+    let mut client = match serenity::all::ClientBuilder::new_with_http(
         token,
         Arc::new(http),
         GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT,
@@ -297,7 +349,19 @@ pub async fn run(config: Config) -> BotResult {
     .event_handler(bot.clone())
     .framework(Box::new(discord::commands::framework(&bot)))
     .data(bot)
-    .await?;
-    client.start().await?;
+    .await
+    {
+        Ok(client) => client,
+        Err(error) => {
+            error!(?error, "failed to build discord client");
+            return Err(error.into());
+        }
+    };
+    info!("discord client built; starting gateway...");
+    if let Err(error) = client.start().await {
+        error!(?error, "discord gateway stopped with an error");
+        return Err(error.into());
+    }
+    info!("discord gateway stopped");
     Ok(())
 }

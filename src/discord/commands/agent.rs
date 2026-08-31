@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serenity::model::mention::Mentionable;
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 use crate::{Bot, BotError};
 
@@ -20,7 +20,18 @@ pub async fn agent(
     let bot = ctx.data().clone();
     let agent_key = super::agent_key_at(&bot, agent)?;
     let project = resolve_project_path(project.trim())?;
+    let user = ctx.author().id;
+    let channel = ctx.channel_id();
+    info!(
+        %user,
+        ?channel,
+        agent = %agent_key,
+        project = ?project,
+        "creating session..."
+    );
+    debug!(%user, "deferring session creation response...");
     ctx.defer_ephemeral().await?;
+    debug!(%user, "deferred session creation response");
     let operation_bot = bot.clone();
     let operation_agent = agent_key.clone();
     let operation = tokio::spawn(async move {
@@ -29,31 +40,41 @@ pub async fn agent(
             .await
     });
     let thread = match operation.await {
-        Ok(Ok(thread)) => thread,
+        Ok(Ok(thread)) => {
+            info!(%user, ?thread, agent = %agent_key, "session created");
+            thread
+        }
         Ok(Err(error)) => {
-            warn!(?error, "failed to create session");
+            warn!(?error, %user, agent = %agent_key, "failed to create session");
+            debug!(%user, "sending session creation error response...");
             ctx.send(
                 poise::CreateReply::new()
                     .content(format!("couldn't create the session: {error}"))
                     .ephemeral(true),
             )
             .await?;
+            debug!(%user, "sent session creation error response");
             return Ok(());
         }
         Err(error) => {
-            warn!(?error, "session creation task failed");
+            warn!(?error, %user, agent = %agent_key, "session creation task failed");
+            debug!(%user, "sending session creation error response...");
             ctx.send(
                 poise::CreateReply::new()
                     .content(format!("couldn't create the session: {error}"))
                     .ephemeral(true),
             )
             .await?;
+            debug!(%user, "sent session creation error response");
             return Ok(());
         }
     };
     let content = format!("created {}", thread.mention());
+    debug!(%user, ?thread, "sending session creation response...");
     ctx.send(poise::CreateReply::new().content(content).ephemeral(true))
         .await?;
+    debug!(%user, ?thread, "sent session creation response");
+    info!(%user, ?thread, "reported session creation");
     Ok(())
 }
 

@@ -5,13 +5,13 @@ use std::{collections::HashMap, path::PathBuf};
 use agent_client_protocol::schema::v1::SessionId;
 use serenity::{
     all::{
-        ChannelType, Context, CreateForumPost, CreateForumTag, CreateMessage, EditChannel,
-        EditThread, ForumEmoji, ForumTag, ForumTagId, GenericChannelId, GuildChannel, GuildThread,
-        ReactionType, ThreadId, small_fixed_array::TruncatingInto,
+        ChannelId, ChannelType, Context, CreateForumPost, CreateForumTag, CreateMessage,
+        EditChannel, EditThread, ForumEmoji, ForumTag, ForumTagId, GenericChannelId, GuildChannel,
+        GuildThread, ReactionType, ThreadId, small_fixed_array::TruncatingInto,
     },
     http::{HttpError, JsonErrorCode},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     Bot, BotError, BotResult,
@@ -86,11 +86,22 @@ impl Bot {
         agent_key: &AgentKey,
         project_path: PathBuf,
     ) -> BotResult<GenericChannelId> {
+        info!(
+            agent = %agent_key,
+            project = ?project_path,
+            "creating session binding..."
+        );
         let created = self
             .state()
             .supervisor
             .new_session(self, agent_key, project_path.clone())
             .await?;
+        debug!(
+            agent = %agent_key,
+            session = %created.session_id,
+            options = created.config_options.len(),
+            "received new acp session"
+        );
         let model = default_model(&created.config_options);
         let metadata = SessionMetadata {
             agent_key: agent_key.clone(),
@@ -100,18 +111,36 @@ impl Bot {
             model,
         };
         let row = self.create_session_post(&metadata).await?;
+        debug!(thread = ?row.thread_id, "storing new session binding...");
         if let Err(error) = self.db().insert_session(&row).await {
+            warn!(
+                ?error,
+                thread = ?row.thread_id,
+                "failed to store new session binding"
+            );
             let context = self.context()?.clone();
-            if let Err(cleanup_error) = row.thread_id.delete(&context.http, None).await {
-                warn!(
-                    ?cleanup_error,
+            warn!(
+                thread = ?row.thread_id,
+                "deleting session post after database error..."
+            );
+            match row.thread_id.delete(&context.http, None).await {
+                Ok(_) => debug!(
                     thread = ?row.thread_id,
-                    "failed to delete session post after database error"
-                );
+                    "deleted session post after database error"
+                ),
+                Err(cleanup_error) => {
+                    warn!(
+                        ?cleanup_error,
+                        thread = ?row.thread_id,
+                        "failed to delete session post after database error"
+                    );
+                }
             }
             return Err(error);
         }
+        debug!(thread = ?row.thread_id, "stored new session binding");
         self.state().supervisor.start_new(self, &row, created);
+        info!(thread = ?row.thread_id, "session is ready");
         Ok(row.thread_id)
     }
 
@@ -121,6 +150,11 @@ impl Bot {
         agent_key: &AgentKey,
         session_id: &SessionId,
     ) -> BotResult<GenericChannelId> {
+        info!(
+            agent = %agent_key,
+            session = %session_id,
+            "importing session binding..."
+        );
         if session_id.to_string().trim().is_empty() {
             return Err(BotError::EmptySessionId);
         }
@@ -130,6 +164,11 @@ impl Bot {
                     thread: existing.thread_id,
                 });
             }
+            info!(
+                thread = ?existing.thread_id,
+                session = %session_id,
+                "removing stale session binding..."
+            );
             self.state().supervisor.stop(existing.thread_id);
             self.db().delete_session(existing.thread_id).await?;
             info!(
@@ -155,6 +194,12 @@ impl Bot {
             .supervisor
             .validate_session(self, agent_key, &imported.session_id, &project_path)
             .await?;
+        debug!(
+            agent = %agent_key,
+            session = %imported.session_id,
+            project = ?project_path,
+            "validated imported session"
+        );
         let metadata = SessionMetadata {
             agent_key: agent_key.clone(),
             project_path,
@@ -163,18 +208,36 @@ impl Bot {
             model: None,
         };
         let row = self.create_session_post(&metadata).await?;
+        debug!(thread = ?row.thread_id, "storing imported session binding...");
         if let Err(error) = self.db().insert_session(&row).await {
+            warn!(
+                ?error,
+                thread = ?row.thread_id,
+                "failed to store imported session binding"
+            );
             let context = self.context()?.clone();
-            if let Err(cleanup_error) = row.thread_id.delete(&context.http, None).await {
-                warn!(
-                    ?cleanup_error,
+            warn!(
+                thread = ?row.thread_id,
+                "deleting imported session post after database error..."
+            );
+            match row.thread_id.delete(&context.http, None).await {
+                Ok(_) => debug!(
                     thread = ?row.thread_id,
-                    "failed to delete imported session post after database error"
-                );
+                    "deleted imported session post after database error"
+                ),
+                Err(cleanup_error) => {
+                    warn!(
+                        ?cleanup_error,
+                        thread = ?row.thread_id,
+                        "failed to delete imported session post after database error"
+                    );
+                }
             }
             return Err(error);
         }
+        debug!(thread = ?row.thread_id, "stored imported session binding");
         self.state().supervisor.start(self, &row, Vec::new());
+        info!(thread = ?row.thread_id, "imported session is ready");
         Ok(row.thread_id)
     }
 
@@ -192,7 +255,12 @@ impl Bot {
                     agent_key: metadata.agent_key.to_string(),
                 })?;
         let title = metadata.post_title();
-        let created = self
+        info!(
+            agent = %metadata.agent_key,
+            session = %metadata.session_id,
+            "creating session forum post..."
+        );
+        let created = match self
             .config()
             .discord
             .forum_channel_id
@@ -203,20 +271,52 @@ impl Bot {
                     CreateMessage::new().content(metadata.starter_message()),
                 ),
             )
-            .await?;
+            .await
+        {
+            Ok(created) => created,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    agent = %metadata.agent_key,
+                    session = %metadata.session_id,
+                    "failed to create session forum post"
+                );
+                return Err(error.into());
+            }
+        };
+        info!(
+            agent = %metadata.agent_key,
+            session = %metadata.session_id,
+            thread = ?created.id,
+            "created session forum post"
+        );
+        debug!(thread = ?created.id, "applying session forum tag...");
         if let Err(error) = ThreadId::new(created.id.get())
             .edit(&context.http, EditThread::new().applied_tags(vec![tag]))
             .await
         {
-            if let Err(cleanup_error) = created.id.widen().delete(&context.http, None).await {
-                warn!(
-                    ?cleanup_error,
-                    thread = %created.id,
-                    "failed to delete untagged forum post"
-                );
+            warn!(
+                ?error,
+                thread = %created.id,
+                "failed to apply session forum tag"
+            );
+            warn!(
+                thread = %created.id,
+                "deleting untagged forum post..."
+            );
+            match created.id.widen().delete(&context.http, None).await {
+                Ok(_) => debug!(thread = %created.id, "deleted untagged forum post"),
+                Err(cleanup_error) => {
+                    warn!(
+                        ?cleanup_error,
+                        thread = %created.id,
+                        "failed to delete untagged forum post"
+                    );
+                }
             }
             return Err(error.into());
         }
+        debug!(thread = ?created.id, "applied session forum tag");
 
         Ok(SessionRow {
             thread_id: created.id.widen(),
@@ -228,9 +328,14 @@ impl Bot {
 
     /// Checks that the configured forum is available and has agent tags.
     pub(crate) async fn validate_and_reconcile_forum(&self) -> BotResult {
+        info!("validating configured forum...");
         let context = self.context()?.clone();
         let tag_ids = self.tag_ids(&context).await?;
-        self.reconcile_threads(&context, &tag_ids).await
+        let result = self.reconcile_threads(&context, &tag_ids).await;
+        if result.is_ok() {
+            info!("validated configured forum");
+        }
+        result
     }
 
     /// Fetches the configured forum and ensures every agent has a tag.
@@ -238,6 +343,7 @@ impl Bot {
         &self,
         context: &Context,
     ) -> BotResult<HashMap<crate::config::AgentKey, ForumTagId>> {
+        debug!("fetching configured forum tags...");
         let mut channel = self.forum_channel(context).await?;
         let desired = self
             .config()
@@ -258,6 +364,11 @@ impl Bot {
             })
             .collect::<Vec<_>>();
         if desired.len() > 20 {
+            warn!(
+                configured = desired.len(),
+                limit = 20,
+                "configured forum has too many tags"
+            );
             return Err(BotError::TooManyForumTags {
                 configured: self.config().agents.len(),
                 limit: 20,
@@ -276,14 +387,29 @@ impl Bot {
             .map(|(key, agent)| (key.to_string(), configured_emoji_key(&agent.emoji)))
             .collect::<Vec<_>>();
         if current.len() != wanted.len() || wanted.iter().any(|tag| !current.contains(tag)) {
-            channel
+            info!(
+                current = current.len(),
+                configured = wanted.len(),
+                "updating forum tags..."
+            );
+            if let Err(error) = channel
                 .id
                 .edit(&context.http, EditChannel::new().available_tags(desired))
-                .await?;
+                .await
+            {
+                warn!(
+                    ?error,
+                    forum = %channel.id,
+                    "failed to update forum tags"
+                );
+                return Err(error.into());
+            }
+            info!("updated forum tags");
+            debug!("refetching configured forum tags...");
             channel = self.forum_channel(context).await?;
         }
 
-        Ok(self
+        let tags = self
             .config()
             .agents
             .keys()
@@ -294,7 +420,145 @@ impl Bot {
                     .find(|tag| tag.name == key.as_ref())
                     .map(|tag| (key.clone(), tag.id))
             })
-            .collect())
+            .collect::<HashMap<_, _>>();
+        debug!(available = tags.len(), "resolved configured forum tags");
+        Ok(tags)
+    }
+
+    /// Fetches all active and archived threads belonging to the configured
+    /// forum.
+    async fn forum_threads(
+        &self,
+        context: &Context,
+        forum: ChannelId,
+    ) -> BotResult<HashMap<GenericChannelId, GuildThread>> {
+        let mut threads = self.active_forum_threads(context, forum).await?;
+        threads.extend(self.archived_forum_threads(context, forum).await?);
+        Ok(threads)
+    }
+
+    /// Fetches active threads belonging to the configured forum.
+    async fn active_forum_threads(
+        &self,
+        context: &Context,
+        forum: ChannelId,
+    ) -> BotResult<HashMap<GenericChannelId, GuildThread>> {
+        debug!(
+            guild = %self.config().discord.guild_id,
+            forum = %forum,
+            "listing active forum threads..."
+        );
+        let active = match self
+            .config()
+            .discord
+            .guild_id
+            .get_active_threads(&context.http)
+            .await
+        {
+            Ok(active) => active,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    guild = %self.config().discord.guild_id,
+                    forum = %forum,
+                    "failed to list active forum threads"
+                );
+                return Err(error.into());
+            }
+        };
+        let received = active.threads.len();
+        let mut threads = HashMap::new();
+        let mut forum_threads = 0;
+        for thread in active
+            .threads
+            .into_iter()
+            .filter(|thread| thread.parent_id == forum)
+        {
+            forum_threads += 1;
+            threads.insert(thread.id.widen(), thread);
+        }
+        debug!(received, forum_threads, "listed active forum threads");
+        Ok(threads)
+    }
+
+    /// Fetches archived public threads belonging to the configured forum.
+    async fn archived_forum_threads(
+        &self,
+        context: &Context,
+        forum: ChannelId,
+    ) -> BotResult<HashMap<GenericChannelId, GuildThread>> {
+        let mut threads = HashMap::new();
+        let mut before = None;
+        let mut pages = 0;
+        loop {
+            debug!(
+                forum = %forum,
+                page = pages + 1,
+                before = ?before,
+                "listing archived forum threads..."
+            );
+            let page = match forum
+                .get_archived_public_threads(&context.http, before, Some(100))
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    warn!(
+                        ?error,
+                        forum = %forum,
+                        page = pages + 1,
+                        "failed to list archived forum threads"
+                    );
+                    return Err(error.into());
+                }
+            };
+            pages += 1;
+            let received = page.threads.len();
+            let forum_threads = page
+                .threads
+                .iter()
+                .filter(|thread| thread.parent_id == forum)
+                .count();
+            let has_more = page.has_more;
+            let next_before = page.threads.iter().last().map(|thread| {
+                thread
+                    .thread_metadata
+                    .archive_timestamp
+                    .unwrap_or_else(|| thread.id.created_at())
+            });
+            for thread in page
+                .threads
+                .into_iter()
+                .filter(|thread| thread.parent_id == forum)
+            {
+                threads.insert(thread.id.widen(), thread);
+            }
+            debug!(
+                pages,
+                received, forum_threads, has_more, "listed archived forum threads"
+            );
+            if !has_more {
+                break;
+            }
+            let Some(next_before) = next_before else {
+                warn!(
+                    forum = %forum,
+                    page = pages,
+                    "archived forum thread pagination returned no cursor"
+                );
+                break;
+            };
+            if before == Some(next_before) {
+                warn!(
+                    forum = %forum,
+                    page = pages,
+                    "archived forum thread pagination did not advance"
+                );
+                break;
+            }
+            before = Some(next_before);
+        }
+        Ok(threads)
     }
 
     /// Re-tags managed threads and deletes all other forum threads.
@@ -310,61 +574,24 @@ impl Bot {
             .into_iter()
             .map(|session| (session.thread_id, session.agent_key))
             .collect::<HashMap<_, _>>();
+        debug!(managed = managed.len(), "loaded managed forum sessions");
         let forum = self.config().discord.forum_channel_id;
-        let mut threads = HashMap::new();
-
-        let active = self
-            .config()
-            .discord
-            .guild_id
-            .get_active_threads(&context.http)
-            .await?;
-        for thread in active
-            .threads
-            .into_iter()
-            .filter(|thread| thread.parent_id == forum)
-        {
-            threads.insert(thread.id.widen(), thread);
-        }
-
-        let mut before = None;
-        loop {
-            let page = forum
-                .get_archived_public_threads(&context.http, before, Some(100))
-                .await?;
-            let next_before = page.threads.iter().last().map(|thread| {
-                thread
-                    .thread_metadata
-                    .archive_timestamp
-                    .unwrap_or_else(|| thread.id.created_at())
-            });
-            for thread in page
-                .threads
-                .into_iter()
-                .filter(|thread| thread.parent_id == forum)
-            {
-                threads.insert(thread.id.widen(), thread);
-            }
-            if !page.has_more {
-                break;
-            }
-            let Some(next_before) = next_before else {
-                warn!("archived forum thread pagination returned no cursor");
-                break;
-            };
-            if before == Some(next_before) {
-                warn!("archived forum thread pagination did not advance");
-                break;
-            }
-            before = Some(next_before);
-        }
-
+        let threads = self.forum_threads(context, forum).await?;
+        let discovered = threads.len();
+        let mut deleted = 0;
+        let mut retagged = 0;
+        let mut failed = 0;
         let mut reconcile_error = None;
         for (thread_id, thread) in threads {
             let Some(agent_key) = managed.get(&thread_id) else {
+                info!(thread = ?thread_id, "deleting unmanaged forum thread...");
                 match thread_id.delete(&context.http, None).await {
-                    Ok(_) => info!(thread = ?thread_id, "deleted unmanaged forum thread"),
+                    Ok(_) => {
+                        deleted += 1;
+                        info!(thread = ?thread_id, "deleted unmanaged forum thread");
+                    }
                     Err(error) => {
+                        failed += 1;
                         warn!(?error, thread = ?thread_id, "failed to delete unmanaged forum thread");
                         if reconcile_error.is_none() {
                             reconcile_error = Some(error.into());
@@ -377,6 +604,7 @@ impl Bot {
                 let error = BotError::MissingForumTag {
                     agent_key: agent_key.to_string(),
                 };
+                failed += 1;
                 warn!(?error, thread = ?thread_id, "failed to find session forum tag");
                 if reconcile_error.is_none() {
                     reconcile_error = Some(error);
@@ -384,14 +612,20 @@ impl Bot {
                 continue;
             };
             if let Err(error) = self.retag_thread(context, &thread, tag).await {
+                failed += 1;
                 warn!(?error, thread = ?thread_id, "failed to re-tag managed forum thread");
                 if reconcile_error.is_none() {
                     reconcile_error = Some(error);
                 }
             } else {
-                info!(thread = ?thread_id, agent = %agent_key, "re-tagged managed forum thread");
+                retagged += 1;
+                debug!(thread = ?thread_id, agent = %agent_key, "re-tagged managed forum thread");
             }
         }
+        info!(
+            managed = managed.len(),
+            discovered, deleted, retagged, failed, "reconciled forum threads"
+        );
         reconcile_error.map_or(Ok(()), Err)
     }
 
@@ -404,34 +638,79 @@ impl Bot {
     ) -> BotResult {
         let update = EditThread::new().applied_tags(vec![tag]);
         if !thread.thread_metadata.archived() {
-            thread.id.edit(&context.http, update).await?;
-            return Ok(());
+            debug!(
+                thread = %thread.id,
+                tag = %tag,
+                "updating managed forum thread tag..."
+            );
+            return match thread.id.edit(&context.http, update).await {
+                Ok(_) => {
+                    debug!(thread = %thread.id, "updated managed forum thread tag");
+                    Ok(())
+                }
+                Err(error) => Err(error.into()),
+            };
         }
 
-        thread
-            .id
-            .edit(&context.http, update.archived(false))
-            .await?;
+        debug!(
+            thread = %thread.id,
+            tag = %tag,
+            "unarchiving managed forum thread to update its tag..."
+        );
+        if let Err(error) = thread.id.edit(&context.http, update.archived(false)).await {
+            return Err(error.into());
+        }
+        debug!(thread = %thread.id, "unarchived managed forum thread");
+        debug!(thread = %thread.id, "re-archiving managed forum thread...");
         let result = thread
             .id
             .edit(&context.http, EditThread::new().archived(true))
             .await;
-        result.map(|_| ()).map_err(Into::into)
+        match result {
+            Ok(_) => {
+                debug!(thread = %thread.id, "re-archived managed forum thread");
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Fetches and validates the configured Discord forum channel.
     async fn forum_channel(&self, context: &Context) -> BotResult<GuildChannel> {
-        let channel = self
-            .config()
-            .discord
-            .forum_channel_id
-            .to_guild_channel(context, Some(self.config().discord.guild_id))
-            .await?;
+        let forum = self.config().discord.forum_channel_id;
+        let guild = self.config().discord.guild_id;
+        debug!(
+            forum = %forum,
+            guild = %guild,
+            "fetching configured forum channel..."
+        );
+        let channel = match forum.to_guild_channel(context, Some(guild)).await {
+            Ok(channel) => channel,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    forum = %forum,
+                    guild = %guild,
+                    "failed to fetch configured forum channel"
+                );
+                return Err(error.into());
+            }
+        };
         if channel.base.kind == ChannelType::Forum {
+            debug!(
+                forum = %forum,
+                tags = channel.available_tags.len(),
+                "fetched configured forum channel"
+            );
             Ok(channel)
         } else {
+            warn!(
+                forum = %forum,
+                kind = ?channel.base.kind,
+                "configured channel is not a forum"
+            );
             Err(BotError::ForumChannelRequired {
-                channel: self.config().discord.forum_channel_id.to_string(),
+                channel: forum.to_string(),
             })
         }
     }
@@ -439,10 +718,24 @@ impl Bot {
     /// Checks whether a persisted session thread still exists in Discord.
     async fn session_thread_exists(&self, thread: GenericChannelId) -> BotResult<bool> {
         let context = self.context()?.clone();
+        debug!(thread = ?thread, "checking whether session thread exists...");
         match context.http.get_channel(thread).await {
-            Ok(_) => Ok(true),
-            Err(error) if is_unknown_channel(&error) => Ok(false),
-            Err(error) => Err(error.into()),
+            Ok(_) => {
+                debug!(thread = ?thread, "session thread exists");
+                Ok(true)
+            }
+            Err(error) if is_unknown_channel(&error) => {
+                debug!(thread = ?thread, "session thread does not exist");
+                Ok(false)
+            }
+            Err(error) => {
+                warn!(
+                    ?error,
+                    thread = ?thread,
+                    "failed to check whether session thread exists"
+                );
+                Err(error.into())
+            }
         }
     }
 }

@@ -10,6 +10,7 @@ use agent_client_protocol::{
         SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
     },
 };
+use tracing::debug;
 
 use super::{
     protocol::request_with_timeout,
@@ -274,6 +275,12 @@ pub(super) async fn apply_model(
 ) -> Result<Vec<SessionConfigOption>, agent_client_protocol::Error> {
     let mut options = options.to_vec();
     let change_count = model_changes(&options, model)?.len();
+    debug!(
+        session = %session_id,
+        model = %model,
+        changes = change_count,
+        "resolved acp model configuration"
+    );
     for index in 0..change_count {
         let (config_id, value) = model_changes(&options, model)?
             .into_iter()
@@ -282,22 +289,37 @@ pub(super) async fn apply_model(
                 agent_client_protocol::Error::internal_error()
                     .data("model configuration did not produce enough options")
             })?;
+        debug!(
+            session = %session_id,
+            model = %model,
+            option = ?config_id,
+            index,
+            total = change_count,
+            "sending acp `session/set_config_option`..."
+        );
         let request = request_with_timeout(
             timeout,
             connection
                 .send_request(SetSessionConfigOptionRequest::new(
                     session_id.clone(),
-                    config_id,
+                    config_id.clone(),
                     value,
                 ))
                 .block_task(),
-            "acp session/set_config_option timed out",
+            "acp `session/set_config_option` timed out",
         );
         let response: SetSessionConfigOptionResponse = if let Some(stop) = stop {
             stop_aware(stop, request).await?
         } else {
             request.await?
         };
+        debug!(
+            session = %session_id,
+            model = %model,
+            option = ?config_id,
+            options = response.config_options.len(),
+            "acp `session/set_config_option` completed"
+        );
         options = response.config_options;
     }
     Ok(options)
