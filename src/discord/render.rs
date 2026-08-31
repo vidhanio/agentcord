@@ -497,8 +497,20 @@ fn render_tool_text(state: &serde_json::Value) -> String {
         .map(str::trim)
         .filter(|title| !title.is_empty())
         .filter(|title| !title.replace('_', " ").eq_ignore_ascii_case(&name))
-        .filter(|title| !(kind == "execute" && execute_command(state).trim() == *title))
-        .map(header_title);
+        .filter(|title| !(kind == "execute" && execute_command(state).trim() == *title));
+    if kind == "read" {
+        return title.map_or_else(
+            || format!("{} **{name}**", tool_emoji(kind)),
+            |title| {
+                format!(
+                    "{} **{name}** `{}`",
+                    tool_emoji(kind),
+                    title.replace('`', "ˋ")
+                )
+            },
+        );
+    }
+    let title = title.map(header_title);
     let status = state
         .get("status")
         .and_then(serde_json::Value::as_str)
@@ -1244,11 +1256,11 @@ mod tests {
         );
     }
 
-    /// Verifies tool creation and updates merge into one rendered call.
+    /// Renders read tool updates as a path-only call without returning content.
     #[test]
-    fn tool_call_updates_replace_status_and_content() {
+    fn read_tool_calls_render_as_path_only() {
         let call = event(SessionUpdate::ToolCall(
-            ToolCall::new("tool-1", "read source")
+            ToolCall::new("tool-1", "src/main.rs")
                 .kind(ToolKind::Read)
                 .status(ToolCallStatus::InProgress),
         ));
@@ -1267,9 +1279,7 @@ mod tests {
             panic!("tool update should change the projection");
         };
         let rendered = render_projection(&state).unwrap().concat();
-        assert!(rendered.contains("📖 **read** read source"));
-        assert!(rendered.contains("source text"));
-        assert!(!rendered.contains("*running*"));
+        assert_eq!(rendered, "📖 **read** `src/main.rs`");
     }
 
     /// Keeps the tool name while omitting a title that only repeats it.
