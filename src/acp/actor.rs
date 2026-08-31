@@ -2,8 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
+use agent_client_protocol::schema::v1::SessionConfigOption;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::{
     connection,
@@ -23,7 +24,7 @@ pub(super) async fn run(
     row: SessionRow,
     commands: mpsc::Receiver<SessionCommand>,
     stop: Arc<Signal>,
-    ui: Arc<Mutex<super::model::SessionUiState>>,
+    config_options: Arc<Mutex<Vec<SessionConfigOption>>>,
     startup: ActorStartup,
 ) -> Result<(), agent_client_protocol::Error> {
     info!(
@@ -39,20 +40,21 @@ pub(super) async fn run(
         replaying: Arc::new(Mutex::new(true)),
         fault: Arc::new(Signal::default()),
         stop,
-        ui,
+        config_options,
     };
     let thread = row.thread_id;
     let edit_debounce = bot.config().timeouts.edit_debounce;
     let render_bot = bot.clone();
+    let render_fault = Arc::clone(&projection.fault);
     let render_task = tokio::spawn(async move {
-        debug!(thread = ?thread, "starting acp projection task...");
         while let Some(first) = update_receiver.recv().await {
             let events = collect_batch(first, &mut update_receiver, edit_debounce).await;
             if let Err(error) = render_bot.apply_projection_events(events).await {
+                render_fault.trigger();
                 warn!(?error, thread = ?thread, "failed to project acp update");
+                break;
             }
         }
-        debug!(thread = ?thread, "acp projection task finished");
     });
 
     let projection_updates = projection.updates.clone();
@@ -72,11 +74,8 @@ pub(super) async fn run(
     };
 
     drop(projection_updates);
-    debug!(thread = ?thread, "closed acp projection queue");
     if let Err(error) = render_task.await {
         warn!(?error, thread = ?thread, "projection task stopped unexpectedly");
-    } else {
-        debug!(thread = ?thread, "acp projection task joined");
     }
     match &result {
         Ok(()) => info!(thread = ?thread, "acp actor finished"),

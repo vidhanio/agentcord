@@ -8,7 +8,7 @@ use serenity::all::{
     Context, EventHandler, FullEvent, GatewayIntents, GuildThread, HttpBuilder, PartialGuildThread,
     Token, async_trait,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 mod acp;
 pub mod discord;
@@ -52,37 +52,15 @@ pub struct BotState {
 impl Bot {
     /// Constructs application state using the configured state path.
     pub async fn new(config: Config) -> BotResult<Self> {
-        info!(
-            agents = config.agents.len(),
-            "validating bot configuration..."
-        );
-        if let Err(error) = config.validate() {
-            error!(?error, "bot configuration is invalid");
-            return Err(error);
-        }
-        info!("bot configuration validated");
+        config.validate()?;
         let state_path = config::state_path();
-        info!(path = ?state_path, "opening state database...");
-        let db = match Db::open(&state_path).await {
-            Ok(db) => db,
-            Err(error) => {
-                error!(?error, path = ?state_path, "failed to open state database");
-                return Err(error);
-            }
-        };
-        info!(path = ?state_path, "state database opened");
-        Ok(Self::with_db(config, db))
-    }
-
-    /// Constructs application state with an already-open database.
-    #[must_use]
-    pub fn with_db(config: Config, db: Db) -> Self {
-        Self(Arc::new(BotState {
+        let db = Db::open(&state_path).await?;
+        Ok(Self(Arc::new(BotState {
             config,
             db,
             discord: discord::state::State::default(),
             supervisor: acp::Supervisor::default(),
-        }))
+        })))
     }
 
     /// Installs the Serenity context from the first ready event.
@@ -125,11 +103,10 @@ impl Bot {
             .session(thread)
             .await?
             .ok_or(BotError::NotSession { thread })?;
-        debug!(thread = ?thread, ?origin, "preparing acp prompt...");
         if origin == PromptOrigin::NeedsMirror
             && let Err(error) = self.mirror_user_message(thread, &text).await
         {
-            warn!(?error, thread = ?thread, "failed to mirror prompt; forwarding it anyway...");
+            warn!(?error, thread = ?thread, "failed to mirror prompt; forwarding it anyway");
         }
         self.state().supervisor.prompt(self, &row, text, turn_id)
     }
@@ -147,8 +124,9 @@ impl Bot {
             .ok_or(BotError::NotSession { thread })?;
         self.state().supervisor.set_model(self, &row, model).await?;
         let current_model = self
-            .session_ui(thread)
-            .and_then(|ui| acp::default_model(&ui.config_options));
+            .session_config_options(thread)
+            .as_deref()
+            .and_then(acp::default_model);
         if let Err(error) = self
             .update_session_starter(&row, current_model.as_deref())
             .await
@@ -179,11 +157,11 @@ impl Bot {
 
     /// Returns cached ACP configuration options for an active session.
     #[must_use]
-    pub(crate) fn session_ui(
+    pub(crate) fn session_config_options(
         &self,
         thread: serenity::all::GenericChannelId,
-    ) -> Option<acp::SessionUiState> {
-        self.state().supervisor.session_ui(thread)
+    ) -> Option<Vec<agent_client_protocol::schema::v1::SessionConfigOption>> {
+        self.state().supervisor.session_config_options(thread)
     }
 
     /// Lists externally visible ACP sessions for command autocomplete.
@@ -238,12 +216,8 @@ impl EventHandler for Bot {
                         warn!(?error, "configured forum is unavailable");
                     }
                 }
-                info!("starting prompt webhook reconciliation...");
-                match self.validate_and_reconcile_webhook().await {
-                    Ok(()) => info!("prompt webhook reconciliation completed"),
-                    Err(error) => {
-                        warn!(?error, "prompt webhook could not be initialized");
-                    }
+                if let Err(error) = self.validate_and_reconcile_webhook().await {
+                    warn!(?error, "prompt webhook could not be initialized");
                 }
             }
             FullEvent::Message { new_message, .. } => {
@@ -351,23 +325,17 @@ impl Bot {
 
 /// Builds and runs the Discord gateway client.
 pub async fn run(config: Config) -> BotResult {
-    info!("initializing bot state...");
     let bot = Arc::new(Bot::new(config).await?);
-    info!("bot state initialized");
-    let token: Token = match bot.config().discord.bot_token.parse::<Token>() {
-        Ok(token) => token,
-        Err(error) => {
-            error!(?error, "failed to parse discord token");
-            return Err(BotError::InvalidDiscordToken {
-                message: error.to_string(),
-            });
-        }
-    };
-    info!("discord token parsed");
+    let token: Token = bot
+        .config()
+        .discord
+        .bot_token
+        .parse::<Token>()
+        .map_err(|error| BotError::InvalidDiscordToken {
+            message: error.to_string(),
+        })?;
     let http = HttpBuilder::new(token.clone()).build();
-    info!("discord http client built");
-    info!("building discord client...");
-    let mut client = match serenity::all::ClientBuilder::new_with_http(
+    let mut client = serenity::all::ClientBuilder::new_with_http(
         token,
         Arc::new(http),
         GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT,
@@ -375,19 +343,8 @@ pub async fn run(config: Config) -> BotResult {
     .event_handler(bot.clone())
     .framework(Box::new(discord::commands::framework(&bot)))
     .data(bot)
-    .await
-    {
-        Ok(client) => client,
-        Err(error) => {
-            error!(?error, "failed to build discord client");
-            return Err(error.into());
-        }
-    };
-    info!("discord client built; starting gateway...");
-    if let Err(error) = client.start().await {
-        error!(?error, "discord gateway stopped with an error");
-        return Err(error.into());
-    }
-    info!("discord gateway stopped");
+    .await?;
+    info!("starting discord gateway");
+    client.start().await?;
     Ok(())
 }

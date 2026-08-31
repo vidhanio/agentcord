@@ -7,12 +7,6 @@ use serenity::{all::GenericChannelId, model::mention::Mentionable};
 /// Errors returned when parsing a `model[:reasoning]` selector.
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum ModelSpecError {
-    /// The selector is missing one of its required separators.
-    #[error("expected `model[:reasoning]`")]
-    MissingSeparator {
-        /// User-supplied selector.
-        input: String,
-    },
     /// The selector contains more than one reasoning separator.
     #[error("expected at most one reasoning separator")]
     ExtraSeparator {
@@ -52,14 +46,12 @@ pub enum BotError {
     #[error("at least one configured agent is required")]
     NoAgents,
     /// The configured agents exceed a Discord surface limit.
-    #[error("{count} configured agents exceed discord's {limit}-item {surface} limit")]
+    #[error("{count} configured agents exceed discord's {limit}-tag forum limit")]
     TooManyAgents {
         /// Number of configured agents.
         count: usize,
         /// Maximum supported items.
         limit: usize,
-        /// Discord surface imposing the limit.
-        surface: &'static str,
     },
     /// A configured agent key cannot be used as a forum tag.
     #[error("agent key `{key}` must contain 1–20 characters")]
@@ -96,14 +88,6 @@ pub enum BotError {
     MissingForumTag {
         /// Configured agent key.
         agent_key: String,
-    },
-    /// Configured forum tags exceed Discord's limit.
-    #[error("{configured} configured agent tags exceed discord's {limit}-tag limit")]
-    TooManyForumTags {
-        /// Number of configured agent tags.
-        configured: usize,
-        /// Discord's maximum number of forum tags.
-        limit: usize,
     },
     /// The configured Discord channel is not a forum.
     #[error("discord channel `{channel}` is not a forum")]

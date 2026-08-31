@@ -10,7 +10,7 @@ use agent_client_protocol::{
 };
 use serenity::all::GenericChannelId;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::{
     model::default_model,
@@ -34,12 +34,6 @@ pub(super) async fn connect(
     mut commands: mpsc::Receiver<SessionCommand>,
     projection: ProjectionState,
 ) -> Result<(), agent_client_protocol::Error> {
-    debug!(
-        agent = %row.agent_key,
-        session = %row.session_id,
-        thread = ?row.thread_id,
-        "connecting to acp agent for `session/load`..."
-    );
     let result = Client
         .builder()
         .name("agentcord")
@@ -47,9 +41,8 @@ pub(super) async fn connect(
             run_connected(bot, row, connection, projection, &mut commands, true).await
         })
         .await;
-    match &result {
-        Ok(()) => debug!("acp `session/load` connection closed"),
-        Err(error) => warn!(?error, "acp `session/load` connection failed"),
+    if let Err(error) = &result {
+        warn!(?error, "acp `session/load` connection failed");
     }
     result
 }
@@ -75,10 +68,7 @@ pub(super) async fn run_new(
         "starting live acp session..."
     );
     let result = run_connected(bot, row, connection, projection, &mut commands, false).await;
-    debug!("releasing acp `session/new` connection...");
-    if release.send(()).is_ok() {
-        debug!("released acp `session/new` connection");
-    }
+    let _ = release.send(());
     let task_result = task.await.map_err(|error| {
         agent_client_protocol::Error::internal_error()
             .data(format!("acp `session/new` task failed: {error}"))
@@ -114,12 +104,6 @@ async fn run_connected(
             return Err(error);
         }
     };
-    debug!(
-        agent = %row.agent_key,
-        session = %row.session_id,
-        thread = ?row.thread_id,
-            "acp session handler installed"
-    );
     if restore {
         info!(
             agent = %row.agent_key,
@@ -129,7 +113,6 @@ async fn run_connected(
         restore_session(bot, row, connection, projection, commands).await
     } else {
         projection.finish_replay();
-        debug!("starting acp session command loop...");
         run_commands(
             bot,
             connection,
@@ -192,11 +175,6 @@ impl HandleDispatchFrom<Agent> for SessionHandler {
                 let expected_session = notification_session.clone();
                 let row = notification_row.clone();
                 async move {
-                    debug!(
-                        session = %expected_session,
-                        thread = ?notification_thread,
-                        "received acp session notification"
-                    );
                     enqueue_notification(
                         &bot,
                         &row,
@@ -242,12 +220,6 @@ fn handle_permission_request(
     request: RequestPermissionRequest,
     responder: Responder<RequestPermissionResponse>,
 ) -> Result<(), agent_client_protocol::Error> {
-    info!(
-        session = %request.session_id,
-        thread = ?thread,
-        options = request.options.len(),
-        "received acp permission request"
-    );
     if request.session_id != *expected_session {
         warn!(
             expected = %expected_session,
@@ -258,11 +230,6 @@ fn handle_permission_request(
         return respond_permission(responder, permission::cancelled(), thread);
     }
     if bot.config().permissions.approve_all {
-        debug!(
-            session = %request.session_id,
-            thread = ?thread,
-            "auto-approving acp permission request..."
-        );
         return respond_permission(responder, permission::approve_all(&request), thread);
     }
     let Some(context) = discord_context(bot, thread) else {
@@ -274,11 +241,6 @@ fn handle_permission_request(
     };
     let permission_user = bot.config().discord.allowed_user_id;
     let permission_timeout = bot.config().timeouts.permission;
-    debug!(
-        session = %request.session_id,
-        thread = ?thread,
-        "scheduling discord permission request..."
-    );
     connection
         .spawn(async move {
             let response = permission::ask(
@@ -320,19 +282,7 @@ async fn enqueue_notification(
         ..
     } = &notification
     {
-        debug!(
-            session = %expected_session,
-            thread = ?thread,
-            options = update.config_options.len(),
-            "updating cached acp session configuration..."
-        );
-        projection.apply_config_options(update.config_options.clone());
-        debug!(
-            session = %expected_session,
-            thread = ?thread,
-            options = update.config_options.len(),
-            "updated cached acp session configuration"
-        );
+        projection.set_config_options(update.config_options.clone());
         let current_model = default_model(&update.config_options);
         if let Err(error) = bot
             .update_session_starter(row, current_model.as_deref())
@@ -345,7 +295,7 @@ async fn enqueue_notification(
             );
         }
     }
-    let result = projection
+    projection
         .updates
         .try_send(ProjectionEvent {
             thread_id: thread,
@@ -368,15 +318,7 @@ async fn enqueue_notification(
                 }
             };
             agent_client_protocol::Error::internal_error().data(message)
-        });
-    if result.is_ok() {
-        debug!(
-            session = %expected_session,
-            thread = ?thread,
-            "queued acp session notification"
-        );
-    }
-    result
+        })
 }
 
 /// Clones the Discord context used by permission interaction tasks.
@@ -402,12 +344,6 @@ async fn restore_session(
     projection: ProjectionState,
     commands: &mut mpsc::Receiver<SessionCommand>,
 ) -> Result<(), agent_client_protocol::Error> {
-    debug!(
-        agent = %row.agent_key,
-        session = %row.session_id,
-        thread = ?row.thread_id,
-        "initializing acp session for restore..."
-    );
     let initialized = stop_aware(
         &projection.stop,
         initialize(&connection, bot.config().timeouts.startup),
@@ -422,11 +358,6 @@ async fn restore_session(
         return Err(agent_client_protocol::Error::invalid_request()
             .data("agent does not advertise `session/load`"));
     }
-    debug!(
-        agent = %row.agent_key,
-        session = %row.session_id,
-        "loading acp `session/load`..."
-    );
     let loaded = stop_aware(
         &projection.stop,
         request_with_timeout(
@@ -441,16 +372,11 @@ async fn restore_session(
         ),
     )
     .await?;
-    debug!(
-        agent = %row.agent_key,
-        session = %row.session_id,
-        options = loaded.config_options.as_ref().map_or(0, Vec::len),
-        "acp `session/load` completed"
-    );
     if let Some(options) = loaded.config_options {
-        projection.apply_config_options(options);
+        projection.set_config_options(options);
     }
-    let current_model = default_model(&projection.ui().config_options);
+    let config_options = projection.config_options();
+    let current_model = default_model(&config_options);
     if let Err(error) = bot
         .update_session_starter(&row, current_model.as_deref())
         .await
@@ -488,14 +414,8 @@ fn respond_permission(
     response: RequestPermissionResponse,
     thread: GenericChannelId,
 ) -> Result<(), agent_client_protocol::Error> {
-    match responder.respond(response) {
-        Ok(()) => {
-            debug!(thread = ?thread, "sent acp permission response");
-            Ok(())
-        }
-        Err(error) => {
-            warn!(?error, thread = ?thread, "failed to send acp permission response");
-            Err(error)
-        }
-    }
+    responder.respond(response).map_err(|error| {
+        warn!(?error, thread = ?thread, "failed to send acp permission response");
+        error
+    })
 }

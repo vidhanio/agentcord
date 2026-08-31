@@ -129,7 +129,7 @@ pub fn reduce(
     Ok(ProjectionOutcome::Updated(projection))
 }
 
-/// Applies and renders one event, synchronizing Discord before persistence.
+/// Applies and renders one event, persisting the resulting Discord projection.
 impl Bot {
     /// Reduces updates into the projections that need Discord synchronization.
     async fn collect_projections(
@@ -246,30 +246,9 @@ impl Bot {
 
         let context = self.context()?.clone();
         let targets = render_projections(projections)?;
-        self.store_projections(&targets).await?;
         for (projection, target) in targets {
             self.synchronize_projection(&context, projection, target)
                 .await?;
-        }
-        Ok(())
-    }
-
-    /// Renders and stores the latest state for each changed source.
-    async fn store_projections(&self, targets: &[(RenderProjection, Vec<String>)]) -> BotResult {
-        for (projection, _) in targets {
-            debug!(
-                thread = ?projection.thread_id,
-                source_kind = %projection.source_kind,
-                source_id = %projection.source_id,
-                "storing discord projection..."
-            );
-            self.db().replace_projection(projection).await?;
-            debug!(
-                thread = ?projection.thread_id,
-                source_kind = %projection.source_kind,
-                source_id = %projection.source_id,
-                "stored discord projection"
-            );
         }
         Ok(())
     }

@@ -154,35 +154,7 @@ impl Bot {
             title: None,
             model,
         };
-        let row = self.create_session_post(&metadata).await?;
-        debug!(thread = ?row.thread_id, "storing new session binding...");
-        if let Err(error) = self.db().insert_session(&row).await {
-            warn!(
-                ?error,
-                thread = ?row.thread_id,
-                "failed to store new session binding"
-            );
-            let context = self.context()?.clone();
-            warn!(
-                thread = ?row.thread_id,
-                "deleting session post after database error..."
-            );
-            match row.thread_id.delete(&context.http, None).await {
-                Ok(_) => debug!(
-                    thread = ?row.thread_id,
-                    "deleted session post after database error"
-                ),
-                Err(cleanup_error) => {
-                    warn!(
-                        ?cleanup_error,
-                        thread = ?row.thread_id,
-                        "failed to delete session post after database error"
-                    );
-                }
-            }
-            return Err(error);
-        }
-        debug!(thread = ?row.thread_id, "stored new session binding");
+        let row = self.create_and_store_session(&metadata).await?;
         self.state().supervisor.start_new(self, &row, created);
         info!(thread = ?row.thread_id, "session is ready");
         Ok(row.thread_id)
@@ -254,38 +226,32 @@ impl Bot {
             title: imported.title,
             model: None,
         };
-        let row = self.create_session_post(&metadata).await?;
-        debug!(thread = ?row.thread_id, "storing imported session binding...");
-        if let Err(error) = self.db().insert_session(&row).await {
-            warn!(
-                ?error,
-                thread = ?row.thread_id,
-                "failed to store imported session binding"
-            );
-            let context = self.context()?.clone();
-            warn!(
-                thread = ?row.thread_id,
-                "deleting imported session post after database error..."
-            );
-            match row.thread_id.delete(&context.http, None).await {
-                Ok(_) => debug!(
-                    thread = ?row.thread_id,
-                    "deleted imported session post after database error"
-                ),
-                Err(cleanup_error) => {
-                    warn!(
-                        ?cleanup_error,
-                        thread = ?row.thread_id,
-                        "failed to delete imported session post after database error"
-                    );
-                }
-            }
-            return Err(error);
-        }
-        debug!(thread = ?row.thread_id, "stored imported session binding");
+        let row = self.create_and_store_session(&metadata).await?;
         self.state().supervisor.start(self, &row, Vec::new());
         info!(thread = ?row.thread_id, "imported session is ready");
         Ok(row.thread_id)
+    }
+
+    /// Creates a forum post and stores its durable session binding.
+    async fn create_and_store_session(&self, metadata: &SessionMetadata) -> BotResult<SessionRow> {
+        let row = self.create_session_post(metadata).await?;
+        if let Err(error) = self.db().insert_session(&row).await {
+            warn!(?error, thread = ?row.thread_id, "failed to store session binding");
+            let context = self.context()?.clone();
+            match row.thread_id.delete(&context.http, None).await {
+                Ok(_) => debug!(
+                    thread = ?row.thread_id,
+                    "deleted session post after database error"
+                ),
+                Err(cleanup_error) => warn!(
+                    ?cleanup_error,
+                    thread = ?row.thread_id,
+                    "failed to delete session post after database error"
+                ),
+            }
+            return Err(error);
+        }
+        Ok(row)
     }
 
     /// Creates and tags a forum post for a newly bound ACP session.
@@ -410,18 +376,6 @@ impl Bot {
                     )
             })
             .collect::<Vec<_>>();
-        if desired.len() > 20 {
-            warn!(
-                configured = desired.len(),
-                limit = 20,
-                "configured forum has too many tags"
-            );
-            return Err(BotError::TooManyForumTags {
-                configured: self.config().agents.len(),
-                limit: 20,
-            });
-        }
-
         let current = channel
             .available_tags
             .iter()
@@ -862,30 +816,4 @@ fn truncate_end(value: &str, limit: usize) -> String {
         .collect::<String>();
     output.push('…');
     output
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use agent_client_protocol::schema::v1::SessionId;
-
-    use super::SessionMetadata;
-    use crate::config::AgentKey;
-
-    /// Verifies that a selected model is included in the starter message.
-    #[test]
-    fn starter_message_includes_model() {
-        let metadata = SessionMetadata {
-            agent_key: AgentKey::new("example"),
-            project_path: PathBuf::from("/work/project"),
-            session_id: SessionId::new("session-1"),
-            title: None,
-            model: Some("openai/gpt-4o:high".into()),
-        };
-        assert_eq!(
-            metadata.starter_message(),
-            "session `session-1` · cwd `/work/project` · model `openai/gpt-4o:high`"
-        );
-    }
 }

@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use poise::{CreateReply, FrameworkError, serenity_prelude as serenity};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::{Bot, BotError, config::AgentKey};
 
@@ -77,7 +77,6 @@ fn agent_key_at(bot: &Bot, index: usize) -> Result<AgentKey, BotError> {
 impl serenity::Framework for BotFramework {
     /// Initializes Poise with the Discord client.
     async fn init(&mut self, client: &serenity::Client) {
-        info!("initializing slash-command framework...");
         self.poise.init(client).await;
         info!("slash-command framework initialized");
     }
@@ -85,19 +84,10 @@ impl serenity::Framework for BotFramework {
     /// Registers commands on ready and forwards all gateway events to Poise.
     async fn dispatch(&self, context: &serenity::Context, event: &serenity::FullEvent) {
         if let serenity::FullEvent::Ready { data_about_bot, .. } = event {
-            debug!(
-                application = %data_about_bot.application.id,
-                "setting discord application id..."
-            );
             context
                 .http
                 .set_application_id(data_about_bot.application.id);
-            debug!("set discord application id");
             let commands = &self.poise.options().commands;
-            info!(
-                count = GLOBAL_COMMANDS.len(),
-                "registering global slash commands..."
-            );
             if let Err(error) = poise::builtins::register_globally(
                 &context.http,
                 commands
@@ -114,7 +104,6 @@ impl serenity::Framework for BotFramework {
                 );
             }
             let guild_count = commands.len().saturating_sub(GLOBAL_COMMANDS.len());
-            info!(count = guild_count, guild = %self.guild_id, "registering guild slash commands...");
             if let Err(error) = poise::builtins::register_in_guild(
                 &context.http,
                 commands
@@ -145,7 +134,6 @@ fn on_error(error: FrameworkError<'_, Bot, BotError>) -> poise::BoxFuture<'_, ()
         match error {
             FrameworkError::Command { error, ctx, .. } => {
                 warn!(?error, "command failed");
-                debug!("sending command error response...");
                 if let Err(send_error) = ctx
                     .send(
                         CreateReply::new()
@@ -155,13 +143,10 @@ fn on_error(error: FrameworkError<'_, Bot, BotError>) -> poise::BoxFuture<'_, ()
                     .await
                 {
                     warn!(?send_error, "failed to send command error response");
-                } else {
-                    debug!("sent command error response");
                 }
             }
             FrameworkError::CommandCheckFailed { ctx, .. } => {
                 warn!(user = %ctx.author().id, "command permission check failed");
-                debug!("sending command permission response...");
                 if let Err(send_error) = ctx
                     .send(
                         CreateReply::new()
@@ -171,8 +156,6 @@ fn on_error(error: FrameworkError<'_, Bot, BotError>) -> poise::BoxFuture<'_, ()
                     .await
                 {
                     warn!(?send_error, "failed to send command permission response");
-                } else {
-                    debug!("sent command permission response");
                 }
             }
             other => {

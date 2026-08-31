@@ -8,10 +8,7 @@ use std::{
 use agent_client_protocol::schema::v1::SessionConfigOption;
 use tokio::sync::mpsc;
 
-use crate::{
-    acp::{model::SessionUiState, runtime::Signal},
-    discord::render::ProjectionEvent,
-};
+use crate::{acp::runtime::Signal, discord::render::ProjectionEvent};
 
 /// Notification and lifecycle state for one active ACP connection.
 #[derive(Clone, Debug)]
@@ -27,7 +24,7 @@ pub(super) struct ProjectionState {
     /// Stops the actor and its ACP connection.
     pub(super) stop: Arc<Signal>,
     /// Cached session configuration advertised by the agent.
-    pub(super) ui: Arc<Mutex<SessionUiState>>,
+    pub(super) config_options: Arc<Mutex<Vec<SessionConfigOption>>>,
 }
 
 impl ProjectionState {
@@ -55,18 +52,18 @@ impl ProjectionState {
     }
 
     /// Replaces the cached session configuration options.
-    pub(super) fn apply_config_options(&self, options: Vec<SessionConfigOption>) {
-        self.ui
+    pub(super) fn set_config_options(&self, options: Vec<SessionConfigOption>) {
+        *self
+            .config_options
             .lock()
-            .expect("acp session ui mutex poisoned")
-            .apply_config_options(options);
+            .expect("acp session config mutex poisoned") = options;
     }
 
     /// Returns a snapshot of the agent-advertised configuration options.
-    pub(super) fn ui(&self) -> SessionUiState {
-        self.ui
+    pub(super) fn config_options(&self) -> Vec<SessionConfigOption> {
+        self.config_options
             .lock()
-            .expect("acp session ui mutex poisoned")
+            .expect("acp session config mutex poisoned")
             .clone()
     }
 }

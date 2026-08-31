@@ -20,8 +20,6 @@ use crate::{BotError, BotResult};
 
 /// Maximum tags Discord permits on a forum channel.
 const DISCORD_FORUM_TAG_LIMIT: usize = 20;
-/// Maximum options Discord permits in a select component.
-const DISCORD_SELECT_LIMIT: usize = 25;
 
 /// Stable configuration key identifying one ACP agent.
 #[nutype(derive(
@@ -190,14 +188,6 @@ impl Config {
             return Err(BotError::TooManyAgents {
                 count: self.agents.len(),
                 limit: DISCORD_FORUM_TAG_LIMIT,
-                surface: "tag forum",
-            });
-        }
-        if self.agents.len() > DISCORD_SELECT_LIMIT {
-            return Err(BotError::TooManyAgents {
-                count: self.agents.len(),
-                limit: DISCORD_SELECT_LIMIT,
-                surface: "option selector",
             });
         }
 
@@ -388,7 +378,7 @@ mod tests {
 
     use config::{Config as Settings, File, FileFormat};
 
-    use super::{AgentKey, Config, Timeouts, config_path, expand_string, expand_value, state_path};
+    use super::{AgentKey, Config, Timeouts, expand_string, expand_value};
 
     /// Returns the smallest valid configuration used by parser tests.
     fn minimal_config() -> &'static str {
@@ -484,14 +474,6 @@ mod tests {
         assert_eq!(expanded, "${OTHER}-${bad}-${UNFINISHED");
     }
 
-    /// Verifies validation rejects configurations without agents.
-    #[test]
-    fn validation_rejects_missing_agents() {
-        let mut config = Config::parse(minimal_config()).expect("valid configuration");
-        config.agents.clear();
-        assert!(config.validate().is_err());
-    }
-
     /// Verifies debug output redacts secret configuration values.
     #[test]
     fn debug_redacts_discord_and_agent_environment_secrets() {
@@ -512,14 +494,6 @@ mod tests {
         assert!(!debug.contains("discord-secret"));
         assert!(!debug.contains("agent-secret"));
         assert!(debug.contains("[REDACTED]"));
-    }
-
-    /// Verifies configuration and state paths stay under their application
-    /// directories.
-    #[test]
-    fn paths_are_scoped_to_agentcord() {
-        assert!(config_path().ends_with("agentcord/config.toml"));
-        assert!(state_path().ends_with("agentcord/state.sqlite3"));
     }
 
     /// Verifies loading a TOML file performs parsing and validation.

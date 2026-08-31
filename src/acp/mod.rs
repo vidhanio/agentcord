@@ -13,7 +13,7 @@ mod protocol;
 mod registry;
 mod runtime;
 
-pub use model::{ModelSpec, SessionUiState, category_values, default_model};
+pub use model::{ModelSpec, category_values, default_model};
 pub use protocol::ListedSession;
 pub use registry::Supervisor;
 

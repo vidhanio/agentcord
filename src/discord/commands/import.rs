@@ -4,7 +4,7 @@ use serenity::{
     all::{AutocompleteChoice, CreateAutocompleteResponse, ResolvedValue},
     model::mention::Mentionable,
 };
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::{Bot, BotError, config::AgentKey};
 
@@ -34,36 +34,19 @@ pub async fn import(
         session = %session_id,
         "importing session..."
     );
-    debug!(%user, "deferring session import response...");
     ctx.defer_ephemeral().await?;
-    debug!(%user, "deferred session import response");
-    let operation_bot = bot.clone();
-    let operation_agent = agent_key.clone();
-    let operation_session = session_id.clone();
-    let operation = tokio::spawn(async move {
-        operation_bot
-            .import_session(&operation_agent, &operation_session)
-            .await
-    });
-    let content = match operation.await {
-        Ok(Ok(thread)) => {
+    let content = match bot.import_session(&agent_key, &session_id).await {
+        Ok(thread) => {
             info!(%user, ?thread, agent = %agent_key, session = %session_id, "session imported");
             format!("imported {}", thread.mention())
         }
-        Ok(Err(error)) => {
+        Err(error) => {
             warn!(?error, %user, agent = %agent_key, session = %session_id, "failed to import session");
             format!("couldn't import the session: {error}")
         }
-        Err(error) => {
-            warn!(?error, %user, agent = %agent_key, session = %session_id, "session import task failed");
-            format!("couldn't import the session: {error}")
-        }
     };
-    debug!(%user, session = %session_id, "sending session import response...");
     ctx.send(poise::CreateReply::new().content(content).ephemeral(true))
         .await?;
-    debug!(%user, session = %session_id, "sent session import response");
-    info!(%user, agent = %agent_key, session = %session_id, "reported session import");
     Ok(())
 }
 
@@ -79,10 +62,7 @@ async fn session_choices<'a>(
         return CreateAutocompleteResponse::new();
     };
     let sessions = match application.data().list_sessions(&agent_key).await {
-        Ok(sessions) => {
-            debug!(agent = %agent_key, count = sessions.len(), "listed sessions for autocomplete");
-            sessions
-        }
+        Ok(sessions) => sessions,
         Err(error) => {
             warn!(?error, agent = %agent_key, "failed to list sessions for autocomplete");
             return CreateAutocompleteResponse::new();

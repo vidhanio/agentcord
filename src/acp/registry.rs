@@ -8,11 +8,11 @@ use std::{
 use agent_client_protocol::schema::v1::SessionConfigOption;
 use serenity::all::GenericChannelId;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::{
     actor,
-    model::{ModelSpec, SessionUiState},
+    model::ModelSpec,
     protocol::{NewSession, NewSessionConnection},
     runtime::Signal,
 };
@@ -47,7 +47,7 @@ pub(super) struct ActorEntry {
     /// Completes when the actor has released its ACP connection.
     pub(super) done: oneshot::Receiver<()>,
     /// Cached session configuration used by command autocomplete.
-    pub(super) ui: Arc<Mutex<SessionUiState>>,
+    pub(super) config_options: Arc<Mutex<Vec<SessionConfigOption>>>,
 }
 
 /// Command delivered to a session actor.
@@ -99,12 +99,6 @@ impl Supervisor {
     /// Queues a prompt for a persisted session, starting its actor on demand.
     pub fn prompt(&self, bot: &Bot, row: &SessionRow, text: String, turn_id: String) -> BotResult {
         let sender = self.sender(bot, row);
-        debug!(
-            thread = ?row.thread_id,
-            session = %row.session_id,
-            characters = text.chars().count(),
-            "queueing acp prompt..."
-        );
         let result = sender
             .try_send(SessionCommand::Prompt { text, turn_id })
             .map_err(|error| match error {
@@ -114,9 +108,8 @@ impl Supervisor {
                     BotError::AcpActorExited
                 }
             });
-        match &result {
-            Ok(()) => debug!(thread = ?row.thread_id, "queued acp prompt"),
-            Err(error) => warn!(?error, thread = ?row.thread_id, "failed to queue acp prompt"),
+        if let Err(error) = &result {
+            warn!(?error, thread = ?row.thread_id, "failed to queue acp prompt");
         }
         result
     }
@@ -157,14 +150,11 @@ impl Supervisor {
         if let Some(entry) = entry {
             info!(thread = ?thread, "stopping acp actor...");
             entry.stop.trigger();
-            debug!(thread = ?thread, "waiting for acp actor to stop...");
             tokio::time::timeout(bot.config().timeouts.startup, entry.done)
                 .await
                 .map_err(|_| BotError::AcpActorStopTimedOut)?
                 .map_err(|_| BotError::AcpActorExited)?;
             info!(thread = ?thread, "acp actor stopped");
-        } else {
-            debug!(thread = ?thread, "no active acp actor to stop");
         }
         Ok(())
     }
@@ -174,12 +164,6 @@ impl Supervisor {
         let sender = self.sender(bot, row);
         let (done, result) = oneshot::channel();
         let requested_model = model.clone();
-        debug!(
-            thread = ?row.thread_id,
-            session = %row.session_id,
-            model = %model,
-            "queueing acp model selection..."
-        );
         let send_result = sender
             .try_send(SessionCommand::SetModel { model, done })
             .map_err(|error| match error {
@@ -199,13 +183,8 @@ impl Supervisor {
             Ok(Err(_)) => Err(BotError::AcpActorExited),
             Err(_) => Err(BotError::AcpModelSelectionTimedOut),
         };
-        match &result {
-            Ok(()) => {
-                info!(thread = ?row.thread_id, model = %requested_model, "acp model selection completed");
-            }
-            Err(error) => {
-                warn!(?error, thread = ?row.thread_id, model = %requested_model, "acp model selection failed");
-            }
+        if let Err(error) = &result {
+            warn!(?error, thread = ?row.thread_id, model = %requested_model, "acp model selection failed");
         }
         result
     }
@@ -228,25 +207,11 @@ impl Supervisor {
         if let Some(entry) = actors.get(&row.thread_id)
             && same_session(&entry.row, row)
         {
-            debug!(thread = ?row.thread_id, "reusing active acp actor");
             return entry.sender.clone();
         }
         if let Some(entry) = actors.remove(&row.thread_id) {
-            debug!(thread = ?row.thread_id, "stopping superseded acp actor...");
             entry.stop.trigger();
         }
-
-        let startup_kind = match &startup {
-            ActorStartup::New(_) => "new",
-            ActorStartup::Restore => "restore",
-        };
-        debug!(
-            agent = %row.agent_key,
-            session = %row.session_id,
-            thread = ?row.thread_id,
-            startup = startup_kind,
-            "starting acp actor task..."
-        );
 
         let (sender, commands) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let actor_sender = sender.clone();
@@ -256,8 +221,8 @@ impl Supervisor {
         let actor_stop = Arc::clone(&stop);
         let failure_stop = Arc::clone(&stop);
         let actor_row = row.clone();
-        let ui = Arc::new(Mutex::new(SessionUiState { config_options }));
-        let actor_ui = Arc::clone(&ui);
+        let config_options = Arc::new(Mutex::new(config_options));
+        let actor_config_options = Arc::clone(&config_options);
         let registry = self.actors.clone();
         let (done_sender, done_receiver) = oneshot::channel();
         tokio::spawn(async move {
@@ -266,7 +231,7 @@ impl Supervisor {
                 actor_row.clone(),
                 commands,
                 actor_stop,
-                actor_ui,
+                actor_config_options,
                 startup,
             )
             .await;
@@ -299,11 +264,10 @@ impl Supervisor {
                 sender: sender.clone(),
                 stop,
                 done: done_receiver,
-                ui,
+                config_options,
             },
         );
         drop(actors);
-        debug!(thread = ?row.thread_id, "registered acp actor");
         sender
     }
 
@@ -314,19 +278,25 @@ impl Supervisor {
             .get(&thread)
             .is_some_and(|current| current.sender.same_channel(sender))
         {
-            debug!(thread = ?thread, "removing inactive acp actor...");
             actors.remove(&thread);
-            debug!(thread = ?thread, "removed inactive acp actor");
         }
         drop(actors);
     }
 
     /// Returns a snapshot of an active session's advertised configuration.
-    pub fn session_ui(&self, thread: GenericChannelId) -> Option<SessionUiState> {
+    pub fn session_config_options(
+        &self,
+        thread: GenericChannelId,
+    ) -> Option<Vec<SessionConfigOption>> {
         let actors = self.actors();
-        let ui = actors.get(&thread)?.ui.clone();
+        let config_options = actors.get(&thread)?.config_options.clone();
         drop(actors);
-        Some(ui.lock().expect("acp session ui mutex poisoned").clone())
+        Some(
+            config_options
+                .lock()
+                .expect("acp session config mutex poisoned")
+                .clone(),
+        )
     }
 }
 

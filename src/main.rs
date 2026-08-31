@@ -2,7 +2,7 @@ use std::{env, path::PathBuf};
 
 use agentcord::Config;
 use clap::Parser;
-use tracing::{error, info};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 /// A Discord client for ACP agents.
@@ -24,22 +24,13 @@ async fn main() -> color_eyre::Result<()> {
         .with_env_filter(
             env::var(EnvFilter::DEFAULT_ENV)
                 .as_deref()
-                .unwrap_or("warn,agentcord=trace"),
+                .unwrap_or("warn,agentcord=info"),
         )
         .compact()
         .init();
 
-    info!(path = ?path, "starting agentcord...");
-    info!(path = ?path, "loading configuration...");
-    let config = match Config::load(&path) {
-        Ok(config) => config,
-        Err(error) => {
-            error!(?error, path = ?path, "failed to load configuration");
-            return Err(error.into());
-        }
-    };
-    info!(agents = config.agents.len(), "configuration loaded");
+    let config = Config::load(&path)?;
+    info!(path = ?path, agents = config.agents.len(), "starting agentcord");
     agentcord::run(config).await?;
-    info!("agentcord stopped");
     Ok(())
 }

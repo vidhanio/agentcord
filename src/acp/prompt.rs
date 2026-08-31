@@ -11,7 +11,7 @@ use serenity::{
     model::mention::Mentionable,
 };
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::{
     model::{ModelSpec, apply_model},
@@ -58,7 +58,6 @@ pub(super) async fn run_commands(
             command = commands.recv() => command,
         };
         let Some(command) = command else {
-            debug!(thread = ?thread, session = %session_id, "acp session command queue closed");
             break;
         };
         match command {
@@ -124,12 +123,6 @@ async fn handle_prompt_command(
         thread,
         projection,
     } = context;
-    info!(
-        thread = ?thread,
-        session = %session_id,
-        characters = text.chars().count(),
-        "processing acp `session/prompt`..."
-    );
     projection.set_turn(turn_id);
 
     match run_prompt(
@@ -139,13 +132,11 @@ async fn handle_prompt_command(
         thread,
         text,
         &projection.stop,
+        &projection.fault,
     )
     .await
     {
-        Ok(_) => {
-            info!(thread = ?thread, session = %session_id, "acp `session/prompt` completed");
-            Ok(())
-        }
+        Ok(_) => Ok(()),
         Err(PromptFailure::Prompt(error)) => {
             let error = BotError::AcpProtocol(error.to_string());
             notify_failure(bot, thread, format!("acp `session/prompt` failed: {error}")).await;
@@ -172,30 +163,18 @@ async fn handle_model_command(
     >,
 ) {
     let requested_model = model.clone();
-    debug!(
-        thread = ?thread,
-        session = %session_id,
-        model = %requested_model,
-        "applying acp model selection..."
-    );
+    let config_options = projection.config_options();
     let result = apply_model(
         connection,
         session_id,
-        &projection.ui().config_options,
+        &config_options,
         &model,
         bot.config().timeouts.startup,
         Some(&projection.stop),
     )
     .await;
     if let Ok(options) = &result {
-        projection.apply_config_options(options.clone());
-        debug!(
-            thread = ?thread,
-            session = %session_id,
-            model = %requested_model,
-            options = options.len(),
-            "applied acp model selection"
-        );
+        projection.set_config_options(options.clone());
     } else if let Err(error) = &result {
         warn!(
             ?error,
@@ -206,7 +185,6 @@ async fn handle_model_command(
         );
     }
     let _ = done.send(result);
-    debug!(thread = ?thread, "reported acp model selection result");
 }
 
 /// Sends one prompt and enforces timeout/cancellation behavior.
@@ -217,13 +195,8 @@ async fn run_prompt(
     thread: GenericChannelId,
     text: String,
     stop: &Signal,
+    fault: &Signal,
 ) -> Result<agent_client_protocol::schema::v1::PromptResponse, PromptFailure> {
-    info!(
-        thread = ?thread,
-        session = %session_id,
-        characters = text.chars().count(),
-        "sending acp `session/prompt`..."
-    );
     let request = connection.send_request(PromptRequest::new(
         session_id.clone(),
         vec![ContentBlock::from(text)],
@@ -248,13 +221,23 @@ async fn run_prompt(
                 agent_client_protocol::schema::v1::CancelNotification::new(session_id.clone()),
             ) {
                 warn!(?error, "failed to send acp `session/cancel` for stopped prompt");
-            } else {
-                debug!(thread = ?thread, session = %session_id, "sent acp `session/cancel`");
             }
             request_task.abort();
             return Err(PromptFailure::Connection(
                 agent_client_protocol::Error::internal_error()
-                    .data("acp session actor was stopped"),
+                .data("acp session actor was stopped"),
+            ));
+        }
+        () = fault.notified() => {
+            if let Err(error) = connection.send_notification(
+                agent_client_protocol::schema::v1::CancelNotification::new(session_id.clone()),
+            ) {
+                warn!(?error, "failed to cancel prompt after projection failure");
+            }
+            request_task.abort();
+            return Err(PromptFailure::Connection(
+                agent_client_protocol::Error::internal_error()
+                    .data("acp projection failed during prompt"),
             ));
         }
     }
@@ -270,7 +253,6 @@ async fn run_prompt(
                 .data(format!("failed to send acp `session/cancel`: {error}")),
         ));
     }
-    debug!(thread = ?thread, session = %session_id, "sent acp `session/cancel`");
     tokio::select! {
         result = tokio::time::timeout(PROMPT_CANCEL_GRACE, &mut request_task) => {
             if let Ok(result) = result {
@@ -288,7 +270,14 @@ async fn run_prompt(
             request_task.abort();
             return Err(PromptFailure::Connection(
                 agent_client_protocol::Error::internal_error()
-                    .data("acp session actor was stopped"),
+                .data("acp session actor was stopped"),
+            ));
+        }
+        () = fault.notified() => {
+            request_task.abort();
+            return Err(PromptFailure::Connection(
+                agent_client_protocol::Error::internal_error()
+                    .data("acp projection failed during prompt cancellation"),
             ));
         }
     }
@@ -319,13 +308,10 @@ pub(super) async fn notify_failure(bot: &Bot, thread: GenericChannelId, message:
         );
         return;
     };
-    info!(thread = ?thread, "reporting acp actor failure to discord...");
     if let Err(error) = thread
         .send_message(&context.http, CreateMessage::new().content(message))
         .await
     {
         warn!(?error, ?thread, "failed to report acp actor failure");
-    } else {
-        info!(thread = ?thread, "reported acp actor failure to discord");
     }
 }

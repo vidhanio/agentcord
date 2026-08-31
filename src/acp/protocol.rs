@@ -16,7 +16,7 @@ use agent_client_protocol::{
     },
 };
 use tokio::{sync::oneshot, task::JoinHandle};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::{Supervisor, acp_error, configured_agent};
 use crate::{
@@ -95,14 +95,11 @@ impl Supervisor {
         let (release_sender, release_receiver) = oneshot::channel();
         let task_agent = agent_key.clone();
         let task = tokio::spawn(async move {
-            debug!(agent = %task_agent, "connecting to acp agent for `session/new`...");
-            let request_agent = task_agent.clone();
             let result = Client
                 .builder()
                 .name("agentcord")
                 .connect_with(process, |connection: ConnectionTo<Agent>| async move {
                     initialize(&connection, timeout).await?;
-                    debug!(agent = %request_agent, "sending acp `session/new` request...");
                     let response = request_with_timeout(
                         timeout,
                         connection
@@ -111,12 +108,6 @@ impl Supervisor {
                         "acp `session/new` timed out",
                     )
                     .await?;
-                    debug!(
-                        agent = %request_agent,
-                        session = %response.session_id,
-                        options = response.config_options.as_ref().map_or(0, Vec::len),
-                        "received acp `session/new` response"
-                    );
                     ready_sender
                         .send(NewSessionReady {
                             session_id: response.session_id,
@@ -131,11 +122,8 @@ impl Supervisor {
                     Ok(())
                 })
                 .await;
-            match &result {
-                Ok(()) => debug!(agent = %task_agent, "acp `session/new` connection closed"),
-                Err(error) => {
-                    warn!(?error, agent = %task_agent, "acp `session/new` connection failed");
-                }
+            if let Err(error) = &result {
+                warn!(?error, agent = %task_agent, "acp `session/new` connection failed");
             }
             result
         });
@@ -151,12 +139,6 @@ impl Supervisor {
                 Err(error) => acp_error(&error),
             });
         };
-        info!(
-            agent = %agent_key,
-            session = %ready.session_id,
-            options = ready.config_options.len(),
-            "acp `session/new` completed"
-        );
         Ok(NewSession {
             session_id: ready.session_id,
             config_options: ready.config_options,
@@ -178,12 +160,6 @@ impl Supervisor {
         project_path: &Path,
     ) -> BotResult {
         let timeout = bot.config().timeouts.startup;
-        debug!(
-            agent = %agent_key,
-            session = %session_id,
-            project = ?project_path,
-            "validating acp `session/load`..."
-        );
         let agent = configured_agent(bot, agent_key)?;
         let process = process(agent);
         let request_session_id = session_id.clone();
@@ -212,13 +188,8 @@ impl Supervisor {
             })
             .await
             .map_err(|error| acp_error(&error));
-        match &result {
-            Ok(()) => {
-                debug!(agent = %agent_key, session = %session_id, "validated acp `session/load`");
-            }
-            Err(error) => {
-                warn!(?error, agent = %agent_key, session = %session_id, "failed to validate acp `session/load`");
-            }
+        if let Err(error) = &result {
+            warn!(?error, agent = %agent_key, session = %session_id, "failed to validate acp `session/load`");
         }
         result
     }
@@ -230,7 +201,6 @@ impl Supervisor {
         agent_key: &AgentKey,
     ) -> BotResult<Vec<ListedSession>> {
         let timeout = bot.config().timeouts.startup;
-        debug!(agent = %agent_key, "starting acp `session/list`...");
         let agent = configured_agent(bot, agent_key)?;
         let process = process(agent);
         let result = Client
@@ -251,11 +221,8 @@ impl Supervisor {
             })
             .await
             .map_err(|error| acp_error(&error));
-        match &result {
-            Ok(sessions) => {
-                debug!(agent = %agent_key, sessions = sessions.len(), "acp `session/list` completed");
-            }
-            Err(error) => warn!(?error, agent = %agent_key, "acp `session/list` failed"),
+        if let Err(error) = &result {
+            warn!(?error, agent = %agent_key, "acp `session/list` failed");
         }
         result
     }
@@ -267,7 +234,6 @@ impl Supervisor {
         agent_key: &AgentKey,
         session_id: &SessionId,
     ) -> BotResult<ImportedSession> {
-        debug!(agent = %agent_key, session = %session_id, "looking up acp session for import...");
         let sessions = self.list_sessions(bot, agent_key).await?;
         let result = sessions
             .into_iter()
@@ -280,13 +246,8 @@ impl Supervisor {
             .ok_or_else(|| BotError::SessionNotFound {
                 session_id: session_id.to_string(),
             });
-        match &result {
-            Ok(_) => {
-                info!(agent = %agent_key, session = %session_id, "found acp session for import");
-            }
-            Err(error) => {
-                warn!(?error, agent = %agent_key, session = %session_id, "acp session is not importable");
-            }
+        if let Err(error) = &result {
+            warn!(?error, agent = %agent_key, session = %session_id, "acp session is not importable");
         }
         result
     }
@@ -307,7 +268,6 @@ pub(super) async fn initialize(
     connection: &ConnectionTo<Agent>,
     timeout: Duration,
 ) -> Result<InitializeResponse, agent_client_protocol::Error> {
-    debug!("sending acp `initialize` request...");
     let response = tokio::time::timeout(
         timeout,
         connection
@@ -324,7 +284,6 @@ pub(super) async fn initialize(
         return Err(agent_client_protocol::Error::invalid_request()
             .data("agent negotiated an unsupported acp protocol version"));
     }
-    debug!(protocol = ?response.protocol_version, "acp `initialize` completed");
     Ok(response)
 }
 
@@ -350,7 +309,6 @@ impl ListedSession {
     ) -> Result<Vec<Self>, agent_client_protocol::Error> {
         let mut sessions = Vec::new();
         let mut cursor = None;
-        let mut page_number = 0;
         loop {
             let response = request_with_timeout(
                 timeout,
@@ -360,17 +318,7 @@ impl ListedSession {
                 "acp `session/list` timed out",
             )
             .await?;
-            page_number += 1;
-            let page_sessions = response.sessions.len();
-            let has_more = response.next_cursor.is_some();
             sessions.extend(response.sessions.into_iter().map(Self::from_info));
-            debug!(
-                page = page_number,
-                sessions = page_sessions,
-                total = sessions.len(),
-                has_more,
-                "received acp `session/list` page"
-            );
             let Some(next_cursor) = response.next_cursor else {
                 return Ok(sessions);
             };

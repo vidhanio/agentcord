@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use agent_client_protocol::schema::v1::SessionConfigOptionCategory;
 use poise::serenity_prelude as serenity;
 use serenity::all::{AutocompleteChoice, CreateAutocompleteResponse};
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::{Bot, BotError, acp::ModelSpec};
 
@@ -20,19 +20,14 @@ pub async fn model(
     let user = ctx.author().id;
     let thread = ctx.channel_id();
     info!(%user, ?thread, model = %model, "selecting session model...");
-    debug!(%user, ?thread, "deferring model selection response...");
     ctx.defer_ephemeral().await?;
-    debug!(%user, ?thread, "deferred model selection response");
     bot.set_model(thread, model.clone()).await?;
-    debug!(%user, ?thread, model = %model, "sending model selection response...");
     ctx.send(
         poise::CreateReply::new()
             .content(format!("model `{model}` selected"))
             .ephemeral(true),
     )
     .await?;
-    debug!(%user, ?thread, model = %model, "sent model selection response");
-    info!(%user, ?thread, model = %model, "reported session model selection");
     Ok(())
 }
 
@@ -50,8 +45,11 @@ pub(super) async fn model_choices<'a>(
     };
     let needle = partial.to_lowercase();
     let mut values = BTreeSet::new();
-    if let Some(ui) = application.data().session_ui(application.channel_id()) {
-        values.extend(combinations(&ui.config_options));
+    if let Some(config_options) = application
+        .data()
+        .session_config_options(application.channel_id())
+    {
+        values.extend(combinations(&config_options));
     }
 
     let choices: Vec<AutocompleteChoice<'static>> = values

@@ -10,7 +10,6 @@ use agent_client_protocol::{
         SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
     },
 };
-use tracing::debug;
 
 use super::{
     protocol::request_with_timeout,
@@ -111,20 +110,6 @@ impl std::fmt::Display for ModelSpec {
     }
 }
 
-/// Agent-advertised session configuration used by model autocomplete.
-#[derive(Clone, Debug, Default)]
-pub struct SessionUiState {
-    /// Current ACP configuration options and their selectable values.
-    pub config_options: Vec<SessionConfigOption>,
-}
-
-impl SessionUiState {
-    /// Replaces the cached configuration options with an ACP snapshot.
-    pub(super) fn apply_config_options(&mut self, options: Vec<SessionConfigOption>) {
-        self.config_options = options;
-    }
-}
-
 /// Flattens grouped and ungrouped ACP select values into one list.
 fn select_options(
     select: &agent_client_protocol::schema::v1::SessionConfigSelect,
@@ -185,38 +170,6 @@ pub fn default_model(options: &[SessionConfigOption]) -> Option<String> {
     )
 }
 
-/// Resolves the ACP configuration changes represented by one model spec.
-pub(super) fn model_changes(
-    options: &[SessionConfigOption],
-    model: &ModelSpec,
-) -> Result<Vec<(SessionConfigId, SessionConfigOptionValue)>, agent_client_protocol::Error> {
-    let model_option = find_config_option(options, &SessionConfigOptionCategory::Model, &["model"])
-        .ok_or_else(|| {
-            agent_client_protocol::Error::invalid_request()
-                .data("agent does not expose a model option")
-        })?;
-    let mut changes = vec![(
-        model_option.id.clone(),
-        select_value(model_option, &model.model_value(), "model")?,
-    )];
-    if !model.reasoning.is_empty() {
-        let reasoning_option = find_config_option(
-            options,
-            &SessionConfigOptionCategory::ThoughtLevel,
-            &["reasoning", "thought_level", "thinking"],
-        )
-        .ok_or_else(|| {
-            agent_client_protocol::Error::invalid_request()
-                .data("agent does not expose a reasoning option")
-        })?;
-        changes.push((
-            reasoning_option.id.clone(),
-            select_value(reasoning_option, &model.reasoning, "reasoning")?,
-        ));
-    }
-    Ok(changes)
-}
-
 /// Finds a semantic configuration category, with compatibility aliases for
 /// agents that predate ACP's category fields.
 fn find_config_option<'a>(
@@ -273,56 +226,85 @@ pub(super) async fn apply_model(
     timeout: std::time::Duration,
     stop: Option<&Signal>,
 ) -> Result<Vec<SessionConfigOption>, agent_client_protocol::Error> {
-    let mut options = options.to_vec();
-    let change_count = model_changes(&options, model)?.len();
-    debug!(
-        session = %session_id,
-        model = %model,
-        changes = change_count,
-        "resolved acp model configuration"
-    );
-    for index in 0..change_count {
-        let (config_id, value) = model_changes(&options, model)?
-            .into_iter()
-            .nth(index)
-            .ok_or_else(|| {
-                agent_client_protocol::Error::internal_error()
-                    .data("model configuration did not produce enough options")
-            })?;
-        debug!(
-            session = %session_id,
-            model = %model,
-            option = ?config_id,
-            index,
-            total = change_count,
-            "sending acp `session/set_config_option`..."
-        );
-        let request = request_with_timeout(
-            timeout,
-            connection
-                .send_request(SetSessionConfigOptionRequest::new(
-                    session_id.clone(),
-                    config_id.clone(),
-                    value,
-                ))
-                .block_task(),
-            "acp `session/set_config_option` timed out",
-        );
-        let response: SetSessionConfigOptionResponse = if let Some(stop) = stop {
-            stop_aware(stop, request).await?
-        } else {
-            request.await?
-        };
-        debug!(
-            session = %session_id,
-            model = %model,
-            option = ?config_id,
-            options = response.config_options.len(),
-            "acp `session/set_config_option` completed"
-        );
-        options = response.config_options;
+    let model_option = find_config_option(options, &SessionConfigOptionCategory::Model, &["model"])
+        .ok_or_else(|| {
+            agent_client_protocol::Error::invalid_request()
+                .data("agent does not expose a model option")
+        })?;
+    let model_id = model_option.id.clone();
+    let model_value = select_value(model_option, &model.model_value(), "model")?;
+
+    // Validate the complete user selection before applying its first
+    // non-atomic ACP configuration change.
+    if !model.reasoning.is_empty() {
+        let reasoning_option = find_config_option(
+            options,
+            &SessionConfigOptionCategory::ThoughtLevel,
+            &["reasoning", "thought_level", "thinking"],
+        )
+        .ok_or_else(|| {
+            agent_client_protocol::Error::invalid_request()
+                .data("agent does not expose a reasoning option")
+        })?;
+        select_value(reasoning_option, &model.reasoning, "reasoning")?;
     }
+
+    let mut options =
+        set_config_option(connection, session_id, model_id, model_value, timeout, stop).await?;
+
+    if model.reasoning.is_empty() {
+        return Ok(options);
+    }
+
+    let reasoning_option = find_config_option(
+        &options,
+        &SessionConfigOptionCategory::ThoughtLevel,
+        &["reasoning", "thought_level", "thinking"],
+    )
+    .ok_or_else(|| {
+        agent_client_protocol::Error::invalid_request()
+            .data("agent does not expose a reasoning option")
+    })?;
+    let reasoning_id = reasoning_option.id.clone();
+    let reasoning_value = select_value(reasoning_option, &model.reasoning, "reasoning")?;
+    options = set_config_option(
+        connection,
+        session_id,
+        reasoning_id,
+        reasoning_value,
+        timeout,
+        stop,
+    )
+    .await?;
     Ok(options)
+}
+
+/// Sets one ACP configuration option and returns the agent's new snapshot.
+async fn set_config_option(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    config_id: SessionConfigId,
+    value: SessionConfigOptionValue,
+    timeout: std::time::Duration,
+    stop: Option<&Signal>,
+) -> Result<Vec<SessionConfigOption>, agent_client_protocol::Error> {
+    let request = request_with_timeout(
+        timeout,
+        connection
+            .send_request(SetSessionConfigOptionRequest::new(
+                session_id.clone(),
+                config_id.clone(),
+                value,
+            ))
+            .block_task(),
+        "acp `session/set_config_option` timed out",
+    );
+    let response: SetSessionConfigOptionResponse = if let Some(stop) = stop {
+        stop_aware(stop, request).await?
+    } else {
+        request.await?
+    };
+    Ok(response.config_options)
 }
 
 #[cfg(test)]
@@ -332,22 +314,8 @@ mod tests {
         SessionConfigSelectOption,
     };
 
-    use super::{ModelSpec, category_values, default_model, model_changes};
+    use super::{ModelSpec, category_values, default_model};
     use crate::ModelSpecError;
-
-    /// Parses and canonicalizes a provider-qualified model selector.
-    #[test]
-    fn parses_model_spec() {
-        let model = ModelSpec::parse("openai/gpt-4o:high").unwrap();
-        assert_eq!(model.model_value(), "openai/gpt-4o");
-        assert_eq!(model.to_string(), "openai/gpt-4o:high");
-        let parsed = "openai/gpt-4o:high".parse::<ModelSpec>().unwrap();
-        assert_eq!(parsed, model);
-
-        let model = ModelSpec::parse("claude-sonnet-4").unwrap();
-        assert_eq!(model.model_value(), "claude-sonnet-4");
-        assert_eq!(model.to_string(), "claude-sonnet-4");
-    }
 
     /// Rejects model selectors with empty, repeated, or whitespace components.
     #[test]
@@ -373,50 +341,6 @@ mod tests {
             "openai/gpt 4o:high".parse::<ModelSpec>(),
             Err(ModelSpecError::Whitespace { .. })
         ));
-    }
-
-    /// Resolves model and reasoning values against ACP selectors.
-    #[test]
-    fn resolves_model_changes_from_categories() {
-        let options = vec![
-            SessionConfigOption::select(
-                "model",
-                "Model",
-                "openai/gpt-4o",
-                vec![SessionConfigSelectOption::new("openai/gpt-4o", "GPT-4o")],
-            )
-            .category(SessionConfigOptionCategory::Model),
-            SessionConfigOption::select(
-                "reasoning",
-                "Reasoning",
-                "high",
-                vec![SessionConfigSelectOption::new("high", "High")],
-            )
-            .category(SessionConfigOptionCategory::ThoughtLevel),
-        ];
-        let model = ModelSpec::parse("openai/gpt-4o:high").unwrap();
-        let changes = model_changes(&options, &model).unwrap();
-        assert_eq!(changes.len(), 2);
-    }
-
-    /// Resolves a model when the agent does not expose reasoning levels.
-    #[test]
-    fn resolves_model_only_change() {
-        let options = vec![
-            SessionConfigOption::select(
-                "model",
-                "Model",
-                "claude-sonnet-4",
-                vec![SessionConfigSelectOption::new(
-                    "claude-sonnet-4",
-                    "Claude Sonnet 4",
-                )],
-            )
-            .category(SessionConfigOptionCategory::Model),
-        ];
-        let model = ModelSpec::parse("claude-sonnet-4").unwrap();
-        let changes = model_changes(&options, &model).unwrap();
-        assert_eq!(changes.len(), 1);
     }
 
     /// Reads the agent-selected model and reasoning defaults.

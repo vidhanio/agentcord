@@ -15,7 +15,7 @@ use serenity::{
     collector::CollectComponentInteractions,
     futures::StreamExt,
 };
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Maximum number of permission options Discord accepts in one message.
 const MAX_OPTIONS: usize = 25;
@@ -81,21 +81,8 @@ pub async fn ask(
     let builder = CreateMessage::new()
         .content(format!("🔐 **permission requested** for **{title}**"))
         .components(components);
-    info!(
-        channel = ?channel,
-        options = request.options.len(),
-        timeout_ms = timeout.as_millis(),
-        "sending permission request..."
-    );
     let mut message = match channel.send_message(&context.http, builder).await {
-        Ok(message) => {
-            info!(
-                channel = ?channel,
-                message = ?message.id,
-                "sent permission request"
-            );
-            message
-        }
+        Ok(message) => message,
         Err(error) => {
             warn!(?error, ?channel, "failed to send permission request");
             return cancelled();
@@ -120,10 +107,8 @@ async fn report(
     message: impl Into<String>,
     event: &str,
 ) {
-    debug!(?channel, event, "reporting permission event...");
-    match channel.say(&context.http, message.into()).await {
-        Ok(_) => debug!(?channel, event, "reported permission event"),
-        Err(error) => warn!(?error, ?channel, event, "failed to report permission event"),
+    if let Err(error) = channel.say(&context.http, message.into()).await {
+        warn!(?error, ?channel, event, "failed to report permission event");
     }
 }
 
@@ -136,12 +121,6 @@ async fn wait_for_response(
     request: RequestPermissionRequest,
     message: &mut serenity::all::Message,
 ) -> RequestPermissionResponse {
-    debug!(
-        channel = ?channel,
-        message = ?message.id,
-        timeout_ms = timeout.as_millis(),
-        "waiting for permission response..."
-    );
     let mut interactions = message
         .id
         .collect_component_interactions(context)
@@ -185,7 +164,7 @@ async fn wait_for_response(
     info!(
         channel = ?channel,
         message = ?message.id,
-        "marking permission request as timed out..."
+        "permission request timed out; denying"
     );
     mark_timed_out(context, channel, message).await;
     cancelled()
@@ -197,12 +176,7 @@ async fn reject_unauthorized(
     channel: GenericChannelId,
     interaction: &serenity::all::ComponentInteraction,
 ) {
-    debug!(
-        channel = ?channel,
-        user = %interaction.user.id,
-        "sending unauthorized interaction response..."
-    );
-    match interaction
+    if let Err(error) = interaction
         .create_response(
             &context.http,
             CreateInteractionResponse::Message(
@@ -213,16 +187,11 @@ async fn reject_unauthorized(
         )
         .await
     {
-        Ok(()) => debug!(
-            channel = ?channel,
-            user = %interaction.user.id,
-            "sent unauthorized interaction response"
-        ),
-        Err(error) => warn!(
+        warn!(
             ?error,
             ?channel,
             "failed to reject unauthorized permission interaction"
-        ),
+        );
     }
 }
 
@@ -233,12 +202,7 @@ async fn acknowledge(
     interaction: &serenity::all::ComponentInteraction,
     option_name: &str,
 ) {
-    info!(
-        channel = ?channel,
-        user = %interaction.user.id,
-        "updating permission request with response..."
-    );
-    match interaction
+    if let Err(error) = interaction
         .create_response(
             &context.http,
             CreateInteractionResponse::UpdateMessage(
@@ -249,16 +213,11 @@ async fn acknowledge(
         )
         .await
     {
-        Ok(()) => info!(
-            channel = ?channel,
-            user = %interaction.user.id,
-            "updated permission request with response"
-        ),
-        Err(error) => warn!(
+        warn!(
             ?error,
             ?channel,
             "failed to acknowledge permission response"
-        ),
+        );
     }
 }
 
@@ -268,12 +227,7 @@ async fn mark_timed_out(
     channel: GenericChannelId,
     message: &mut serenity::all::Message,
 ) {
-    info!(
-        channel = ?channel,
-        message = ?message.id,
-        "disabling timed-out permission request..."
-    );
-    match message
+    if let Err(error) = message
         .edit(
             &context.http,
             serenity::all::EditMessage::new()
@@ -282,16 +236,11 @@ async fn mark_timed_out(
         )
         .await
     {
-        Ok(()) => info!(
-            channel = ?channel,
-            message = ?message.id,
-            "disabled timed-out permission request"
-        ),
-        Err(error) => warn!(
+        warn!(
             ?error,
             ?channel,
             "failed to mark permission request as timed out"
-        ),
+        );
     }
 }
 
@@ -400,7 +349,7 @@ mod tests {
         ToolCallUpdate, ToolCallUpdateFields,
     };
 
-    use super::{approve_all, cancelled, permission_components, truncate};
+    use super::{approve_all, cancelled, permission_components};
 
     /// Builds a permission request for response-policy tests.
     fn request(options: Vec<PermissionOption>) -> RequestPermissionRequest {
@@ -456,11 +405,5 @@ mod tests {
             "agentcord:permission:0"
         );
         assert_eq!(json[1]["components"][0]["label"], "reject");
-    }
-
-    /// Verifies button labels are truncated at the Discord limit.
-    #[test]
-    fn truncate_preserves_unicode_boundaries() {
-        assert_eq!(truncate("😀😀😀", 2), "😀…");
     }
 }
