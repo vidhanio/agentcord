@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::{
+    model::default_model,
     projection::ProjectionState,
     prompt::run_commands,
     protocol::{NewSessionConnection, initialize, request_with_timeout},
@@ -145,6 +146,8 @@ async fn run_connected(
 struct SessionHandler {
     /// Shared application state used to resolve Discord permissions.
     bot: Bot,
+    /// Persisted session metadata used for Discord session presentation.
+    row: SessionRow,
     /// Agent-owned session identifier accepted by this handler.
     expected_session: SessionId,
     /// Discord thread receiving projected updates.
@@ -158,8 +161,9 @@ impl SessionHandler {
     fn new(bot: Bot, row: SessionRow, projection: ProjectionState) -> Self {
         Self {
             bot,
-            expected_session: row.session_id,
+            expected_session: row.session_id.clone(),
             thread: row.thread_id,
+            row,
             projection,
         }
     }
@@ -174,6 +178,8 @@ impl HandleDispatchFrom<Agent> for SessionHandler {
         let notification_projection = self.projection.clone();
         let notification_session = self.expected_session.clone();
         let notification_thread = self.thread;
+        let notification_bot = self.bot.clone();
+        let notification_row = self.row.clone();
         let permission_bot = self.bot.clone();
         let permission_session = self.expected_session.clone();
         let permission_thread = self.thread;
@@ -181,8 +187,10 @@ impl HandleDispatchFrom<Agent> for SessionHandler {
 
         MatchDispatchFrom::new(message, &connection)
             .if_notification(move |notification: SessionNotification| {
+                let bot = notification_bot.clone();
                 let projection = notification_projection.clone();
                 let expected_session = notification_session.clone();
+                let row = notification_row.clone();
                 async move {
                     debug!(
                         session = %expected_session,
@@ -190,11 +198,14 @@ impl HandleDispatchFrom<Agent> for SessionHandler {
                         "received acp session notification"
                     );
                     enqueue_notification(
+                        &bot,
+                        &row,
                         &projection,
                         &expected_session,
                         notification_thread,
                         notification,
                     )
+                    .await
                 }
             })
             .await
@@ -287,7 +298,9 @@ fn handle_permission_request(
 }
 
 /// Enqueues one session notification for the renderer.
-fn enqueue_notification(
+async fn enqueue_notification(
+    bot: &Bot,
+    row: &SessionRow,
     projection: &ProjectionState,
     expected_session: &SessionId,
     thread: GenericChannelId,
@@ -320,6 +333,17 @@ fn enqueue_notification(
             options = update.config_options.len(),
             "updated cached acp session configuration"
         );
+        let current_model = default_model(&update.config_options);
+        if let Err(error) = bot
+            .update_session_starter(row, current_model.as_deref())
+            .await
+        {
+            warn!(
+                ?error,
+                thread = ?thread,
+                "failed to update session starter after acp `session/update`"
+            );
+        }
     }
     let result = projection
         .updates
@@ -425,6 +449,17 @@ async fn restore_session(
     );
     if let Some(options) = loaded.config_options {
         projection.apply_config_options(options);
+    }
+    let current_model = default_model(&projection.ui().config_options);
+    if let Err(error) = bot
+        .update_session_starter(&row, current_model.as_deref())
+        .await
+    {
+        warn!(
+            ?error,
+            thread = ?row.thread_id,
+            "failed to update session starter after acp `session/load`"
+        );
     }
     if projection.fault.is_triggered() {
         return Err(agent_client_protocol::Error::internal_error()

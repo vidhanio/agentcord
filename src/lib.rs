@@ -148,7 +148,17 @@ impl Bot {
             .session(thread)
             .await?
             .ok_or(BotError::NotSession { thread })?;
-        self.state().supervisor.set_model(self, &row, model).await
+        self.state().supervisor.set_model(self, &row, model).await?;
+        let current_model = self
+            .session_ui(thread)
+            .and_then(|ui| acp::default_model(&ui.config_options));
+        if let Err(error) = self
+            .update_session_starter(&row, current_model.as_deref())
+            .await
+        {
+            warn!(?error, thread = ?thread, "failed to update session starter after model selection");
+        }
+        Ok(())
     }
 
     /// Deletes and re-imports the ACP session bound to one Discord thread.

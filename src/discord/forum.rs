@@ -6,8 +6,9 @@ use agent_client_protocol::schema::v1::SessionId;
 use serenity::{
     all::{
         ChannelId, ChannelType, Context, CreateForumPost, CreateForumTag, CreateMessage,
-        EditChannel, EditThread, ForumEmoji, ForumTag, ForumTagId, GenericChannelId, GuildChannel,
-        GuildThread, ReactionType, ThreadId, small_fixed_array::TruncatingInto,
+        EditChannel, EditMessage, EditThread, ForumEmoji, ForumTag, ForumTagId, GenericChannelId,
+        GetMessages, GuildChannel, GuildThread, MessageId, ReactionType, ThreadId,
+        small_fixed_array::TruncatingInto,
     },
     http::{HttpError, JsonErrorCode},
 };
@@ -80,6 +81,49 @@ impl SessionMetadata {
 }
 
 impl Bot {
+    /// Updates the first session message with the current ACP model.
+    pub(crate) async fn update_session_starter(
+        &self,
+        row: &SessionRow,
+        model: Option<&str>,
+    ) -> BotResult {
+        let context = self.context()?.clone();
+        let metadata = SessionMetadata {
+            agent_key: row.agent_key.clone(),
+            project_path: row.project_path.clone(),
+            session_id: row.session_id.clone(),
+            title: None,
+            model: model.map(str::to_owned),
+        };
+        let starter_content = metadata.starter_message();
+        debug!(thread = ?row.thread_id, "reading session starter message...");
+        let messages = row
+            .thread_id
+            .messages(
+                &context.http,
+                GetMessages::new().limit(1).after(MessageId::new(1)),
+            )
+            .await?;
+        let Some(starter) = messages.first() else {
+            warn!(thread = ?row.thread_id, "session starter message is missing");
+            return Ok(());
+        };
+        if starter.content == starter_content {
+            debug!(thread = ?row.thread_id, "session starter message is already current");
+            return Ok(());
+        }
+        debug!(thread = ?row.thread_id, message = ?starter.id, "editing session starter message...");
+        row.thread_id
+            .edit_message(
+                &context.http,
+                starter.id,
+                EditMessage::new().content(starter_content),
+            )
+            .await?;
+        debug!(thread = ?row.thread_id, message = ?starter.id, "edited session starter message");
+        Ok(())
+    }
+
     /// Creates an ACP session and binds it to a new forum post.
     pub async fn create_session(
         &self,
