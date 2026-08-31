@@ -528,6 +528,7 @@ fn render_tool_text(state: &serde_json::Value) -> String {
     let body = match kind {
         "edit" => render_diff_content(state),
         "execute" => render_execute_content(state),
+        "search" => String::new(),
         _ => render_tool_content(state),
     };
     if body.trim().is_empty() {
@@ -781,17 +782,9 @@ fn render_diff(diff: &serde_json::Value) -> String {
     output
 }
 
-/// Renders an execute tool's command and bounded output.
+/// Renders only the command run by an execute tool.
 fn render_execute_content(state: &serde_json::Value) -> String {
-    let command = execute_command(state);
-    let mut output = fence(command, "sh");
-    if let Some(result) = execute_output(state)
-        && !result.trim().is_empty()
-    {
-        output.push('\n');
-        output.push_str(&fence(&keep_tail(&result, 1800), "ansi"));
-    }
-    output
+    fence(execute_command(state), "sh")
 }
 
 /// Resolves the command represented by an execute tool call.
@@ -804,73 +797,12 @@ fn execute_command(state: &serde_json::Value) -> &str {
         .unwrap_or("command")
 }
 
-/// Extracts execute output from raw output or text content.
-fn execute_output(state: &serde_json::Value) -> Option<String> {
-    if let Some(output) = state.get("rawOutput") {
-        match output {
-            serde_json::Value::String(text) => return Some(text.clone()),
-            serde_json::Value::Object(fields) => {
-                let stdout = fields
-                    .get("stdout")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
-                let stderr = fields
-                    .get("stderr")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
-                let merged = match (stdout.is_empty(), stderr.is_empty()) {
-                    (false, false) => format!("{stdout}\nstderr:\n{stderr}"),
-                    (false, true) => stdout.to_owned(),
-                    (true, false) => format!("stderr:\n{stderr}"),
-                    (true, true) => String::new(),
-                };
-                if !merged.is_empty() {
-                    return Some(merged);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut output = String::new();
-    for entry in state
-        .get("content")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if let Some(text) = tool_content_text(entry) {
-            output.push_str(&text);
-            output.push_str("\n\n");
-        }
-    }
-    let output = output.trim_end();
-    (!output.is_empty()).then(|| output.to_owned())
-}
-
 /// Wraps text in a Discord-safe Markdown code fence.
 fn fence(value: &str, language: &str) -> String {
     format!(
         "```{language}\n{}\n```",
         value.replace("```", "`\u{200b}``")
     )
-}
-
-/// Keeps the most recent part of a long tool output.
-fn keep_tail(value: &str, limit: usize) -> String {
-    const MARKER: &str = "… earlier output omitted …\n";
-    if value.chars().count() <= limit {
-        return value.to_owned();
-    }
-    let keep = limit.saturating_sub(MARKER.chars().count());
-    let tail = value
-        .chars()
-        .rev()
-        .take(keep)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect::<String>();
-    format!("{MARKER}{tail}")
 }
 
 /// Merges one serialized tool update into an existing object state.
@@ -1302,7 +1234,8 @@ mod tests {
             "title": "cargo test",
             "kind": "execute",
             "status": "completed",
-            "rawInput": {"command": "cargo test"}
+            "rawInput": {"command": "cargo test"},
+            "rawOutput": {"stdout": "test output", "stderr": "terminal output"}
         });
         assert_eq!(
             render_tool_text(&state),
@@ -1324,6 +1257,20 @@ mod tests {
             render_tool_text(&state),
             "⚙️ **execute** run tests\n```sh\ncargo test\n```"
         );
+    }
+
+    /// Omits search results while retaining the query in the tool header.
+    #[test]
+    fn search_tool_calls_render_without_results() {
+        let state = serde_json::json!({
+            "toolCallId": "tool-1",
+            "title": "src/**/*.rs",
+            "kind": "search",
+            "status": "completed",
+            "content": [{"type": "text", "text": "search results"}],
+            "rawOutput": {"matches": ["src/main.rs"]}
+        });
+        assert_eq!(render_tool_text(&state), "🔍 **search** `src/**/*.rs`");
     }
 
     /// Verifies plans replace their checklist state in one stable projection.
