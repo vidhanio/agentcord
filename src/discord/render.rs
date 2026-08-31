@@ -540,13 +540,9 @@ fn tool_label(kind: &str) -> String {
     kind.replace('_', " ")
 }
 
-/// Wraps path-like tool titles in inline Markdown code.
+/// Wraps tool titles in inline Markdown code.
 fn header_title(title: &str) -> String {
-    if title.contains('/') || title.contains('\\') {
-        format!("`{}`", title.replace('`', "ˋ"))
-    } else {
-        title.to_owned()
-    }
+    format!("`{}`", title.replace('`', "ˋ"))
 }
 
 /// Formats a plan update as a compact checklist.
@@ -1516,7 +1512,7 @@ mod tests {
         });
         assert_eq!(
             render_tool_text(&state),
-            "⚙️ **execute** run tests\n```sh\ncargo test\n```"
+            "⚙️ **execute** `run tests`\n```sh\ncargo test\n```"
         );
     }
 

@@ -29,7 +29,13 @@ pub fn framework(bot: &Bot) -> BotFramework {
     BotFramework {
         poise: poise::Framework::builder()
             .options(poise::FrameworkOptions {
-                commands: vec![agent, import, model::model(), reload::reload()],
+                commands: vec![
+                    agent,
+                    import,
+                    model::model(),
+                    recreate::recreate(),
+                    refresh::refresh(),
+                ],
                 on_error,
                 ..Default::default()
             })
@@ -183,4 +189,5 @@ fn truncate(value: &str, limit: usize) -> String {
 mod agent;
 mod import;
 mod model;
-mod reload;
+mod recreate;
+mod refresh;

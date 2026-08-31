@@ -137,7 +137,7 @@ impl Bot {
     }
 
     /// Deletes and re-imports the ACP session bound to one Discord thread.
-    pub async fn reload_session(
+    pub async fn recreate_session(
         &self,
         thread: serenity::all::GenericChannelId,
     ) -> BotResult<serenity::all::GenericChannelId> {
@@ -153,6 +153,23 @@ impl Bot {
         info!(thread = ?thread, "deleted session thread");
         self.db().delete_session(thread).await?;
         self.import_session(&row.agent_key, &row.session_id).await
+    }
+
+    /// Restarts the ACP actor so the current thread receives a fresh session
+    /// history replay without recreating its Discord post.
+    pub async fn refresh_session(
+        &self,
+        thread: serenity::all::GenericChannelId,
+    ) -> BotResult<serenity::all::GenericChannelId> {
+        let row = self
+            .db()
+            .session(thread)
+            .await?
+            .ok_or(BotError::NotSession { thread })?;
+        info!(thread = ?thread, "refreshing session...");
+        self.state().supervisor.stop_and_wait(self, thread).await?;
+        self.state().supervisor.start(self, &row, Vec::new());
+        Ok(thread)
     }
 
     /// Returns cached ACP configuration options for an active session.
