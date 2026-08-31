@@ -19,7 +19,7 @@ use super::{
     registry::SessionCommand,
     runtime::Signal,
 };
-use crate::{Bot, BotError, PromptOrigin};
+use crate::{Bot, BotError};
 
 /// Grace period after asking ACP to cancel a timed-out prompt.
 const PROMPT_CANCEL_GRACE: Duration = Duration::from_secs(5);
@@ -62,11 +62,7 @@ pub(super) async fn run_commands(
             break;
         };
         match command {
-            SessionCommand::Prompt {
-                text,
-                turn_id,
-                origin,
-            } => {
+            SessionCommand::Prompt { text, turn_id } => {
                 handle_prompt_command(
                     PromptContext {
                         bot: &bot,
@@ -77,7 +73,6 @@ pub(super) async fn run_commands(
                     },
                     text,
                     turn_id,
-                    origin,
                 )
                 .await?;
             }
@@ -107,7 +102,7 @@ pub(super) async fn run_commands(
     Ok(())
 }
 
-/// Mirrors and sends one queued prompt through the active ACP session.
+/// Sends one queued prompt through the active ACP session.
 struct PromptContext<'a> {
     bot: &'a Bot,
     connection: &'a ConnectionTo<Agent>,
@@ -121,7 +116,6 @@ async fn handle_prompt_command(
     context: PromptContext<'_>,
     text: String,
     turn_id: String,
-    origin: PromptOrigin,
 ) -> Result<(), agent_client_protocol::Error> {
     let PromptContext {
         bot,
@@ -134,15 +128,9 @@ async fn handle_prompt_command(
         thread = ?thread,
         session = %session_id,
         characters = text.chars().count(),
-        ?origin,
         "processing acp `session/prompt`..."
     );
     projection.set_turn(turn_id);
-    if origin == PromptOrigin::NeedsMirror
-        && let Err(error) = bot.mirror_user_message(thread, &text).await
-    {
-        warn!(?error, thread = ?thread, "failed to mirror prompt; forwarding it anyway...");
-    }
 
     match run_prompt(
         bot,

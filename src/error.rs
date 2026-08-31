@@ -219,8 +219,8 @@ pub enum BotError {
     #[error("the acp session actor has exited")]
     AcpActorExited,
     /// The existing actor did not stop within the configured startup timeout.
-    #[error("acp session reload timed out while stopping the previous actor")]
-    AcpReloadTimedOut,
+    #[error("acp session actor stop timed out")]
+    AcpActorStopTimedOut,
     /// The ACP model-selection request did not complete in time.
     #[error("acp model selection timed out")]
     AcpModelSelectionTimedOut,

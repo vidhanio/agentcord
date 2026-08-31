@@ -169,7 +169,10 @@ impl Bot {
                 session = %session_id,
                 "removing stale session binding..."
             );
-            self.state().supervisor.stop(existing.thread_id);
+            self.state()
+                .supervisor
+                .stop_and_wait(self, existing.thread_id)
+                .await?;
             self.db().delete_session(existing.thread_id).await?;
             info!(
                 thread = ?existing.thread_id,

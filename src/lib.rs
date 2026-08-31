@@ -125,9 +125,13 @@ impl Bot {
             .session(thread)
             .await?
             .ok_or(BotError::NotSession { thread })?;
-        self.state()
-            .supervisor
-            .prompt(self, &row, text, turn_id, origin)
+        debug!(thread = ?thread, ?origin, "preparing acp prompt...");
+        if origin == PromptOrigin::NeedsMirror
+            && let Err(error) = self.mirror_user_message(thread, &text).await
+        {
+            warn!(?error, thread = ?thread, "failed to mirror prompt; forwarding it anyway...");
+        }
+        self.state().supervisor.prompt(self, &row, text, turn_id)
     }
 
     /// Changes the selected model for a session thread.
@@ -144,14 +148,23 @@ impl Bot {
         self.state().supervisor.set_model(self, &row, model).await
     }
 
-    /// Reloads the persisted ACP session for one Discord thread.
-    pub async fn reload_session(&self, thread: serenity::all::GenericChannelId) -> BotResult {
+    /// Deletes and re-imports the ACP session bound to one Discord thread.
+    pub async fn reload_session(
+        &self,
+        thread: serenity::all::GenericChannelId,
+    ) -> BotResult<serenity::all::GenericChannelId> {
         let row = self
             .db()
             .session(thread)
             .await?
             .ok_or(BotError::NotSession { thread })?;
-        self.state().supervisor.reload(self, &row).await
+        self.state().supervisor.stop_and_wait(self, thread).await?;
+        let context = self.context()?.clone();
+        info!(thread = ?thread, "deleting session thread...");
+        thread.delete(&context.http, None).await?;
+        info!(thread = ?thread, "deleted session thread");
+        self.db().delete_session(thread).await?;
+        self.import_session(&row.agent_key, &row.session_id).await
     }
 
     /// Returns cached ACP configuration options for an active session.
@@ -316,7 +329,10 @@ impl Bot {
             return Ok(());
         }
         info!(thread = ?thread_id, "stopping deleted managed session...");
-        self.state().supervisor.stop(thread_id);
+        self.state()
+            .supervisor
+            .stop_and_wait(self, thread_id)
+            .await?;
         self.db().delete_session(thread_id).await?;
         info!(thread = ?thread_id, "removed deleted managed session");
         Ok(())

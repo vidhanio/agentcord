@@ -16,7 +16,7 @@ use super::{
     protocol::{NewSession, NewSessionConnection},
     runtime::Signal,
 };
-use crate::{Bot, BotError, BotResult, PromptOrigin, db::SessionRow};
+use crate::{Bot, BotError, BotResult, db::SessionRow};
 
 /// Command queue capacity for one active session actor.
 pub(super) const COMMAND_QUEUE_CAPACITY: usize = 32;
@@ -53,14 +53,12 @@ pub(super) struct ActorEntry {
 /// Command delivered to a session actor.
 #[derive(Debug)]
 pub(super) enum SessionCommand {
-    /// Sends one user prompt after optionally mirroring it to Discord.
+    /// Sends one user prompt through the active ACP session.
     Prompt {
         /// Prompt text sent to ACP.
         text: String,
         /// Identifier used for unkeyed streamed output.
         turn_id: String,
-        /// Whether the prompt is already visible in Discord.
-        origin: PromptOrigin,
     },
     /// Changes the ACP model and optional reasoning level after the session is
     /// ready.
@@ -99,14 +97,7 @@ impl Supervisor {
     }
 
     /// Queues a prompt for a persisted session, starting its actor on demand.
-    pub fn prompt(
-        &self,
-        bot: &Bot,
-        row: &SessionRow,
-        text: String,
-        turn_id: String,
-        origin: PromptOrigin,
-    ) -> BotResult {
+    pub fn prompt(&self, bot: &Bot, row: &SessionRow, text: String, turn_id: String) -> BotResult {
         let sender = self.sender(bot, row);
         debug!(
             thread = ?row.thread_id,
@@ -115,11 +106,7 @@ impl Supervisor {
             "queueing acp prompt..."
         );
         let result = sender
-            .try_send(SessionCommand::Prompt {
-                text,
-                turn_id,
-                origin,
-            })
+            .try_send(SessionCommand::Prompt { text, turn_id })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => BotError::AcpQueueFull,
                 mpsc::error::TrySendError::Closed(_) => {
@@ -161,30 +148,24 @@ impl Supervisor {
         ));
     }
 
-    /// Stops the current actor, waits for its connection to close, and starts
-    /// a fresh actor after the persisted session has been validated.
-    pub async fn reload(&self, bot: &Bot, row: &SessionRow) -> BotResult {
+    /// Stops the current actor and waits for its connection to close.
+    pub async fn stop_and_wait(&self, bot: &Bot, thread: GenericChannelId) -> BotResult {
         let entry = {
             let mut actors = self.actors();
-            actors.remove(&row.thread_id)
+            actors.remove(&thread)
         };
         if let Some(entry) = entry {
-            info!(thread = ?row.thread_id, session = %row.session_id, "stopping acp actor for reload...");
-            debug!(thread = ?row.thread_id, "waiting for acp actor to stop...");
+            info!(thread = ?thread, "stopping acp actor...");
             entry.stop.trigger();
+            debug!(thread = ?thread, "waiting for acp actor to stop...");
             tokio::time::timeout(bot.config().timeouts.startup, entry.done)
                 .await
-                .map_err(|_| BotError::AcpReloadTimedOut)?
+                .map_err(|_| BotError::AcpActorStopTimedOut)?
                 .map_err(|_| BotError::AcpActorExited)?;
-            info!(thread = ?row.thread_id, "acp actor stopped for reload");
+            info!(thread = ?thread, "acp actor stopped");
         } else {
-            debug!(thread = ?row.thread_id, "no active acp actor to stop for reload");
+            debug!(thread = ?thread, "no active acp actor to stop");
         }
-        debug!(thread = ?row.thread_id, "validating session before reload...");
-        self.validate_session(bot, &row.agent_key, &row.session_id, &row.project_path)
-            .await?;
-        self.start(bot, row, Vec::new());
-        info!(thread = ?row.thread_id, "acp actor reloaded");
         Ok(())
     }
 
@@ -346,17 +327,6 @@ impl Supervisor {
         let ui = actors.get(&thread)?.ui.clone();
         drop(actors);
         Some(ui.lock().expect("acp session ui mutex poisoned").clone())
-    }
-
-    /// Stops and removes the actor for a deleted session thread.
-    pub fn stop(&self, thread: GenericChannelId) {
-        let entry = self.actors().remove(&thread);
-        if let Some(entry) = entry {
-            info!(thread = ?thread, "stopping acp actor...");
-            entry.stop.trigger();
-        } else {
-            debug!(thread = ?thread, "acp actor was already stopped");
-        }
     }
 }
 

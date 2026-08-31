@@ -5,10 +5,12 @@
 //! complete projection for the affected source. The Discord adapter then
 //! synchronizes message IDs and persists the result.
 
+use std::collections::VecDeque;
+
 use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
 use serde::{Deserialize, Serialize};
 use serenity::all::{Context, CreateMessage, EditMessage, GenericChannelId, MessageId};
-use text_splitter::{ChunkConfig, MarkdownSplitter};
+use text_splitter::{ChunkConfig, MarkdownSplitter, TextSplitter};
 use tracing::{debug, warn};
 
 use crate::{Bot, BotError, BotResult, db::RenderProjection};
@@ -999,37 +1001,265 @@ struct SyncFailure {
     error: Box<BotError>,
 }
 
-/// Splits text into Discord-sized Unicode-safe chunks.
+/// Splits text into Discord-sized Unicode-safe chunks while preserving fenced
+/// code blocks in every message that contains part of one.
 #[must_use]
 pub fn split_message(value: &str, limit: usize) -> Vec<String> {
     if value.is_empty() || limit == 0 {
         return vec![String::new()];
     }
-    let chunks = MarkdownSplitter::new(ChunkConfig::new(limit))
-        .chunks(value)
-        .flat_map(|chunk| hard_split(chunk, limit))
-        .collect::<Vec<_>>();
-    if chunks.is_empty() {
+
+    let mut messages = Vec::new();
+    let mut current = String::new();
+    for part in message_parts(value) {
+        match part {
+            MessagePart::Text(text) => {
+                append_text_parts(text, &mut current, &mut messages, limit);
+            }
+            MessagePart::Code {
+                opening,
+                body,
+                closing,
+            } => append_code_parts(opening, body, closing, &mut current, &mut messages, limit),
+        }
+    }
+    if !current.is_empty() {
+        messages.push(current);
+    }
+    if messages.is_empty() {
         vec![String::new()]
     } else {
-        chunks
+        messages
     }
 }
 
-/// Splits one already Markdown-aware chunk at a hard character boundary.
-fn hard_split(value: &str, limit: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for character in value.chars() {
-        if current.chars().count() == limit {
-            chunks.push(std::mem::take(&mut current));
+/// One top-level region of a message, with fenced code kept separate from
+/// surrounding Markdown.
+enum MessagePart<'a> {
+    /// Ordinary Markdown or text.
+    Text(&'a str),
+    /// A complete fenced code block and its original delimiters.
+    Code {
+        /// Opening fence, including its language and line ending.
+        opening: &'a str,
+        /// Code between the delimiters.
+        body: &'a str,
+        /// Closing fence.
+        closing: &'a str,
+    },
+}
+
+/// Finds complete fenced code blocks without changing their original text.
+fn message_parts(value: &str) -> Vec<MessagePart<'_>> {
+    let mut offset = 0;
+    let lines = value
+        .split_inclusive('\n')
+        .map(|line| {
+            let start = offset;
+            offset += line.len();
+            (start, offset, line)
+        })
+        .collect::<Vec<_>>();
+    let mut parts = Vec::new();
+    let mut text_start = 0;
+    let mut line_index = 0;
+    while line_index < lines.len() {
+        let (opening_start, opening_end, opening_line) = lines[line_index];
+        let Some((marker, marker_length, _)) = fence_marker(opening_line) else {
+            line_index += 1;
+            continue;
+        };
+        let closing = lines[line_index + 1..].iter().enumerate().find_map(
+            |(relative_index, &(closing_start, closing_end, closing_line))| {
+                let (closing_marker, closing_length, is_closing) = fence_marker(closing_line)?;
+                (is_closing && closing_marker == marker && closing_length >= marker_length)
+                    .then_some((line_index + relative_index + 1, closing_start, closing_end))
+            },
+        );
+        let Some((closing_index, closing_start, closing_end)) = closing else {
+            line_index += 1;
+            continue;
+        };
+
+        if text_start < opening_start {
+            parts.push(MessagePart::Text(&value[text_start..opening_start]));
         }
-        current.push(character);
+        parts.push(MessagePart::Code {
+            opening: &value[opening_start..opening_end],
+            body: &value[opening_end..closing_start],
+            closing: &value[closing_start..closing_end],
+        });
+        text_start = closing_end;
+        line_index = closing_index + 1;
     }
+    if text_start < value.len() {
+        parts.push(MessagePart::Text(&value[text_start..]));
+    }
+    parts
+}
+
+/// Returns a Markdown fence marker, including whether it can close a block.
+fn fence_marker(line: &str) -> Option<(char, usize, bool)> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let line = line.trim_start_matches([' ', '\t']);
+    let marker = line.chars().next()?;
+    if marker != '\x60' && marker != '~' {
+        return None;
+    }
+    let mut marker_end = 0;
+    let mut marker_length = 0;
+    for (index, character) in line.char_indices() {
+        if character != marker {
+            break;
+        }
+        marker_end = index + character.len_utf8();
+        marker_length += 1;
+    }
+    (marker_length >= 3).then(|| (marker, marker_length, line[marker_end..].trim().is_empty()))
+}
+
+/// Appends Markdown chunks to the current message, preserving logical splits.
+fn append_text_parts(value: &str, current: &mut String, messages: &mut Vec<String>, limit: usize) {
+    for chunk in markdown_chunks(value, limit) {
+        append_chunk(&chunk, current, messages, limit);
+    }
+}
+
+/// Appends one fenced block, splitting only its body and repeating its fences.
+fn append_code_parts(
+    opening: &str,
+    body: &str,
+    closing: &str,
+    current: &mut String,
+    messages: &mut Vec<String>,
+    limit: usize,
+) {
+    let mut chunks = code_body_chunks(body, opening, closing, limit);
+    let Some(first) = chunks.first().cloned() else {
+        return;
+    };
+    chunks.remove(0);
+
     if !current.is_empty() {
-        chunks.push(current);
+        let available = limit.saturating_sub(current.chars().count());
+        let fitting = code_body_chunks(&first, opening, closing, available);
+        if let Some(fitting_first) = fitting.first() {
+            let rendered = fenced_chunk(opening, fitting_first, closing);
+            if fits(current, &rendered, limit) {
+                current.push_str(&rendered);
+                let mut remaining = fitting.into_iter().skip(1).collect::<String>();
+                for chunk in chunks {
+                    remaining.push_str(&chunk);
+                }
+                if !remaining.is_empty() {
+                    append_code_remainder(
+                        code_body_chunks(&remaining, opening, closing, limit),
+                        opening,
+                        closing,
+                        current,
+                        messages,
+                    );
+                }
+                return;
+            }
+        }
+        messages.push(std::mem::take(current));
     }
-    chunks
+
+    current.push_str(&fenced_chunk(opening, &first, closing));
+    append_code_remainder(chunks, opening, closing, current, messages);
+}
+
+/// Appends remaining fenced chunks, leaving the last one open for later text.
+fn append_code_remainder(
+    chunks: impl IntoIterator<Item = String>,
+    opening: &str,
+    closing: &str,
+    current: &mut String,
+    messages: &mut Vec<String>,
+) {
+    for body in chunks {
+        messages.push(std::mem::take(current));
+        current.push_str(&fenced_chunk(opening, &body, closing));
+    }
+}
+
+/// Appends one already bounded chunk or starts the next message.
+fn append_chunk(chunk: &str, current: &mut String, messages: &mut Vec<String>, limit: usize) {
+    if chunk.is_empty() {
+        return;
+    }
+    if !fits(current, chunk, limit) && !current.is_empty() {
+        messages.push(std::mem::take(current));
+    }
+    current.push_str(chunk);
+}
+
+/// Splits ordinary Markdown with the Markdown-aware text splitter path.
+fn markdown_chunks(value: &str, limit: usize) -> Vec<String> {
+    MarkdownSplitter::new(ChunkConfig::new(limit).with_trim(false))
+        .chunks(value)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Splits code contents with line-aware text splitter semantics.
+fn text_chunks(value: &str, limit: usize) -> Vec<String> {
+    TextSplitter::new(ChunkConfig::new(limit).with_trim(false))
+        .chunks(value)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Splits a code body and ensures every reconstructed fence fits its limit.
+fn code_body_chunks(body: &str, opening: &str, closing: &str, limit: usize) -> Vec<String> {
+    if body.is_empty() {
+        return vec![String::new()];
+    }
+    let overhead = opening.chars().count() + closing.chars().count();
+    let body_limit = limit.saturating_sub(overhead);
+    if body_limit == 0 {
+        return vec![body.to_owned()];
+    }
+    let mut chunks = VecDeque::from(text_chunks(body, body_limit));
+    let mut fitted = Vec::new();
+    while let Some(chunk) = chunks.pop_front() {
+        if fenced_chunk(opening, &chunk, closing).chars().count() <= limit {
+            fitted.push(chunk);
+            continue;
+        }
+        let reduced_limit = body_limit.saturating_sub(1);
+        if reduced_limit == 0 {
+            fitted.push(chunk);
+            continue;
+        }
+        let reduced = text_chunks(&chunk, reduced_limit);
+        for piece in reduced.into_iter().rev() {
+            chunks.push_front(piece);
+        }
+    }
+    fitted
+}
+
+/// Reconstructs one complete fenced code block from one body chunk.
+fn fenced_chunk(opening: &str, body: &str, closing: &str) -> String {
+    let mut output = String::with_capacity(opening.len() + body.len() + closing.len() + 1);
+    output.push_str(opening);
+    output.push_str(body);
+    if !body.ends_with(['\r', '\n']) {
+        output.push('\n');
+    }
+    output.push_str(closing);
+    output
+}
+
+/// Checks a concatenation using Unicode character counts.
+fn fits(current: &str, addition: &str, limit: usize) -> bool {
+    current
+        .chars()
+        .count()
+        .saturating_add(addition.chars().count())
+        <= limit
 }
 
 #[cfg(test)]
@@ -1304,6 +1534,37 @@ mod tests {
         let chunks = split_message(&"🙂".repeat(20), 7);
         assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 7));
         assert_eq!(chunks.concat(), "🙂".repeat(20));
+    }
+
+    /// Keeps an edit header with its diff and repeats fences when splitting.
+    #[test]
+    fn fenced_code_chunks_keep_their_language_and_delimiters() {
+        let fence = char::from(96).to_string().repeat(3);
+        let value = format!("edit blah\n{fence}diff\n+ one\n- two\n+ three\n{fence}");
+        assert_eq!(
+            split_message(&value, value.chars().count()),
+            vec![value.clone()]
+        );
+        assert_eq!(
+            split_message(&value, 30),
+            vec![
+                format!("edit blah\n{fence}diff\n+ one\n{fence}"),
+                format!("{fence}diff\n- two\n+ three\n{fence}")
+            ]
+        );
+    }
+
+    /// Keeps split thought code blocks inside the existing italic wrapper.
+    #[test]
+    fn thought_code_chunks_keep_italic_wrappers() {
+        let fence = char::from(96).to_string().repeat(3);
+        let body = "line\n".repeat(500);
+        let value = format!("{fence}rust\n{body}{fence}");
+        let chunks = render_text(&serde_json::json!({"text": value}), true);
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| {
+            chunk.starts_with('*') && chunk.ends_with('*') && chunk.matches(&fence).count() == 2
+        }));
     }
 
     /// Verifies planning edits, appends, and suffix deletions preserves order.
