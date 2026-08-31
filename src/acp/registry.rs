@@ -44,6 +44,8 @@ pub(super) struct ActorEntry {
     pub(super) sender: mpsc::Sender<SessionCommand>,
     /// Signal used to stop this actor when its row changes.
     pub(super) stop: Arc<Signal>,
+    /// Completes when the actor has released its ACP connection.
+    pub(super) done: oneshot::Receiver<()>,
     /// Cached session configuration used by command autocomplete.
     pub(super) ui: Arc<Mutex<SessionUiState>>,
 }
@@ -137,6 +139,26 @@ impl Supervisor {
         ));
     }
 
+    /// Stops the current actor, waits for its connection to close, and starts
+    /// a fresh actor after the persisted session has been validated.
+    pub async fn reload(&self, bot: &Bot, row: &SessionRow) -> BotResult {
+        let entry = {
+            let mut actors = self.actors();
+            actors.remove(&row.thread_id)
+        };
+        if let Some(entry) = entry {
+            entry.stop.trigger();
+            tokio::time::timeout(bot.config().timeouts.startup, entry.done)
+                .await
+                .map_err(|_| BotError::AcpReloadTimedOut)?
+                .map_err(|_| BotError::AcpActorExited)?;
+        }
+        self.validate_session(bot, &row.agent_key, &row.session_id, &row.project_path)
+            .await?;
+        self.start(bot, row, Vec::new());
+        Ok(())
+    }
+
     /// Changes the model and optional reasoning level of a persisted session.
     pub async fn set_model(&self, bot: &Bot, row: &SessionRow, model: ModelSpec) -> BotResult {
         let sender = self.sender(bot, row);
@@ -193,6 +215,7 @@ impl Supervisor {
         let ui = Arc::new(Mutex::new(SessionUiState { config_options }));
         let actor_ui = Arc::clone(&ui);
         let registry = self.actors.clone();
+        let (done_sender, done_receiver) = oneshot::channel();
         tokio::spawn(async move {
             if let Err(error) = actor::run(
                 actor_bot,
@@ -214,6 +237,7 @@ impl Supervisor {
                 }
                 warn!(?error, thread = ?actor_row.thread_id, "acp session actor stopped");
             }
+            let _ = done_sender.send(());
             let mut actors = registry.lock();
             if actors
                 .get(&actor_row.thread_id)
@@ -228,6 +252,7 @@ impl Supervisor {
                 row: row.clone(),
                 sender: sender.clone(),
                 stop,
+                done: done_receiver,
                 ui,
             },
         );

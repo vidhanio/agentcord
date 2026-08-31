@@ -20,7 +20,8 @@ independent copies of its constituent state.
 - `src/db.rs`: new Agentcord SQLite state and Discord projection bindings.
 - `src/discord/`: Discord-specific forum, webhook, permission, rendering, and
   command integrations.
-- `src/discord/commands/`: Poise wiring for `/agent`, `/import`, and `/model`.
+- `src/discord/commands/`: Poise wiring for `/agent`, `/import`, `/model`, and
+  `/reload`.
 
 ## Development
 

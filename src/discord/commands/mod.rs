@@ -1,4 +1,4 @@
-//! Minimal slash-command surface for creating and importing sessions.
+//! Minimal slash-command surface for managing sessions.
 
 use std::borrow::Cow;
 
@@ -27,7 +27,7 @@ pub fn framework(bot: &Bot) -> BotFramework {
     BotFramework {
         poise: poise::Framework::builder()
             .options(poise::FrameworkOptions {
-                commands: vec![agent, import, model::model()],
+                commands: vec![agent, import, model::model(), reload::reload()],
                 on_error,
                 ..Default::default()
             })
@@ -158,3 +158,4 @@ fn truncate(value: &str, limit: usize) -> String {
 mod agent;
 mod import;
 mod model;
+mod reload;

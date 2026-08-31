@@ -126,6 +126,16 @@ impl Bot {
         self.state().supervisor.set_model(self, &row, model).await
     }
 
+    /// Reloads the persisted ACP session for one Discord thread.
+    pub async fn reload_session(&self, thread: serenity::all::GenericChannelId) -> BotResult {
+        let row = self
+            .db()
+            .session(thread)
+            .await?
+            .ok_or(BotError::NotSession { thread })?;
+        self.state().supervisor.reload(self, &row).await
+    }
+
     /// Returns cached ACP configuration options for an active session.
     #[must_use]
     pub(crate) fn session_ui(
