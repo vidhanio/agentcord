@@ -14,6 +14,7 @@ use serenity::{
 };
 use tracing::{debug, info, warn};
 
+use super::shorten_home;
 use crate::{
     Bot, BotError, BotResult,
     acp::default_model,
@@ -21,12 +22,15 @@ use crate::{
     db::SessionRow,
 };
 
+/// Discord's maximum forum post title length.
+const FORUM_TITLE_LIMIT: usize = 100;
+
 /// ACP metadata needed to create the Discord binding.
 #[derive(Clone, Debug)]
 pub struct SessionMetadata {
     /// Configured agent key used for the forum tag.
     pub agent_key: crate::config::AgentKey,
-    /// Session working directory shown in the starter message.
+    /// Session working directory used in the forum title.
     pub project_path: std::path::PathBuf,
     /// Agent-owned ACP session identifier.
     pub session_id: SessionId,
@@ -39,20 +43,14 @@ pub struct SessionMetadata {
 impl SessionMetadata {
     /// Builds a bounded forum title from this session's metadata.
     fn post_title(&self) -> String {
-        let fallback = format!(
-            "session {}",
-            self.session_id
-                .to_string()
-                .chars()
-                .take(12)
-                .collect::<String>()
-        );
+        let fallback = format!("session {}", self.session_id);
         let title = self
             .title
             .as_deref()
             .filter(|title| !title.trim().is_empty())
             .unwrap_or(&fallback);
-        let raw = format!("{} · {title}", self.project_path.display())
+        let project_path = shorten_home(&self.project_path.display().to_string());
+        let raw = format!("{project_path} · {title}")
             .chars()
             .map(|character| {
                 if character.is_control() {
@@ -62,7 +60,7 @@ impl SessionMetadata {
                 }
             })
             .collect::<String>();
-        truncate_end(raw.trim(), 100)
+        truncate_end(raw.trim(), FORUM_TITLE_LIMIT)
     }
 
     /// Renders the immutable starter message for this session post.
@@ -73,9 +71,8 @@ impl SessionMetadata {
             .map(|model| format!(" · model `{}`", escape_inline(model)))
             .unwrap_or_default();
         format!(
-            "session `{}` · cwd `{}`{model}",
-            escape_inline(&self.session_id.to_string()),
-            escape_inline(&self.project_path.display().to_string())
+            "session `{}`{model}",
+            escape_inline(&self.session_id.to_string())
         )
     }
 }

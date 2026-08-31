@@ -500,9 +500,9 @@ fn render_tool_text(state: &serde_json::Value) -> String {
             || format!("{} **{name}**", tool_emoji(kind)),
             |title| {
                 format!(
-                    "{} **{name}** `{}`",
+                    "{} **{name}** {}",
                     tool_emoji(kind),
-                    title.replace('`', "ˋ")
+                    format_tool_title(title)
                 )
             },
         );
@@ -542,6 +542,11 @@ fn tool_label(kind: &str) -> String {
 
 /// Wraps tool titles in inline Markdown code.
 fn header_title(title: &str) -> String {
+    format_tool_title(title)
+}
+
+/// Formats a tool title as escaped inline Markdown code.
+fn format_tool_title(title: &str) -> String {
     format!("`{}`", title.replace('`', "ˋ"))
 }
 
