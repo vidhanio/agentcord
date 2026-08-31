@@ -191,6 +191,9 @@ impl EventHandler for Bot {
                 if let Err(error) = self.validate_and_reconcile_forum().await {
                     warn!(?error, "configured forum is unavailable");
                 }
+                if let Err(error) = self.validate_and_reconcile_webhook().await {
+                    warn!(?error, "prompt webhook could not be initialized");
+                }
             }
             FullEvent::Message { new_message, .. } => {
                 if let Err(error) = self.handle_message(new_message).await {

@@ -48,6 +48,15 @@ impl UserProfile {
 }
 
 impl Bot {
+    /// Checks that the prompt webhook exists and caches its handle.
+    pub(crate) async fn validate_and_reconcile_webhook(&self) -> BotResult {
+        let context = self.context()?.clone();
+        if self.user_webhook(&context).await.is_none() {
+            warn!("prompt webhook is unavailable");
+        }
+        Ok(())
+    }
+
     /// Mirrors a prompt as the configured Discord user.
     ///
     /// Webhook failures are non-fatal: messages not sent by the webhook are
