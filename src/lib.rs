@@ -5,7 +5,8 @@
 use std::{fmt, sync::Arc};
 
 use serenity::all::{
-    Context, EventHandler, FullEvent, GatewayIntents, HttpBuilder, Token, async_trait,
+    Context, EventHandler, FullEvent, GatewayIntents, GuildThread, HttpBuilder, PartialGuildThread,
+    Token, async_trait,
 };
 use tracing::{info, warn};
 
@@ -196,6 +197,16 @@ impl EventHandler for Bot {
                     warn!(?error, "failed to handle discord message");
                 }
             }
+            FullEvent::ThreadCreate { thread, .. } => {
+                if let Err(error) = self.handle_thread_create(thread).await {
+                    warn!(?error, thread = ?thread.id, "failed to remove unmanaged forum thread");
+                }
+            }
+            FullEvent::ThreadDelete { thread, .. } => {
+                if let Err(error) = self.handle_thread_delete(thread).await {
+                    warn!(?error, thread = ?thread.id, "failed to remove deleted session");
+                }
+            }
             _ => {}
         }
     }
@@ -231,6 +242,34 @@ impl Bot {
                 warn!(?reply_error, thread = ?message.channel_id, "failed to report acp prompt failure");
             }
         }
+        Ok(())
+    }
+
+    /// Removes a newly created forum thread unless the bot owns it.
+    async fn handle_thread_create(&self, thread: &GuildThread) -> BotResult {
+        if thread.parent_id != self.config().discord.forum_channel_id
+            || thread.owner_id == self.context()?.cache.current_user().id
+        {
+            return Ok(());
+        }
+        let context = self.context()?.clone();
+        thread.id.widen().delete(&context.http, None).await?;
+        info!(thread = ?thread.id, "deleted unmanaged forum thread");
+        Ok(())
+    }
+
+    /// Removes the local binding when Discord deletes a managed thread.
+    async fn handle_thread_delete(&self, thread: &PartialGuildThread) -> BotResult {
+        if thread.parent_id != self.config().discord.forum_channel_id {
+            return Ok(());
+        }
+        let thread_id = thread.id.widen();
+        if self.db().session(thread_id).await?.is_none() {
+            return Ok(());
+        }
+        self.state().supervisor.stop(thread_id);
+        self.db().delete_session(thread_id).await?;
+        info!(thread = ?thread_id, "removed deleted managed session");
         Ok(())
     }
 }

@@ -97,10 +97,8 @@ pub enum BotError {
         /// Configured agent key.
         agent_key: String,
     },
-    /// Existing and configured forum tags exceed Discord's limit.
-    #[error(
-        "the forum's existing tags plus {configured} configured agent tags exceed discord's {limit}-tag limit"
-    )]
+    /// Configured forum tags exceed Discord's limit.
+    #[error("{configured} configured agent tags exceed discord's {limit}-tag limit")]
     TooManyForumTags {
         /// Number of configured agent tags.
         configured: usize,

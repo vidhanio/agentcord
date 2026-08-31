@@ -1,6 +1,9 @@
 //! Discord forum primitives for session creation and import.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use agent_client_protocol::schema::v1::SessionId;
 use serenity::{
@@ -229,7 +232,8 @@ impl Bot {
     /// Checks that the configured forum is available and has agent tags.
     pub(crate) async fn validate_and_reconcile_forum(&self) -> BotResult {
         let context = self.context()?.clone();
-        self.tag_ids(&context).await.map(|_| ())
+        self.tag_ids(&context).await?;
+        self.cleanup_unmanaged_threads(&context).await
     }
 
     /// Fetches the configured forum and ensures every agent has a tag.
@@ -238,23 +242,24 @@ impl Bot {
         context: &Context,
     ) -> BotResult<HashMap<crate::config::AgentKey, ForumTagId>> {
         let mut channel = self.forum_channel(context).await?;
-        let configured_names = self
+        let desired = self
             .config()
             .agents
-            .keys()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        let mut desired = channel
-            .available_tags
             .iter()
-            .filter(|tag| !configured_names.contains(&tag.name.to_string()))
-            .map(copy_tag)
+            .map(|(key, agent)| {
+                channel
+                    .available_tags
+                    .iter()
+                    .find(|tag| {
+                        tag.name == key.as_ref()
+                            && emoji_key(tag.emoji.as_ref()) == configured_emoji_key(&agent.emoji)
+                    })
+                    .map_or_else(
+                        || CreateForumTag::new(key.as_ref()).emoji(reaction(&agent.emoji)),
+                        copy_tag,
+                    )
+            })
             .collect::<Vec<_>>();
-        desired.extend(
-            self.config().agents.iter().map(|(key, agent)| {
-                CreateForumTag::new(key.as_ref()).emoji(reaction(&agent.emoji))
-            }),
-        );
         if desired.len() > 20 {
             return Err(BotError::TooManyForumTags {
                 configured: self.config().agents.len(),
@@ -273,7 +278,7 @@ impl Bot {
             .iter()
             .map(|(key, agent)| (key.to_string(), configured_emoji_key(&agent.emoji)))
             .collect::<Vec<_>>();
-        if wanted.iter().any(|tag| !current.contains(tag)) {
+        if current.len() != wanted.len() || wanted.iter().any(|tag| !current.contains(tag)) {
             channel
                 .id
                 .edit(&context.http, EditChannel::new().available_tags(desired))
@@ -293,6 +298,81 @@ impl Bot {
                     .map(|tag| (key.clone(), tag.id))
             })
             .collect())
+    }
+
+    /// Deletes forum threads that are not represented by a persisted session.
+    async fn cleanup_unmanaged_threads(&self, context: &Context) -> BotResult {
+        let managed = self
+            .db()
+            .sessions()
+            .await?
+            .into_iter()
+            .map(|session| session.thread_id)
+            .collect::<HashSet<_>>();
+        let forum = self.config().discord.forum_channel_id;
+        let mut threads = HashSet::new();
+
+        let active = self
+            .config()
+            .discord
+            .guild_id
+            .get_active_threads(&context.http)
+            .await?;
+        threads.extend(
+            active
+                .threads
+                .into_iter()
+                .filter(|thread| thread.parent_id == forum)
+                .map(|thread| thread.id.widen()),
+        );
+
+        let mut before = None;
+        loop {
+            let page = forum
+                .get_archived_public_threads(&context.http, before, Some(100))
+                .await?;
+            let next_before = page.threads.iter().last().map(|thread| {
+                thread
+                    .thread_metadata
+                    .archive_timestamp
+                    .unwrap_or_else(|| thread.id.created_at())
+            });
+            threads.extend(
+                page.threads
+                    .into_iter()
+                    .filter(|thread| thread.parent_id == forum)
+                    .map(|thread| thread.id.widen()),
+            );
+            if !page.has_more {
+                break;
+            }
+            let Some(next_before) = next_before else {
+                warn!("archived forum thread pagination returned no cursor");
+                break;
+            };
+            if before == Some(next_before) {
+                warn!("archived forum thread pagination did not advance");
+                break;
+            }
+            before = Some(next_before);
+        }
+
+        let mut cleanup_error = None;
+        for thread in threads {
+            if managed.contains(&thread) {
+                continue;
+            }
+            match thread.delete(&context.http, None).await {
+                Ok(_) => info!(thread = ?thread, "deleted unmanaged forum thread"),
+                Err(error) => {
+                    warn!(?error, thread = ?thread, "failed to delete unmanaged forum thread");
+                    if cleanup_error.is_none() {
+                        cleanup_error = Some(error.into());
+                    }
+                }
+            }
+        }
+        cleanup_error.map_or(Ok(()), Err)
     }
 
     /// Fetches and validates the configured Discord forum channel.
