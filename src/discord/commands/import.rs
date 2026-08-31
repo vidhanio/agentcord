@@ -1,6 +1,9 @@
 use agent_client_protocol::schema::v1::SessionId;
 use poise::serenity_prelude as serenity;
-use serenity::all::{AutocompleteChoice, CreateAutocompleteResponse, ResolvedValue};
+use serenity::{
+    all::{AutocompleteChoice, CreateAutocompleteResponse, ResolvedValue},
+    model::mention::Mentionable,
+};
 use tracing::warn;
 
 use crate::{Bot, BotError, config::AgentKey};
@@ -28,13 +31,12 @@ pub async fn import(
     });
     let content = match operation.await {
         Ok(Ok(thread)) => format!(
-            "imported **{}** — https://discord.com/channels/{}/{}",
+            "imported **{}** — {}",
             bot.config()
                 .agents
                 .get(&agent_key)
                 .map_or_else(|| agent_key.as_ref(), |agent| agent.display_name.as_str()),
-            bot.config().discord.guild_id,
-            thread
+            thread.mention()
         ),
         Ok(Err(error)) => {
             warn!(?error, "failed to import session");

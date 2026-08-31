@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use serenity::model::mention::Mentionable;
 use tracing::warn;
 
 use crate::{Bot, BotError};
@@ -46,13 +47,12 @@ pub async fn agent(
         }
     };
     let content = format!(
-        "created **{}** — https://discord.com/channels/{}/{}; type your first prompt in the thread",
+        "created **{}** — {}; type your first prompt in the thread",
         bot.config()
             .agents
             .get(&agent_key)
             .map_or_else(|| agent_key.as_ref(), |agent| agent.display_name.as_str()),
-        bot.config().discord.guild_id,
-        thread
+        thread.mention()
     );
     ctx.send(poise::CreateReply::new().content(content).ephemeral(true))
         .await?;
