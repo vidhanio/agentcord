@@ -151,6 +151,10 @@ impl Bot {
             .project_path
             .canonicalize()
             .unwrap_or(imported.project_path);
+        self.state()
+            .supervisor
+            .validate_session(self, agent_key, &imported.session_id, &project_path)
+            .await?;
         let metadata = SessionMetadata {
             agent_key: agent_key.clone(),
             project_path,

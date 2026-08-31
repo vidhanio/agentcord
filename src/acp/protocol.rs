@@ -1,21 +1,27 @@
 //! ACP lifecycle and listing requests.
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo,
     schema::{
         ProtocolVersion,
         v1::{
-            InitializeRequest, InitializeResponse, ListSessionsRequest, NewSessionRequest,
-            SessionConfigOption, SessionId, SessionInfo,
+            InitializeRequest, InitializeResponse, ListSessionsRequest, LoadSessionRequest,
+            NewSessionRequest, SessionConfigOption, SessionId, SessionInfo,
         },
     },
 };
 use tokio::{sync::oneshot, task::JoinHandle};
 
 use super::{Supervisor, acp_error, configured_agent};
-use crate::{Bot, BotError, BotResult, config::AgentKey};
+use crate::{
+    Bot, BotError, BotResult,
+    config::{AgentConfig, AgentKey},
+};
 
 /// ACP metadata returned while creating a new session.
 pub struct NewSession {
@@ -59,6 +65,15 @@ pub struct ListedSession {
     pub title: Option<String>,
 }
 
+/// Creates the configured ACP subprocess transport.
+pub(super) fn process(agent: AgentConfig) -> AcpAgent {
+    AcpAgent::new(
+        AcpAgentConfig::new(agent.command)
+            .args(agent.args)
+            .envs(agent.env),
+    )
+}
+
 impl Supervisor {
     /// Creates a new ACP session and retains its connection for the actor.
     pub async fn new_session(
@@ -69,11 +84,7 @@ impl Supervisor {
     ) -> BotResult<NewSession> {
         let agent = configured_agent(bot, agent_key)?;
         let timeout = bot.config().timeouts.startup;
-        let process = AcpAgent::new(
-            AcpAgentConfig::new(agent.command)
-                .args(agent.args)
-                .envs(agent.env),
-        );
+        let process = process(agent);
         let (ready_sender, ready_receiver) = oneshot::channel();
         let (release_sender, release_receiver) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -127,6 +138,43 @@ impl Supervisor {
         })
     }
 
+    /// Verifies that an existing ACP session can be restored before creating
+    /// any Discord or database state for it.
+    pub async fn validate_session(
+        &self,
+        bot: &Bot,
+        agent_key: &AgentKey,
+        session_id: &SessionId,
+        project_path: &Path,
+    ) -> BotResult {
+        let agent = configured_agent(bot, agent_key)?;
+        let timeout = bot.config().timeouts.startup;
+        let process = process(agent);
+        let session_id = session_id.clone();
+        let project_path = project_path.to_owned();
+        Client
+            .builder()
+            .name("agentcord")
+            .connect_with(process, |connection: ConnectionTo<Agent>| async move {
+                let initialized = initialize(&connection, timeout).await?;
+                if !initialized.agent_capabilities.load_session {
+                    return Err(agent_client_protocol::Error::invalid_request()
+                        .data("agent does not advertise session/load"));
+                }
+                request_with_timeout(
+                    timeout,
+                    connection
+                        .send_request(LoadSessionRequest::new(session_id, project_path))
+                        .block_task(),
+                    "acp session/load timed out",
+                )
+                .await?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| acp_error(&error))
+    }
+
     /// Lists all sessions exposed by an ACP agent, following pagination.
     pub async fn list_sessions(
         &self,
@@ -135,11 +183,7 @@ impl Supervisor {
     ) -> BotResult<Vec<ListedSession>> {
         let agent = configured_agent(bot, agent_key)?;
         let timeout = bot.config().timeouts.startup;
-        let process = AcpAgent::new(
-            AcpAgentConfig::new(agent.command)
-                .args(agent.args)
-                .envs(agent.env),
-        );
+        let process = process(agent);
         Client
             .builder()
             .name("agentcord")

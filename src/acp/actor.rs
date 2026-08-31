@@ -2,13 +2,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::{AcpAgent, AcpAgentConfig};
 use tokio::sync::mpsc;
 use tracing::warn;
 
 use super::{
     connection,
     projection::{ProjectionState, collect_batch},
+    protocol,
     registry::{ActorStartup, SessionCommand},
     runtime::Signal,
 };
@@ -54,11 +54,7 @@ pub(super) async fn run(
         }
         ActorStartup::Restore => {
             if let Some(agent) = bot.config().agents.get(&row.agent_key).cloned() {
-                let process = AcpAgent::new(
-                    AcpAgentConfig::new(agent.command)
-                        .args(agent.args)
-                        .envs(agent.env),
-                );
+                let process = protocol::process(agent);
                 connection::connect(bot, row, process, commands, projection).await
             } else {
                 Err(agent_client_protocol::Error::invalid_request()
