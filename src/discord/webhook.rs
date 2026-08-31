@@ -7,6 +7,9 @@ use tracing::warn;
 
 use crate::{Bot, BotResult, discord::render::split_message};
 
+/// Name used to identify Agentcord's forum webhook.
+const WEBHOOK_NAME: &str = "agentcord";
+
 /// Display identity used for webhook-authored prompt messages.
 #[derive(Clone, Debug)]
 struct UserProfile {
@@ -60,7 +63,7 @@ impl Bot {
         )
         .await;
         let webhook = match profile.as_ref() {
-            Some(profile) => self.user_webhook(&context, profile).await,
+            Some(_) => self.user_webhook(&context).await,
             None => None,
         };
 
@@ -98,11 +101,7 @@ impl Bot {
     }
 
     /// Finds or creates the forum webhook used for mirrored prompts.
-    async fn user_webhook(
-        &self,
-        context: &serenity::all::Context,
-        profile: &UserProfile,
-    ) -> Option<Webhook> {
+    async fn user_webhook(&self, context: &serenity::all::Context) -> Option<Webhook> {
         let mut cached = self.webhook().lock().await;
         if let Some(webhook) = cached.as_ref() {
             let webhook = webhook.clone();
@@ -114,7 +113,7 @@ impl Bot {
         let existing = match forum.webhooks(&context.http).await {
             Ok(webhooks) => webhooks
                 .into_iter()
-                .find(|webhook| webhook.name.as_deref() == Some(profile.username.as_str())),
+                .find(|webhook| webhook.name.as_deref() == Some(WEBHOOK_NAME)),
             Err(error) => {
                 warn!(?error, %forum, "failed to list prompt webhooks");
                 return None;
@@ -124,7 +123,7 @@ impl Bot {
             Some(webhook) => Ok(webhook),
             None => {
                 forum
-                    .create_webhook(&context.http, CreateWebhook::new(&profile.username))
+                    .create_webhook(&context.http, CreateWebhook::new(WEBHOOK_NAME))
                     .await
             }
         };
