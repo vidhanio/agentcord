@@ -1,11 +1,15 @@
 //! Discord webhook mirroring for user-authored prompts.
 
 use serenity::all::{
-    CreateMessage, CreateWebhook, ExecuteWebhook, GenericChannelId, ThreadId, Webhook,
+    Context, CreateMessage, CreateWebhook, EditWebhookMessage, ExecuteWebhook, GenericChannelId,
+    MessageId, ThreadId, Webhook,
 };
 use tracing::{debug, info, warn};
 
-use crate::{Bot, BotResult, discord::render::split_message};
+use crate::{
+    Bot, BotResult,
+    discord::render::{SyncFailure, plan_messages, send_messages, split_message, sync_messages},
+};
 
 /// Name used to identify Agentcord's forum webhook.
 const WEBHOOK_NAME: &str = "agentcord";
@@ -94,30 +98,96 @@ impl Bot {
 
         let posted = match (profile, webhook) {
             (Some(profile), Some(webhook)) => {
-                self.send_webhook_chunks(&context, thread, &chunks, profile, webhook)
+                self.send_webhook_chunks(&context, thread, &chunks, profile, &webhook)
                     .await
             }
-            _ => 0,
+            _ => Vec::new(),
         };
 
-        let fallback = chunks.len().saturating_sub(posted);
+        let fallback = chunks.len().saturating_sub(posted.len());
         if fallback > 0 {
             info!(
                 thread = ?thread,
-                webhook_chunks = posted,
+                webhook_chunks = posted.len(),
                 fallback_chunks = fallback,
                 "sending user message with bot identity..."
             );
         }
-        self.send_bot_chunks(&context, thread, &chunks, posted)
+        self.send_bot_chunks(&context, thread, &chunks, posted.len())
             .await?;
         info!(
             thread = ?thread,
-            webhook_chunks = posted,
+            webhook_chunks = posted.len(),
             fallback_chunks = fallback,
             "mirrored user message"
         );
         Ok(())
+    }
+
+    /// Synchronizes one replayed ACP user message through the prompt webhook.
+    pub(crate) async fn sync_user_message_projection(
+        &self,
+        context: &Context,
+        thread: GenericChannelId,
+        previous: &[MessageId],
+        chunks: Vec<String>,
+    ) -> Result<Vec<MessageId>, SyncFailure> {
+        let plan = plan_messages(previous, &chunks);
+        let profile = UserProfile::fetch(
+            context,
+            self.config().discord.guild_id,
+            self.config().discord.allowed_user_id,
+        )
+        .await;
+        let webhook = match profile.as_ref() {
+            Some(_) => self.user_webhook(context).await,
+            None => None,
+        };
+        let Some((profile, webhook)) = profile.zip(webhook) else {
+            debug!(
+                thread = ?thread,
+                "prompt webhook unavailable; synchronizing replayed user message with bot identity"
+            );
+            return sync_messages(context, thread, previous, chunks).await;
+        };
+
+        debug!(
+            thread = ?thread,
+            webhook = ?webhook.id,
+            edits = plan.edits.len(),
+            sends = plan.sends.len(),
+            deletes = plan.deletes.len(),
+            "synchronizing replayed user message through webhook..."
+        );
+        let current = match Self::edit_webhook_messages(
+            context,
+            thread,
+            previous,
+            &plan.edits,
+            &webhook,
+        )
+        .await
+        {
+            Ok(current) => current,
+            Err(error) => {
+                warn!(
+                    error = ?error.error,
+                    thread = ?thread,
+                    webhook = ?webhook.id,
+                    "failed to edit replayed user message through webhook; trying bot identity..."
+                );
+                return sync_messages(context, thread, previous, chunks).await;
+            }
+        };
+        let posted = self
+            .send_webhook_chunks(context, thread, &plan.sends, profile, &webhook)
+            .await;
+        let mut current = current;
+        current.extend(posted.iter().copied());
+        if posted.len() < plan.sends.len() {
+            current = send_messages(context, thread, current, &plan.sends[posted.len()..]).await?;
+        }
+        Self::delete_webhook_messages(context, thread, current, &plan.deletes, &webhook).await
     }
 
     /// Sends as many chunks as possible through the user's webhook identity.
@@ -127,9 +197,9 @@ impl Bot {
         thread: GenericChannelId,
         chunks: &[String],
         profile: UserProfile,
-        webhook: Webhook,
-    ) -> usize {
-        let mut posted = 0;
+        webhook: &Webhook,
+    ) -> Vec<MessageId> {
+        let mut posted = Vec::new();
         for (index, chunk) in chunks.iter().enumerate() {
             debug!(
                 thread = ?thread,
@@ -148,7 +218,7 @@ impl Bot {
             }
             match webhook.execute(&context.http, true, request).await {
                 Ok(Some(message)) => {
-                    posted += 1;
+                    posted.push(message.id);
                     debug!(
                         thread = ?thread,
                         webhook = ?webhook.id,
@@ -182,6 +252,98 @@ impl Bot {
             }
         }
         posted
+    }
+
+    /// Edits existing replayed user messages through the prompt webhook.
+    async fn edit_webhook_messages(
+        context: &Context,
+        thread: GenericChannelId,
+        previous: &[MessageId],
+        edits: &[(MessageId, String)],
+        webhook: &Webhook,
+    ) -> Result<Vec<MessageId>, SyncFailure> {
+        let current = previous[..edits.len()].to_vec();
+        for (id, chunk) in edits {
+            debug!(
+                thread = ?thread,
+                webhook = ?webhook.id,
+                message = ?id,
+                characters = chunk.chars().count(),
+                "editing replayed user message through webhook..."
+            );
+            if let Err(error) = webhook
+                .edit_message(
+                    &context.http,
+                    *id,
+                    EditWebhookMessage::new()
+                        .content(chunk)
+                        .in_thread(ThreadId::new(thread.get())),
+                )
+                .await
+            {
+                warn!(
+                    ?error,
+                    thread = ?thread,
+                    webhook = ?webhook.id,
+                    message = ?id,
+                    "failed to edit replayed user message through webhook"
+                );
+                return Err(SyncFailure {
+                    message_ids: previous.to_vec(),
+                    error: Box::new(error.into()),
+                });
+            }
+            debug!(
+                thread = ?thread,
+                webhook = ?webhook.id,
+                message = ?id,
+                "edited replayed user message through webhook"
+            );
+        }
+        Ok(current)
+    }
+
+    /// Deletes stale replayed user messages through the prompt webhook.
+    async fn delete_webhook_messages(
+        context: &Context,
+        thread: GenericChannelId,
+        current: Vec<MessageId>,
+        deletes: &[MessageId],
+        webhook: &Webhook,
+    ) -> Result<Vec<MessageId>, SyncFailure> {
+        for (index, id) in deletes.iter().enumerate() {
+            debug!(
+                thread = ?thread,
+                webhook = ?webhook.id,
+                message = ?id,
+                "deleting stale replayed user message through webhook..."
+            );
+            if let Err(error) = webhook
+                .delete_message(&context.http, Some(ThreadId::new(thread.get())), *id)
+                .await
+            {
+                warn!(
+                    ?error,
+                    thread = ?thread,
+                    webhook = ?webhook.id,
+                    message = ?id,
+                    "failed to delete stale replayed user message through webhook"
+                );
+                let mut message_ids = current.clone();
+                message_ids.extend_from_slice(&deletes[index..]);
+                return Err(SyncFailure {
+                    message_ids,
+                    error: Box::new(error.into()),
+                });
+            }
+            debug!(
+                thread = ?thread,
+                webhook = ?webhook.id,
+                message = ?id,
+                "deleted stale replayed user message through webhook"
+            );
+        }
+        Ok(current)
     }
 
     /// Sends chunks not handled by the user's webhook with the bot identity.

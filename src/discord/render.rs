@@ -68,7 +68,9 @@ pub fn reduce(
     };
 
     match &event.update {
-        SessionUpdate::AgentMessageChunk(chunk) | SessionUpdate::AgentThoughtChunk(chunk) => {
+        SessionUpdate::UserMessageChunk(chunk)
+        | SessionUpdate::AgentMessageChunk(chunk)
+        | SessionUpdate::AgentThoughtChunk(chunk) => {
             let text = content_text(&chunk.content);
             if text.is_empty() {
                 return Ok(ProjectionOutcome::Ignored);
@@ -287,14 +289,24 @@ impl Bot {
             target_messages = target.len(),
             "synchronizing rendered discord messages..."
         );
-        match sync_messages(
-            context,
-            projection.thread_id,
-            &projection.message_ids,
-            target,
-        )
-        .await
-        {
+        let result = if projection.source_kind == "user_message" {
+            self.sync_user_message_projection(
+                context,
+                projection.thread_id,
+                &projection.message_ids,
+                target,
+            )
+            .await
+        } else {
+            sync_messages(
+                context,
+                projection.thread_id,
+                &projection.message_ids,
+                target,
+            )
+            .await
+        };
+        match result {
             Ok(message_ids) => {
                 debug!(
                     thread = ?projection.thread_id,
@@ -372,6 +384,10 @@ struct TextState {
 /// Finds the stable source key for an update.
 fn source_key(event: &ProjectionEvent) -> Option<(&'static str, String)> {
     match &event.update {
+        SessionUpdate::UserMessageChunk(chunk) if event.replay => chunk
+            .message_id
+            .as_ref()
+            .map(|id| ("user_message", id.to_string())),
         SessionUpdate::AgentMessageChunk(chunk) => chunk.message_id.as_ref().map_or_else(
             || (!event.replay).then(|| ("agent_message", format!("turn:{}", event.turn_id))),
             |id| Some(("agent_message", id.to_string())),
@@ -452,7 +468,7 @@ fn render_projection(projection: &RenderProjection) -> BotResult<Vec<String>> {
             }
         })?;
     match projection.source_kind.as_str() {
-        "agent_message" => Ok(render_text(&value, false)),
+        "user_message" | "agent_message" => Ok(render_text(&value, false)),
         "agent_thought" => Ok(render_text(&value, true)),
         "tool_call" => Ok(split_message(&render_tool_text(&value), MESSAGE_LIMIT)),
         "plan" => Ok(split_message(&render_plan(&value), MESSAGE_LIMIT)),
@@ -846,7 +862,7 @@ pub fn plan_messages(previous: &[MessageId], target: &[String]) -> MessagePlan {
 }
 
 /// Applies a message plan and reports IDs known even when an operation fails.
-async fn sync_messages(
+pub(crate) async fn sync_messages(
     context: &Context,
     thread: GenericChannelId,
     previous: &[MessageId],
@@ -911,7 +927,7 @@ async fn edit_messages(
 }
 
 /// Sends new messages in a synchronization plan.
-async fn send_messages(
+pub(crate) async fn send_messages(
     context: &Context,
     thread: GenericChannelId,
     mut current: Vec<MessageId>,
@@ -994,11 +1010,11 @@ async fn delete_messages(
 
 /// Captures progress and the error from a failed Discord synchronization.
 #[derive(Debug)]
-struct SyncFailure {
+pub(crate) struct SyncFailure {
     /// Message IDs known to exist after the partial operation.
-    message_ids: Vec<MessageId>,
+    pub(crate) message_ids: Vec<MessageId>,
     /// Discord error that stopped synchronization.
-    error: Box<BotError>,
+    pub(crate) error: Box<BotError>,
 }
 
 /// Splits text into Discord-sized Unicode-safe chunks while preserving fenced
@@ -1303,6 +1319,42 @@ mod tests {
         assert_eq!(state.source_kind, "agent_message");
         assert_eq!(state.source_id, "m1");
         assert_eq!(state.state_json, r#"{"text":"hello world"}"#);
+    }
+
+    /// Verifies replayed ACP user messages become normal user projections.
+    #[test]
+    fn replayed_user_chunks_render_as_user_messages() {
+        let mut replay = event(SessionUpdate::UserMessageChunk(
+            ContentChunk::new(ContentBlock::Text(TextContent::new("hello from history")))
+                .message_id(AcpMessageId::new("user-1")),
+        ));
+        replay.replay = true;
+        let ProjectionOutcome::Updated(state) = reduce(None, &replay).unwrap() else {
+            panic!("replayed user text should change the projection");
+        };
+        assert_eq!(state.source_kind, "user_message");
+        assert_eq!(state.source_id, "user-1");
+        assert_eq!(
+            render_projection(&state).unwrap(),
+            vec!["hello from history"]
+        );
+    }
+
+    /// Verifies live user echoes remain invisible because the gateway message
+    /// is already present in Discord.
+    #[test]
+    fn live_user_chunks_are_ignored() {
+        assert_eq!(
+            reduce(
+                None,
+                &event(SessionUpdate::UserMessageChunk(
+                    ContentChunk::new(ContentBlock::Text(TextContent::new("already visible")))
+                        .message_id(AcpMessageId::new("user-1")),
+                )),
+            )
+            .unwrap(),
+            ProjectionOutcome::Ignored
+        );
     }
 
     /// Verifies replay ignores unkeyed history while live output uses its turn.
