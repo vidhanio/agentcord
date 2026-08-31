@@ -1,16 +1,13 @@
 //! Discord forum primitives for session creation and import.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::{collections::HashMap, path::PathBuf};
 
 use agent_client_protocol::schema::v1::SessionId;
 use serenity::{
     all::{
         ChannelType, Context, CreateForumPost, CreateForumTag, CreateMessage, EditChannel,
-        EditThread, ForumEmoji, ForumTag, ForumTagId, GenericChannelId, GuildChannel, ReactionType,
-        ThreadId, small_fixed_array::TruncatingInto,
+        EditThread, ForumEmoji, ForumTag, ForumTagId, GenericChannelId, GuildChannel, GuildThread,
+        ReactionType, ThreadId, small_fixed_array::TruncatingInto,
     },
     http::{HttpError, JsonErrorCode},
 };
@@ -232,8 +229,8 @@ impl Bot {
     /// Checks that the configured forum is available and has agent tags.
     pub(crate) async fn validate_and_reconcile_forum(&self) -> BotResult {
         let context = self.context()?.clone();
-        self.tag_ids(&context).await?;
-        self.cleanup_unmanaged_threads(&context).await
+        let tag_ids = self.tag_ids(&context).await?;
+        self.reconcile_threads(&context, &tag_ids).await
     }
 
     /// Fetches the configured forum and ensures every agent has a tag.
@@ -300,17 +297,21 @@ impl Bot {
             .collect())
     }
 
-    /// Deletes forum threads that are not represented by a persisted session.
-    async fn cleanup_unmanaged_threads(&self, context: &Context) -> BotResult {
+    /// Re-tags managed threads and deletes all other forum threads.
+    async fn reconcile_threads(
+        &self,
+        context: &Context,
+        tag_ids: &HashMap<crate::config::AgentKey, ForumTagId>,
+    ) -> BotResult {
         let managed = self
             .db()
             .sessions()
             .await?
             .into_iter()
-            .map(|session| session.thread_id)
-            .collect::<HashSet<_>>();
+            .map(|session| (session.thread_id, session.agent_key))
+            .collect::<HashMap<_, _>>();
         let forum = self.config().discord.forum_channel_id;
-        let mut threads = HashSet::new();
+        let mut threads = HashMap::new();
 
         let active = self
             .config()
@@ -318,13 +319,13 @@ impl Bot {
             .guild_id
             .get_active_threads(&context.http)
             .await?;
-        threads.extend(
-            active
-                .threads
-                .into_iter()
-                .filter(|thread| thread.parent_id == forum)
-                .map(|thread| thread.id.widen()),
-        );
+        for thread in active
+            .threads
+            .into_iter()
+            .filter(|thread| thread.parent_id == forum)
+        {
+            threads.insert(thread.id.widen(), thread);
+        }
 
         let mut before = None;
         loop {
@@ -337,12 +338,13 @@ impl Bot {
                     .archive_timestamp
                     .unwrap_or_else(|| thread.id.created_at())
             });
-            threads.extend(
-                page.threads
-                    .into_iter()
-                    .filter(|thread| thread.parent_id == forum)
-                    .map(|thread| thread.id.widen()),
-            );
+            for thread in page
+                .threads
+                .into_iter()
+                .filter(|thread| thread.parent_id == forum)
+            {
+                threads.insert(thread.id.widen(), thread);
+            }
             if !page.has_more {
                 break;
             }
@@ -357,22 +359,64 @@ impl Bot {
             before = Some(next_before);
         }
 
-        let mut cleanup_error = None;
-        for thread in threads {
-            if managed.contains(&thread) {
-                continue;
-            }
-            match thread.delete(&context.http, None).await {
-                Ok(_) => info!(thread = ?thread, "deleted unmanaged forum thread"),
-                Err(error) => {
-                    warn!(?error, thread = ?thread, "failed to delete unmanaged forum thread");
-                    if cleanup_error.is_none() {
-                        cleanup_error = Some(error.into());
+        let mut reconcile_error = None;
+        for (thread_id, thread) in threads {
+            let Some(agent_key) = managed.get(&thread_id) else {
+                match thread_id.delete(&context.http, None).await {
+                    Ok(_) => info!(thread = ?thread_id, "deleted unmanaged forum thread"),
+                    Err(error) => {
+                        warn!(?error, thread = ?thread_id, "failed to delete unmanaged forum thread");
+                        if reconcile_error.is_none() {
+                            reconcile_error = Some(error.into());
+                        }
                     }
                 }
+                continue;
+            };
+            let Some(tag) = tag_ids.get(agent_key).copied() else {
+                let error = BotError::MissingForumTag {
+                    agent_key: agent_key.to_string(),
+                };
+                warn!(?error, thread = ?thread_id, "failed to find session forum tag");
+                if reconcile_error.is_none() {
+                    reconcile_error = Some(error);
+                }
+                continue;
+            };
+            if let Err(error) = self.retag_thread(context, &thread, tag).await {
+                warn!(?error, thread = ?thread_id, "failed to re-tag managed forum thread");
+                if reconcile_error.is_none() {
+                    reconcile_error = Some(error);
+                }
+            } else {
+                info!(thread = ?thread_id, agent = %agent_key, "re-tagged managed forum thread");
             }
         }
-        cleanup_error.map_or(Ok(()), Err)
+        reconcile_error.map_or(Ok(()), Err)
+    }
+
+    /// Applies the configured tag while preserving an archived thread's state.
+    async fn retag_thread(
+        &self,
+        context: &Context,
+        thread: &GuildThread,
+        tag: ForumTagId,
+    ) -> BotResult {
+        let update = EditThread::new().applied_tags(vec![tag]);
+        if !thread.thread_metadata.archived() {
+            thread.id.edit(&context.http, update).await?;
+            return Ok(());
+        }
+
+        thread
+            .id
+            .edit(&context.http, update.archived(false))
+            .await?;
+        let result = thread
+            .id
+            .edit(&context.http, EditThread::new().archived(true))
+            .await;
+        result.map(|_| ()).map_err(Into::into)
     }
 
     /// Fetches and validates the configured Discord forum channel.
