@@ -9,6 +9,8 @@ use crate::{Bot, BotError, config::AgentKey};
 
 /// Maximum number of choices Discord accepts in one autocomplete response.
 const CHOICE_LIMIT: usize = 25;
+/// Commands that can create or import sessions from a user installation.
+const GLOBAL_COMMANDS: &[&str] = &["agent", "import"];
 
 /// Serenity framework adapter around the Poise command set.
 pub struct BotFramework {
@@ -18,7 +20,7 @@ pub struct BotFramework {
     guild_id: serenity::GuildId,
 }
 
-/// Builds the guild-scoped command framework.
+/// Builds the command framework.
 pub fn framework(bot: &Bot) -> BotFramework {
     let mut agent = agent::agent();
     configure_agent_choices(&mut agent, bot);
@@ -84,9 +86,22 @@ impl serenity::Framework for BotFramework {
             context
                 .http
                 .set_application_id(data_about_bot.application.id);
+            let commands = &self.poise.options().commands;
+            if let Err(error) = poise::builtins::register_globally(
+                &context.http,
+                commands
+                    .iter()
+                    .filter(|command| GLOBAL_COMMANDS.contains(&command.name.as_ref())),
+            )
+            .await
+            {
+                warn!(?error, "failed to register global slash commands");
+            }
             if let Err(error) = poise::builtins::register_in_guild(
                 &context.http,
-                &self.poise.options().commands,
+                commands
+                    .iter()
+                    .filter(|command| !GLOBAL_COMMANDS.contains(&command.name.as_ref())),
                 self.guild_id,
             )
             .await

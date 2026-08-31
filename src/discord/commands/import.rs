@@ -9,7 +9,12 @@ use tracing::warn;
 use crate::{Bot, BotError, config::AgentKey};
 
 /// imports an existing acp session into a new forum post.
-#[poise::command(slash_command, check = "super::allowed")]
+#[poise::command(
+    slash_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel",
+    check = "super::allowed"
+)]
 pub async fn import(
     ctx: poise::ApplicationContext<'_, Bot, BotError>,
     #[description = "configured agent"] agent: usize,

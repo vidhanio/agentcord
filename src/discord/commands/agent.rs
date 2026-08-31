@@ -6,7 +6,12 @@ use tracing::warn;
 use crate::{Bot, BotError};
 
 /// Creates a new ACP session in a configured project.
-#[poise::command(slash_command, check = "super::allowed")]
+#[poise::command(
+    slash_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel",
+    check = "super::allowed"
+)]
 pub async fn agent(
     ctx: poise::ApplicationContext<'_, Bot, BotError>,
     #[description = "configured agent"] agent: usize,
