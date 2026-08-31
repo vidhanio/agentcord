@@ -4,9 +4,12 @@
 
 use std::{fmt, sync::Arc};
 
-use serenity::all::{
-    Context, EventHandler, FullEvent, GatewayIntents, GuildThread, HttpBuilder, PartialGuildThread,
-    Token, async_trait,
+use serenity::{
+    all::{
+        Context, EventHandler, FullEvent, GatewayIntents, GuildThread, HttpBuilder,
+        PartialGuildThread, Token, async_trait,
+    },
+    futures::StreamExt,
 };
 use tracing::{debug, error, info, warn};
 
@@ -159,12 +162,55 @@ impl Bot {
             .await?
             .ok_or(BotError::NotSession { thread })?;
         self.state().supervisor.stop_and_wait(self, thread).await?;
+        let user_messages = self.session_user_messages(thread).await?;
         let context = self.context()?.clone();
         info!(thread = ?thread, "deleting session thread...");
         thread.delete(&context.http, None).await?;
         info!(thread = ?thread, "deleted session thread");
         self.db().delete_session(thread).await?;
-        self.import_session(&row.agent_key, &row.session_id).await
+        let reloaded_thread = self.import_session(&row.agent_key, &row.session_id).await?;
+        for (index, message) in user_messages.iter().enumerate() {
+            debug!(
+                thread = ?reloaded_thread,
+                message = index + 1,
+                messages = user_messages.len(),
+                "restoring user message through webhook..."
+            );
+            self.mirror_user_message(reloaded_thread, message).await?;
+        }
+        info!(
+            thread = ?reloaded_thread,
+            messages = user_messages.len(),
+            "restored user messages"
+        );
+        Ok(reloaded_thread)
+    }
+
+    /// Reads user-authored prompt messages before a session thread is rebuilt.
+    async fn session_user_messages(
+        &self,
+        thread: serenity::all::GenericChannelId,
+    ) -> BotResult<Vec<String>> {
+        debug!(thread = ?thread, "reading user messages from session thread...");
+        let context = self.context()?.clone();
+        let mut messages = Vec::new();
+        let history = thread.messages_iter(&context.http);
+        serenity::futures::pin_mut!(history);
+        while let Some(result) = history.next().await {
+            let message = result?;
+            if message.author.id == self.config().discord.allowed_user_id
+                && !message.content.trim().is_empty()
+            {
+                messages.push(message.content.to_string());
+            }
+        }
+        messages.reverse();
+        debug!(
+            thread = ?thread,
+            messages = messages.len(),
+            "read user messages from session thread"
+        );
+        Ok(messages)
     }
 
     /// Returns cached ACP configuration options for an active session.
