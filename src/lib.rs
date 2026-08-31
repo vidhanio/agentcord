@@ -247,6 +247,11 @@ impl EventHandler for Bot {
                     warn!(?error, thread = ?thread.id, "failed to remove unmanaged forum thread");
                 }
             }
+            FullEvent::ThreadUpdate { old, new, .. } => {
+                if let Err(error) = self.handle_forum_thread_update(old.as_ref(), new).await {
+                    warn!(?error, thread = ?new.id, "failed to handle forum thread update");
+                }
+            }
             FullEvent::ThreadDelete { thread, .. } => {
                 if let Err(error) = self.handle_thread_delete(thread).await {
                     warn!(?error, thread = ?thread.id, "failed to remove deleted session");

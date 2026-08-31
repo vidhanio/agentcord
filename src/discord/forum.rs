@@ -41,6 +41,17 @@ pub struct SessionMetadata {
 }
 
 impl SessionMetadata {
+    /// Builds display metadata from a persisted session binding.
+    fn from_row(row: &SessionRow, model: Option<&str>) -> Self {
+        Self {
+            agent_key: row.agent_key.clone(),
+            project_path: row.project_path.clone(),
+            session_id: row.session_id.clone(),
+            title: None,
+            model: model.map(str::to_owned),
+        }
+    }
+
     /// Builds a bounded forum title from this session's metadata.
     fn post_title(&self) -> String {
         let fallback = format!("session {}", self.session_id);
@@ -85,13 +96,7 @@ impl Bot {
         model: Option<&str>,
     ) -> BotResult {
         let context = self.context()?.clone();
-        let metadata = SessionMetadata {
-            agent_key: row.agent_key.clone(),
-            project_path: row.project_path.clone(),
-            session_id: row.session_id.clone(),
-            title: None,
-            model: model.map(str::to_owned),
-        };
+        let metadata = SessionMetadata::from_row(row, model);
         let starter_content = metadata.starter_message();
         debug!(thread = ?row.thread_id, "reading session starter message...");
         let messages = row
@@ -559,7 +564,7 @@ impl Bot {
         Ok(threads)
     }
 
-    /// Re-tags managed threads and deletes all other forum threads.
+    /// Reconciles active managed threads and deletes active unmanaged threads.
     async fn reconcile_threads(
         &self,
         context: &Context,
@@ -570,7 +575,7 @@ impl Bot {
             .sessions()
             .await?
             .into_iter()
-            .map(|session| (session.thread_id, session.agent_key))
+            .map(|session| (session.thread_id, session))
             .collect::<HashMap<_, _>>();
         debug!(managed = managed.len(), "loaded managed forum sessions");
         let forum = self.config().discord.forum_channel_id;
@@ -581,7 +586,11 @@ impl Bot {
         let mut failed = 0;
         let mut reconcile_error = None;
         for (thread_id, thread) in threads {
-            let Some(agent_key) = managed.get(&thread_id) else {
+            if thread.thread_metadata.archived() {
+                debug!(thread = ?thread_id, "leaving archived forum thread unmanaged");
+                continue;
+            }
+            let Some(row) = managed.get(&thread_id) else {
                 info!(thread = ?thread_id, "deleting unmanaged forum thread...");
                 match thread_id.delete(&context.http, None).await {
                     Ok(_) => {
@@ -598,9 +607,9 @@ impl Bot {
                 }
                 continue;
             };
-            let Some(tag) = tag_ids.get(agent_key).copied() else {
+            let Some(tag) = tag_ids.get(&row.agent_key).copied() else {
                 let error = BotError::MissingForumTag {
-                    agent_key: agent_key.to_string(),
+                    agent_key: row.agent_key.to_string(),
                 };
                 failed += 1;
                 warn!(?error, thread = ?thread_id, "failed to find session forum tag");
@@ -609,15 +618,15 @@ impl Bot {
                 }
                 continue;
             };
-            if let Err(error) = self.retag_thread(context, &thread, tag).await {
+            if let Err(error) = self.reconcile_thread(context, &thread, row, tag).await {
                 failed += 1;
-                warn!(?error, thread = ?thread_id, "failed to re-tag managed forum thread");
+                warn!(?error, thread = ?thread_id, "failed to reconcile managed forum thread");
                 if reconcile_error.is_none() {
                     reconcile_error = Some(error);
                 }
             } else {
                 retagged += 1;
-                debug!(thread = ?thread_id, agent = %agent_key, "re-tagged managed forum thread");
+                debug!(thread = ?thread_id, agent = %row.agent_key, "reconciled managed forum thread");
             }
         }
         info!(
@@ -627,50 +636,87 @@ impl Bot {
         reconcile_error.map_or(Ok(()), Err)
     }
 
-    /// Applies the configured tag while preserving an archived thread's state.
+    /// Stops managed sessions when archived and reconciles them when reopened.
+    pub(crate) async fn handle_forum_thread_update(
+        &self,
+        old: Option<&GuildThread>,
+        thread: &GuildThread,
+    ) -> BotResult {
+        if thread.parent_id != self.config().discord.forum_channel_id {
+            return Ok(());
+        }
+        let is_archived = thread.thread_metadata.archived();
+        if is_archived {
+            if old.is_some_and(|old| old.thread_metadata.archived()) {
+                return Ok(());
+            }
+        } else if old.is_some_and(|old| !old.thread_metadata.archived()) {
+            return Ok(());
+        }
+        let thread_id = thread.id.widen();
+        let Some(row) = self.db().session(thread_id).await? else {
+            return Ok(());
+        };
+        if is_archived {
+            info!(thread = ?thread_id, "stopping archived managed session...");
+            self.state()
+                .supervisor
+                .stop_and_wait(self, thread_id)
+                .await?;
+            info!(thread = ?thread_id, "stopped archived managed session");
+            return Ok(());
+        }
+
+        let context = self.context()?.clone();
+        let tag_ids = self.tag_ids(&context).await?;
+        let tag =
+            tag_ids
+                .get(&row.agent_key)
+                .copied()
+                .ok_or_else(|| BotError::MissingForumTag {
+                    agent_key: row.agent_key.to_string(),
+                })?;
+        self.reconcile_thread(&context, thread, &row, tag).await?;
+        self.state().supervisor.start(self, &row, Vec::new());
+        info!(thread = ?thread_id, "reconciled and loaded unarchived managed session");
+        Ok(())
+    }
+
+    /// Updates a managed thread's title and starter message along with its
+    /// configured tag.
+    async fn reconcile_thread(
+        &self,
+        context: &Context,
+        thread: &GuildThread,
+        row: &SessionRow,
+        tag: ForumTagId,
+    ) -> BotResult {
+        let metadata = SessionMetadata::from_row(row, None);
+        self.retag_thread(context, thread, row, tag, &metadata.post_title())
+            .await
+    }
+
+    /// Applies the configured title and tag to an active thread.
     async fn retag_thread(
         &self,
         context: &Context,
         thread: &GuildThread,
+        row: &SessionRow,
         tag: ForumTagId,
+        title: &str,
     ) -> BotResult {
-        let update = EditThread::new().applied_tags(vec![tag]);
-        if !thread.thread_metadata.archived() {
-            debug!(
-                thread = %thread.id,
-                tag = %tag,
-                "updating managed forum thread tag..."
-            );
-            return match thread.id.edit(&context.http, update).await {
-                Ok(_) => {
-                    debug!(thread = %thread.id, "updated managed forum thread tag");
-                    Ok(())
-                }
-                Err(error) => Err(error.into()),
-            };
+        let update = EditThread::new().name(title).applied_tags(vec![tag]);
+        if thread.thread_metadata.archived() {
+            return Ok(());
         }
-
         debug!(
             thread = %thread.id,
             tag = %tag,
-            "unarchiving managed forum thread to update its tag..."
+            "updating managed forum thread title and tag..."
         );
-        if let Err(error) = thread.id.edit(&context.http, update.archived(false)).await {
-            return Err(error.into());
-        }
-        debug!(thread = %thread.id, "unarchived managed forum thread");
-        debug!(thread = %thread.id, "re-archiving managed forum thread...");
-        let result = thread
-            .id
-            .edit(&context.http, EditThread::new().archived(true))
-            .await;
-        match result {
-            Ok(_) => {
-                debug!(thread = %thread.id, "re-archived managed forum thread");
-                Ok(())
-            }
-            Err(error) => Err(error.into()),
-        }
+        thread.id.edit(&context.http, update).await?;
+        debug!(thread = %thread.id, "updated managed forum thread title and tag");
+        self.update_session_starter(row, None).await
     }
 
     /// Fetches and validates the configured Discord forum channel.

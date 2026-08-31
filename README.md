@@ -29,10 +29,12 @@ The current rewrite implements the first conversation slice:
   current thread with `/recreate`, or refresh it from a fresh ACP history load
   with `/refresh`. New sessions show the model default advertised by ACP;
   `/model` changes it for the current session.
-- Startup reconciliation removes forum tags and threads that are not managed
-  by the configured agents and persisted sessions, and re-tags managed threads
-  to match their configured agent. Threads created by anyone other than the
-  bot are removed as they appear.
+- Startup reconciliation removes active forum threads that are not managed by
+  the configured agents and persisted sessions, and updates active managed
+  threads to match their configured agent, title, and starter message.
+  Archived threads remain untouched and are updated and loaded when they are
+  unarchived. Threads created by anyone other than the bot are removed as they
+  appear.
 
 ACP permission requests are presented as Discord buttons, with an optional
 `approve_all` policy for unattended operation. Elicitation, session controls,
