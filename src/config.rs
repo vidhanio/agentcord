@@ -48,6 +48,9 @@ pub struct AgentKey(
 pub struct Config {
     /// Discord connection and projection settings.
     pub discord: DiscordConfig,
+    /// Project path settings used by `/agent` and forum titles.
+    #[serde(default)]
+    pub projects: ProjectsConfig,
     /// Configured ACP agents keyed by stable identifier.
     pub agents: BTreeMap<AgentKey, AgentConfig>,
     /// Permission-response behavior.
@@ -56,6 +59,15 @@ pub struct Config {
     /// Operation time limits and render debounce interval.
     #[serde(default)]
     pub timeouts: Timeouts,
+}
+
+/// Project path settings used to resolve shorthand project selections.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ProjectsConfig {
+    /// Base directory for relative `/agent` project selections and title
+    /// labels.
+    #[serde(default)]
+    pub base_path: PathBuf,
 }
 
 /// Discord account, guild, user, and forum identifiers.
@@ -228,6 +240,7 @@ impl fmt::Debug for Config {
         formatter
             .debug_struct("Config")
             .field("discord", &self.discord)
+            .field("projects", &self.projects)
             .field("agents", &self.agents)
             .field("permissions", &self.permissions)
             .field("timeouts", &self.timeouts)
@@ -373,6 +386,7 @@ mod tests {
     use std::{
         collections::BTreeMap,
         fs,
+        path::PathBuf,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
@@ -388,6 +402,9 @@ mod tests {
             guild_id = 1
             allowed_user_id = 2
             forum_channel_id = 3
+
+            [projects]
+            base_path = "~/Projects"
 
             [agents.example]
             display_name = "Example Agent"
@@ -406,6 +423,9 @@ mod tests {
                 guild_id = 1
                 allowed_user_id = 2
                 forum_channel_id = 3
+
+                [projects]
+                base_path = "~/Projects"
 
                 [agents.example]
                 display_name = "Example Agent"
@@ -426,6 +446,7 @@ mod tests {
         .expect("valid configuration");
 
         assert_eq!(config.discord.guild_id, serenity::all::GuildId::new(1));
+        assert_eq!(config.projects.base_path, PathBuf::from("~/Projects"));
         assert_eq!(
             config.agents[&AgentKey::new("example")].args,
             vec![String::from("--stdio")]

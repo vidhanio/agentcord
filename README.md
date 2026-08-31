@@ -46,6 +46,11 @@ Agentcord loads `$XDG_CONFIG_HOME/agentcord/config.toml` by default. Override it
 with `--config` or `AGENTCORD_CONFIG`. `${NAME}` placeholders in string values
 are expanded after TOML parsing.
 
+Set `projects.base_path` to make relative `/agent` project selections resolve
+below a common directory and remove that prefix from forum-title project
+labels. For example, with `base_path = "~/Projects"`, `agentcord` resolves to
+`~/Projects/agentcord` and a project at that path is labeled `agentcord`.
+
 See [config.example.toml](config.example.toml) for the complete schema.
 
 ## Home Manager
@@ -64,6 +69,7 @@ See [config.example.toml](config.example.toml) for the complete schema.
         allowed_user_id = 456;
         forum_channel_id = 789;
       };
+      projects.base_path = "~/Projects";
       agents.example = {
         display_name = "Example";
         command = "example-acp";

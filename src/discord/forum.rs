@@ -14,7 +14,7 @@ use serenity::{
 };
 use tracing::{debug, info, warn};
 
-use super::shorten_home;
+use super::{expand_home, shorten_home};
 use crate::{
     Bot, BotError, BotResult,
     acp::default_model,
@@ -53,14 +53,14 @@ impl SessionMetadata {
     }
 
     /// Builds a bounded forum title from this session's metadata.
-    fn post_title(&self) -> String {
+    fn post_title(&self, base_path: &std::path::Path) -> String {
         let fallback = format!("session {}", self.session_id);
         let title = self
             .title
             .as_deref()
             .filter(|title| !title.trim().is_empty())
             .unwrap_or(&fallback);
-        let project_path = shorten_home(&self.project_path.display().to_string());
+        let project_path = project_title(&self.project_path, base_path);
         let raw = format!("{project_path} · {title}")
             .chars()
             .map(|character| {
@@ -269,7 +269,7 @@ impl Bot {
                 .ok_or_else(|| BotError::MissingForumTag {
                     agent_key: metadata.agent_key.to_string(),
                 })?;
-        let title = metadata.post_title();
+        let title = metadata.post_title(&self.config().projects.base_path);
         info!(
             agent = %metadata.agent_key,
             session = %metadata.session_id,
@@ -691,9 +691,16 @@ impl Bot {
         row: &SessionRow,
         tag: ForumTagId,
     ) -> BotResult {
-        let metadata = SessionMetadata::from_row(row, None);
-        self.retag_thread(context, thread, row, tag, &metadata.post_title())
-            .await
+        let mut metadata = SessionMetadata::from_row(row, None);
+        metadata.title = existing_session_title(thread, &row.session_id);
+        self.retag_thread(
+            context,
+            thread,
+            row,
+            tag,
+            &metadata.post_title(&self.config().projects.base_path),
+        )
+        .await
     }
 
     /// Applies the configured title and tag to an active thread.
@@ -843,6 +850,30 @@ fn configured_emoji_key(emoji: &TagEmoji) -> String {
     }
 }
 
+/// Returns the project path relative to the configured base when possible.
+fn project_title(path: &std::path::Path, base_path: &std::path::Path) -> String {
+    if !base_path.as_os_str().is_empty()
+        && let Ok(base_path) = expand_home(base_path)
+        && let Ok(relative) = path.strip_prefix(base_path)
+        && !relative.as_os_str().is_empty()
+    {
+        return relative.display().to_string();
+    }
+    shorten_home(&path.display().to_string())
+}
+
+/// Retains the title portion already rendered in a managed forum post.
+fn existing_session_title(thread: &GuildThread, session_id: &SessionId) -> Option<String> {
+    let fallback = format!("session {session_id}");
+    let title = thread
+        .base
+        .name
+        .rsplit_once(" · ")
+        .map(|(_, title)| title)
+        .filter(|title| !title.trim().is_empty() && *title != fallback)?;
+    Some(title.to_owned())
+}
+
 /// Escapes values embedded in inline Markdown code spans.
 fn escape_inline(value: &str) -> String {
     value.replace('`', "ˋ").replace(['\n', '\r'], " ")
@@ -859,4 +890,57 @@ fn truncate_end(value: &str, limit: usize) -> String {
         .collect::<String>();
     output.push('…');
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use agent_client_protocol::schema::v1::SessionId;
+
+    use super::{SessionMetadata, project_title};
+    use crate::config::AgentKey;
+
+    #[test]
+    fn forum_title_uses_relative_project_and_session_title() {
+        let metadata = SessionMetadata {
+            agent_key: AgentKey::new("example"),
+            project_path: PathBuf::from("/home/example/Projects/blah"),
+            session_id: SessionId::new("session-id"),
+            title: Some(String::from("A useful session")),
+            model: None,
+        };
+
+        assert_eq!(
+            metadata.post_title(PathBuf::from("/home/example/Projects").as_path()),
+            "blah · A useful session"
+        );
+    }
+
+    #[test]
+    fn forum_title_falls_back_to_session_id() {
+        let metadata = SessionMetadata {
+            agent_key: AgentKey::new("example"),
+            project_path: PathBuf::from("/work/blah"),
+            session_id: SessionId::new("session-id"),
+            title: None,
+            model: None,
+        };
+
+        assert_eq!(
+            metadata.post_title(PathBuf::from("/home/example/Projects").as_path()),
+            "/work/blah · session session-id"
+        );
+    }
+
+    #[test]
+    fn project_title_expands_tilde_base_path() {
+        let home = dirs::home_dir().expect("home directory");
+        let base = home.join("Projects");
+
+        assert_eq!(
+            project_title(&base.join("blah"), PathBuf::from("~/Projects").as_path()),
+            "blah"
+        );
+    }
 }
