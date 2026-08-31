@@ -2,7 +2,7 @@
 
 use std::{num::ParseIntError, path::PathBuf};
 
-use serenity::all::GenericChannelId;
+use serenity::{all::GenericChannelId, model::mention::Mentionable};
 
 /// Errors returned when parsing a `model[:reasoning]` selector.
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
@@ -179,7 +179,10 @@ pub enum BotError {
         key: String,
     },
     /// A command targeted a channel that is not an Agentcord session.
-    #[error("this is not an acp session in thread <#{thread}>")]
+    #[error(
+        "this is not an acp session in thread {mention}",
+        mention = .thread.mention()
+    )]
     NotSession {
         /// Discord thread supplied by the command or message handler.
         thread: GenericChannelId,
@@ -188,7 +191,10 @@ pub enum BotError {
     #[error("the session id is empty")]
     EmptySessionId,
     /// A session is already bound to a live Discord thread.
-    #[error("this session is already imported in thread <#{thread}>")]
+    #[error(
+        "this session is already imported in thread {mention}",
+        mention = .thread.mention()
+    )]
     AlreadyImported {
         /// Existing Discord thread.
         thread: GenericChannelId,

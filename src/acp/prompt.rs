@@ -6,7 +6,10 @@ use agent_client_protocol::{
     Agent, ConnectionTo,
     schema::v1::{ContentBlock, PromptRequest, SessionId},
 };
-use serenity::all::{CreateMessage, GenericChannelId};
+use serenity::{
+    all::{CreateMessage, GenericChannelId},
+    model::mention::Mentionable,
+};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -191,7 +194,8 @@ async fn run_prompt(
     request_task.abort();
     Err(PromptFailure::Connection(
         agent_client_protocol::Error::internal_error().data(format!(
-            "acp prompt did not finish after session/cancel (thread <#{thread}>)"
+            "acp prompt did not finish after session/cancel (thread {})",
+            thread.mention()
         )),
     ))
 }
