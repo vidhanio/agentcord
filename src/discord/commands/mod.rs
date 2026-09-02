@@ -35,6 +35,7 @@ pub fn framework(bot: &Bot) -> BotFramework {
                     model::model(),
                     recreate::recreate(),
                     refresh::refresh(),
+                    session::session(),
                 ],
                 on_error,
                 ..Default::default()
@@ -191,3 +192,4 @@ mod import;
 mod model;
 mod recreate;
 mod refresh;
+mod session;

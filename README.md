@@ -28,7 +28,8 @@ The current rewrite implements the first conversation slice:
   with autocomplete suggestions from persisted project paths,
   import one exposed by an agent's `session/list` with `/import`, recreate the
   current thread with `/recreate`, or refresh it from a fresh ACP history load
-  with `/refresh`. New sessions show the model default advertised by ACP;
+  with `/refresh`. `/session` shows the current thread's first message
+  ephemerally. New sessions show the model default advertised by ACP;
   `/model` changes it for the current session.
 - Startup reconciliation removes active forum threads that are not managed by
   the configured agents and persisted sessions, and updates active managed
