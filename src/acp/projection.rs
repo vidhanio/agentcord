@@ -8,7 +8,10 @@ use std::{
 use agent_client_protocol::schema::v1::SessionConfigOption;
 use tokio::sync::mpsc;
 
-use crate::{acp::runtime::Signal, discord::render::ProjectionEvent};
+use crate::{
+    acp::{ContextUsage, runtime::Signal},
+    discord::render::ProjectionEvent,
+};
 
 /// Notification and lifecycle state for one active ACP connection.
 #[derive(Clone, Debug)]
@@ -25,6 +28,8 @@ pub(super) struct ProjectionState {
     pub(super) stop: Arc<Signal>,
     /// Cached session configuration advertised by the agent.
     pub(super) config_options: Arc<Mutex<Vec<SessionConfigOption>>>,
+    /// Latest context-window usage reported by the agent.
+    pub(super) context_usage: Arc<Mutex<Option<ContextUsage>>>,
 }
 
 impl ProjectionState {
@@ -65,6 +70,14 @@ impl ProjectionState {
             .lock()
             .expect("acp session config mutex poisoned")
             .clone()
+    }
+
+    /// Replaces the cached context-window usage.
+    pub(super) fn set_context_usage(&self, usage: ContextUsage) {
+        *self
+            .context_usage
+            .lock()
+            .expect("acp context usage mutex poisoned") = Some(usage);
     }
 }
 

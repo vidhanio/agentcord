@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
 use super::{
-    actor,
+    ContextUsage, actor,
     model::ModelSpec,
     protocol::{NewSession, NewSessionConnection},
     runtime::Signal,
@@ -48,6 +48,8 @@ pub(super) struct ActorEntry {
     pub(super) done: oneshot::Receiver<()>,
     /// Cached session configuration used by command autocomplete.
     pub(super) config_options: Arc<Mutex<Vec<SessionConfigOption>>>,
+    /// Cached context-window usage reported by the agent.
+    pub(super) context_usage: Arc<Mutex<Option<ContextUsage>>>,
 }
 
 /// Command delivered to a session actor.
@@ -223,6 +225,8 @@ impl Supervisor {
         let actor_row = row.clone();
         let config_options = Arc::new(Mutex::new(config_options));
         let actor_config_options = Arc::clone(&config_options);
+        let context_usage = Arc::new(Mutex::new(None));
+        let actor_context_usage = Arc::clone(&context_usage);
         let registry = self.actors.clone();
         let (done_sender, done_receiver) = oneshot::channel();
         tokio::spawn(async move {
@@ -232,6 +236,7 @@ impl Supervisor {
                 commands,
                 actor_stop,
                 actor_config_options,
+                actor_context_usage,
                 startup,
             )
             .await;
@@ -265,6 +270,7 @@ impl Supervisor {
                 stop,
                 done: done_receiver,
                 config_options,
+                context_usage,
             },
         );
         drop(actors);
@@ -297,6 +303,16 @@ impl Supervisor {
                 .expect("acp session config mutex poisoned")
                 .clone(),
         )
+    }
+
+    /// Returns a snapshot of an active session's context-window usage.
+    pub fn session_context_usage(&self, thread: GenericChannelId) -> Option<ContextUsage> {
+        let actors = self.actors();
+        let context_usage = actors.get(&thread)?.context_usage.clone();
+        drop(actors);
+        *context_usage
+            .lock()
+            .expect("acp context usage mutex poisoned")
     }
 }
 

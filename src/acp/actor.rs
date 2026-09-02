@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use super::{
-    connection,
+    ContextUsage, connection,
     projection::{ProjectionState, collect_batch},
     protocol,
     registry::{ActorStartup, SessionCommand},
@@ -25,6 +25,7 @@ pub(super) async fn run(
     commands: mpsc::Receiver<SessionCommand>,
     stop: Arc<Signal>,
     config_options: Arc<Mutex<Vec<SessionConfigOption>>>,
+    context_usage: Arc<Mutex<Option<ContextUsage>>>,
     startup: ActorStartup,
 ) -> Result<(), agent_client_protocol::Error> {
     info!(
@@ -41,6 +42,7 @@ pub(super) async fn run(
         fault: Arc::new(Signal::default()),
         stop,
         config_options,
+        context_usage,
     };
     let thread = row.thread_id;
     let edit_debounce = bot.config().timeouts.edit_debounce;

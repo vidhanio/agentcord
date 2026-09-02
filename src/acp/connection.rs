@@ -4,7 +4,7 @@ use agent_client_protocol::{
     AcpAgent, Agent, Client, ConnectionTo, Dispatch, HandleDispatchFrom, Handled, Responder,
     schema::v1::{
         LoadSessionRequest, RequestPermissionRequest, RequestPermissionResponse, SessionId,
-        SessionNotification,
+        SessionNotification, SessionUpdate,
     },
     util::MatchDispatchFrom,
 };
@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use super::{
+    ContextUsage,
     model::default_model,
     projection::ProjectionState,
     prompt::run_commands,
@@ -277,23 +278,40 @@ async fn enqueue_notification(
         );
         return Ok(());
     }
-    if let SessionNotification {
-        update: agent_client_protocol::schema::v1::SessionUpdate::ConfigOptionUpdate(update),
-        ..
-    } = &notification
-    {
-        projection.set_config_options(update.config_options.clone());
-        let current_model = default_model(&update.config_options);
-        if let Err(error) = bot
-            .update_session_starter(row, current_model.as_deref())
-            .await
-        {
-            warn!(
-                ?error,
-                thread = ?thread,
-                "failed to update session starter after acp `session/update`"
-            );
+    match &notification.update {
+        SessionUpdate::ConfigOptionUpdate(update) => {
+            projection.set_config_options(update.config_options.clone());
+            let current_model = default_model(&update.config_options);
+            if let Err(error) = bot
+                .update_session_starter(row, current_model.as_deref())
+                .await
+            {
+                warn!(
+                    ?error,
+                    thread = ?thread,
+                    "failed to update session starter after acp `session/update`"
+                );
+            }
         }
+        SessionUpdate::UsageUpdate(update) => {
+            let context_usage = ContextUsage {
+                used: update.used,
+                size: update.size,
+            };
+            projection.set_context_usage(context_usage);
+            let current_model = default_model(&projection.config_options());
+            if let Err(error) = bot
+                .update_session_starter(row, current_model.as_deref())
+                .await
+            {
+                warn!(
+                    ?error,
+                    thread = ?thread,
+                    "failed to update session starter after acp context usage update"
+                );
+            }
+        }
+        _ => {}
     }
     projection
         .updates

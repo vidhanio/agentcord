@@ -16,6 +16,14 @@ mod runtime;
 pub use model::{ModelSpec, category_values, default_model};
 pub use protocol::ListedSession;
 pub use registry::Supervisor;
+/// Current ACP context-window usage for a session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextUsage {
+    /// Number of tokens currently in the context window.
+    pub used: u64,
+    /// Total number of tokens available in the context window.
+    pub size: u64,
+}
 
 use crate::{
     Bot, BotError, BotResult,

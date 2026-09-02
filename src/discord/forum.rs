@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 use super::project_label;
 use crate::{
     Bot, BotError, BotResult,
-    acp::default_model,
+    acp::{ContextUsage, default_model},
     config::{AgentKey, TagEmoji},
     db::SessionRow,
 };
@@ -38,17 +38,24 @@ pub struct SessionMetadata {
     pub title: Option<String>,
     /// Current ACP model shown in the starter message; not persisted locally.
     pub model: Option<String>,
+    /// Latest ACP context-window usage shown in the starter message.
+    pub(crate) context_usage: Option<ContextUsage>,
 }
 
 impl SessionMetadata {
     /// Builds display metadata from a persisted session binding.
-    fn from_row(row: &SessionRow, model: Option<&str>) -> Self {
+    fn from_row(
+        row: &SessionRow,
+        model: Option<&str>,
+        context_usage: Option<ContextUsage>,
+    ) -> Self {
         Self {
             agent_key: row.agent_key.clone(),
             project_path: row.project_path.clone(),
             session_id: row.session_id.clone(),
             title: None,
             model: model.map(str::to_owned),
+            context_usage,
         }
     }
 
@@ -74,29 +81,34 @@ impl SessionMetadata {
         truncate_end(raw.trim(), FORUM_TITLE_LIMIT)
     }
 
-    /// Renders the immutable starter message for this session post.
+    /// Renders the starter message for this session post.
     fn starter_message(&self) -> String {
         let model = self
             .model
             .as_deref()
             .map(|model| format!(" · model `{}`", escape_inline(model)))
             .unwrap_or_default();
+        let context = self.context_usage.map_or_else(String::new, |usage| {
+            format!(" · {}", format_context_usage(usage))
+        });
         format!(
-            "session `{}`{model}",
+            "session `{}`{model}{context}",
             escape_inline(&self.session_id.to_string())
         )
     }
 }
 
 impl Bot {
-    /// Updates the first session message with the current ACP model.
+    /// Updates the first session message with the current ACP model and
+    /// context-window usage.
     pub(crate) async fn update_session_starter(
         &self,
         row: &SessionRow,
         model: Option<&str>,
     ) -> BotResult {
         let context = self.context()?.clone();
-        let metadata = SessionMetadata::from_row(row, model);
+        let context_usage = self.state().supervisor.session_context_usage(row.thread_id);
+        let metadata = SessionMetadata::from_row(row, model, context_usage);
         let starter_content = metadata.starter_message();
         debug!(thread = ?row.thread_id, "reading session starter message...");
         let messages = row
@@ -155,6 +167,7 @@ impl Bot {
             session_id: created.session_id.clone(),
             title: None,
             model,
+            context_usage: None,
         };
         let row = self.create_and_store_session(&metadata).await?;
         self.state().supervisor.start_new(self, &row, created);
@@ -227,6 +240,7 @@ impl Bot {
             session_id: imported.session_id,
             title: imported.title,
             model: None,
+            context_usage: None,
         };
         let row = self.create_and_store_session(&metadata).await?;
         self.state().supervisor.start(self, &row, Vec::new());
@@ -691,7 +705,11 @@ impl Bot {
         row: &SessionRow,
         tag: ForumTagId,
     ) -> BotResult {
-        let mut metadata = SessionMetadata::from_row(row, None);
+        let mut metadata = SessionMetadata::from_row(
+            row,
+            None,
+            self.state().supervisor.session_context_usage(row.thread_id),
+        );
         metadata.title = existing_session_title(thread, &row.session_id);
         self.retag_thread(
             context,
@@ -867,6 +885,29 @@ fn escape_inline(value: &str) -> String {
     value.replace('`', "ˋ").replace(['\n', '\r'], " ")
 }
 
+/// Formats ACP context usage for the session starter message.
+fn format_context_usage(usage: ContextUsage) -> String {
+    let percent_tenths = if usage.size == 0 {
+        0
+    } else {
+        (u128::from(usage.used) * 1_000 + u128::from(usage.size) / 2) / u128::from(usage.size)
+    };
+    format!(
+        "context `{}.{:01}%/{}`",
+        percent_tenths / 10,
+        percent_tenths % 10,
+        format_context_size(usage.size)
+    )
+}
+
+/// Formats a context-window size using decimal token units.
+fn format_context_size(size: u64) -> String {
+    if size < 1_000 {
+        size.to_string()
+    } else {
+        format!("{}K", size / 1_000)
+    }
+}
 /// Truncates without splitting a Unicode scalar value.
 fn truncate_end(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
@@ -887,7 +928,7 @@ mod tests {
     use agent_client_protocol::schema::v1::SessionId;
 
     use super::SessionMetadata;
-    use crate::{config::AgentKey, discord::project_label};
+    use crate::{acp::ContextUsage, config::AgentKey, discord::project_label};
 
     #[test]
     fn forum_title_uses_relative_project_and_session_title() {
@@ -897,6 +938,7 @@ mod tests {
             session_id: SessionId::new("session-id"),
             title: Some(String::from("A useful session")),
             model: None,
+            context_usage: None,
         };
 
         assert_eq!(
@@ -913,11 +955,32 @@ mod tests {
             session_id: SessionId::new("session-id"),
             title: None,
             model: None,
+            context_usage: None,
         };
 
         assert_eq!(
             metadata.post_title(PathBuf::from("/home/example/Projects").as_path()),
             "/work/blah · session session-id"
+        );
+    }
+
+    #[test]
+    fn starter_message_includes_context_usage() {
+        let metadata = SessionMetadata {
+            agent_key: AgentKey::new("example"),
+            project_path: PathBuf::from("/work/blah"),
+            session_id: SessionId::new("session-id"),
+            title: None,
+            model: Some(String::from("model")),
+            context_usage: Some(ContextUsage {
+                used: 15_776,
+                size: 272_000,
+            }),
+        };
+
+        assert_eq!(
+            metadata.starter_message(),
+            "session `session-id` · model `model` · context `5.8%/272K`"
         );
     }
 
