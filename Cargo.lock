@@ -907,14 +907,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "derivative"
-version = "2.2.0"
+name = "derive-where"
+version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcc3dd5e9e9c0b295d6e1e4d811fb6f157d5ffd784b8d202fc62eac8035a770b"
+checksum = "d08b3a0bcc0d079199cd476b2cae8435016ec11d1c0986c6901c5ac223041534"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 1.0.109",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2193,13 +2193,12 @@ dependencies = [
 
 [[package]]
 name = "poise"
-version = "0.6.1"
-source = "git+https://github.com/serenity-rs/poise?branch=serenity-next#cb4a95b6634d486f0c345f0ecb0a81d8099619e7"
+version = "0.7.0"
+source = "git+https://github.com/serenity-rs/poise?branch=serenity-next#b2aa35f91d2aaa88fe127e4274bde0eefd7af761"
 dependencies = [
  "async-trait",
- "derivative",
+ "derive-where",
  "futures-util",
- "indexmap 2.14.0",
  "parking_lot",
  "poise_macros",
  "regex",
@@ -2211,8 +2210,8 @@ dependencies = [
 
 [[package]]
 name = "poise_macros"
-version = "0.6.1"
-source = "git+https://github.com/serenity-rs/poise?branch=serenity-next#cb4a95b6634d486f0c345f0ecb0a81d8099619e7"
+version = "0.7.0"
+source = "git+https://github.com/serenity-rs/poise?branch=serenity-next#b2aa35f91d2aaa88fe127e4274bde0eefd7af761"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -2906,7 +2905,7 @@ dependencies = [
 [[package]]
 name = "serenity"
 version = "0.12.5"
-source = "git+https://github.com/serenity-rs/serenity?branch=next#37b9f433ada8b9ccc5f93f04826403b175855f86"
+source = "git+https://github.com/serenity-rs/serenity?branch=next#98ec74223b0ff77fc4e8085d25569ea59e09a36f"
 dependencies = [
  "aformat",
  "arrayvec",
@@ -3107,17 +3106,6 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
-name = "syn"
-version = "1.0.109"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
-dependencies = [
- "proc-macro2",
- "quote",
- "unicode-ident",
-]
 
 [[package]]
 name = "syn"
@@ -3627,9 +3615,9 @@ dependencies = [
 
 [[package]]
 name = "trim-in-place"
-version = "0.1.7"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "343e926fc669bc8cde4fa3129ab681c63671bae288b1f1081ceee6d9d37904fc"
+checksum = "e7d6719f139c2eebdc67eb3c1bae4fe8f70923492acac034c2d425742e08f80d"
 
 [[package]]
 name = "try-lock"
@@ -3927,7 +3915,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
