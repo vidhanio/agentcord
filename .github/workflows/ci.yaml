@@ -16,7 +16,7 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
@@ -34,7 +34,7 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
@@ -52,7 +52,7 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: install rust
         uses: dtolnay/rust-toolchain@nightly
@@ -75,7 +75,7 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: install rust
         uses: dtolnay/rust-toolchain@nightly
@@ -96,7 +96,7 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: setup nix
         uses: ./.github/actions/setup-nix
@@ -111,7 +111,7 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: setup nix
         uses: ./.github/actions/setup-nix
